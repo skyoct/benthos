@@ -105,6 +105,7 @@ require (
 	github.com/smira/go-statsd v1.3.2
 	github.com/snowflakedb/gosnowflake v1.6.6
 	github.com/stretchr/testify v1.7.0
+	github.com/tencentyun/cos-go-sdk-v5 v0.7.34
 	github.com/tilinna/z85 v1.0.0
 	github.com/twmb/franz-go v1.3.1
 	github.com/twmb/franz-go/pkg/kmsg v0.0.0-20220106200407-cfd3330d96f5

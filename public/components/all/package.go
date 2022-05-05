@@ -16,6 +16,7 @@ import (
 	_ "github.com/benthosdev/benthos/v4/internal/impl/azure"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/cassandra"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/confluent"
+	_ "github.com/benthosdev/benthos/v4/internal/impl/cos"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/dgraph"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/elasticsearch"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/gcp"
