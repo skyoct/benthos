@@ -16,11 +16,11 @@ func cosOutputConfig() *service.ConfigSpec {
 		Categories("Services").
 		Summary("Sends message parts as files to a cos.").
 		Description(``).
-		Field(service.NewStringField("url")).
-		Field(service.NewStringField("secret_id")).
-		Field(service.NewStringField("secret_key")).
-		Field(service.NewInterpolatedStringField("directory")).
-		Field(service.NewInterpolatedStringField("path")).
+		Field(service.NewStringField("url").Description("Access the domain name of the cos bucket.")).
+		Field(service.NewStringField("secret_id").Description("User's Secret ID.")).
+		Field(service.NewStringField("secret_key").Description("User's Secret key.")).
+		Field(service.NewInterpolatedStringField("directory").Description("A directory to store message files within. If the directory does not exist it will be created.")).
+		Field(service.NewInterpolatedStringField("path").Description("The path of each message to upload.")).
 		Field(service.NewIntField("max_in_flight").
 			Description("The maximum number of inserts to run in parallel.").
 			Default(64))
