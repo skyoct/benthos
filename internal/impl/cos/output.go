@@ -108,23 +108,16 @@ func (c *cosOutput) Connect(ctx context.Context) error {
 }
 
 func (c *cosOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
-	key := ""
-	var data bytes.Buffer
 	for _, msg := range batch {
-		if key == "" {
-			key = c.directory.String(msg) + c.path.String(msg)
-		}
-		content, err := msg.AsBytes()
+		data, err := msg.AsBytes()
 		if err != nil {
 			return err
 		}
-		data.Write(content)
-		data.WriteString("\n")
-	}
-	dataBytes := data.Bytes()
-	_, err := c.client.Object.Put(ctx, key, bytes.NewReader(dataBytes), nil)
-	if err != nil {
-		return err
+		key := c.directory.String(msg) + c.path.String(msg)
+		_, err = c.client.Object.Put(ctx, key, bytes.NewReader(data), nil)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
