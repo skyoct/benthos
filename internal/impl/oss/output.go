@@ -33,7 +33,8 @@ func cosOutputConfig() *service.ConfigSpec {
 			`
 output:
   cos:
-    url: https://xxxxxxx.cos.ap-beijing.myqcloud.com
+    endpoint: xxxxx
+    bucket: xxxx
     secret_id: xxxxxxxxxxxxxx
     secret_key: xxxxxxxxxxxxxx
     directory: /usr/hive/warehouse/test.db/test_topic_02/ds=${!now().format_timestamp("2006-01-02")}/hr=${!now().format_timestamp("15")}/
@@ -50,7 +51,7 @@ output:
 }
 
 func init() {
-	service.RegisterBatchOutput("cos", cosOutputConfig(), func(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPolicy service.BatchPolicy, maxInFlight int, err error) {
+	service.RegisterBatchOutput("oss", cosOutputConfig(), func(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPolicy service.BatchPolicy, maxInFlight int, err error) {
 		if batchPolicy, err = conf.FieldBatchPolicy("batching"); err != nil {
 			return
 		}
