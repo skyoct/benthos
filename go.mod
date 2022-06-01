@@ -23,6 +23,7 @@ require (
 	github.com/Masterminds/squirrel v1.5.2
 	github.com/OneOfOne/xxhash v1.2.8
 	github.com/Shopify/sarama v1.30.1
+	github.com/aliyun/aliyun-oss-go-sdk v2.2.4+incompatible
 	github.com/apache/pulsar-client-go v0.7.0
 	github.com/apache/pulsar-client-go/oauth2 v0.0.0-20220210221528-5daa17b02bff // indirect
 	github.com/apache/thrift v0.15.0 // indirect
@@ -32,6 +33,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.15.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.4.0 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.9.1 // indirect
+	github.com/baiyubin/aliyun-sts-go-sdk v0.0.0-20180326062324-cfa1a18b161f // indirect
 	github.com/benhoyt/goawk v1.13.1-0.20220123120908-f9c293546b6d
 	github.com/bradfitz/gomemcache v0.0.0-20220106215444-fb4bf637b56d
 	github.com/cenkalti/backoff/v4 v4.1.2
@@ -100,6 +102,7 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475
 	github.com/rickb777/date v1.17.0
 	github.com/robfig/cron/v3 v3.0.1
+	github.com/satori/go.uuid v1.2.0 // indirect
 	github.com/segmentio/ksuid v1.0.4
 	github.com/sirupsen/logrus v1.8.1
 	github.com/smira/go-statsd v1.3.2
