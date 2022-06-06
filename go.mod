@@ -81,6 +81,7 @@ require (
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.17
 	github.com/minio/highwayhash v1.0.2 // indirect
+	github.com/minio/minio-go/v7 v7.0.27
 	github.com/mitchellh/mapstructure v1.4.3
 	github.com/moby/term v0.0.0-20210619224110-3f7ff695adc6 // indirect
 	github.com/nats-io/nats-streaming-server v0.24.1 // indirect

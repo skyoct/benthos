@@ -27,6 +27,7 @@ import (
 	_ "github.com/benthosdev/benthos/v4/internal/impl/kafka"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/maxmind"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/memcached"
+	_ "github.com/benthosdev/benthos/v4/internal/impl/minio"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/mongodb"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/mqtt"
 	_ "github.com/benthosdev/benthos/v4/internal/impl/msgpack"
