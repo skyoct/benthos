@@ -6,9 +6,6 @@ WORKDIR /build
 
 ENV GOPROXY https://goproxy.cn,direct
 
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
-  apk add --no-cache upx ca-certificates tzdata
-
 COPY . .
 
 RUN go mod download
@@ -22,6 +19,9 @@ FROM alpine as runner
 COPY --from=builder /build/app /app
 
 WORKDIR /
+
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+  apk add --no-cache upx ca-certificates tzdata
 
 RUN apk add tzdata && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone \
