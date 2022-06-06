@@ -1,0 +1,16 @@
+stages:
+  - build
+
+variables:
+  appname: metaapp-benthos
+
+build_job:
+  stage: build
+  only:
+    - master
+  script:
+    - Tag=$(echo "${CI_COMMIT_REF_NAME}-$(date +%Y%m%d)-v${CI_PIPELINE_IID}")
+    - docker build -t "metaapp-registry-vpc.cn-beijing.cr.aliyuncs.com/metaops/${appname}:$Tag" .
+    - docker push metaapp-registry-vpc.cn-beijing.cr.aliyuncs.com/metaops/${appname}:$Tag
+
+  when: manual
