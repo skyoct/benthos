@@ -32,4 +32,4 @@ EXPOSE 4195
 
 ENTRYPOINT ["/app"]
 
-CMD ["-c", "/config.yaml"]
+CMD ["-c", "/config/config.yaml"]
