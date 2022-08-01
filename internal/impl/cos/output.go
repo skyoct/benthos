@@ -114,6 +114,7 @@ func (c *cosOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 			return err
 		}
 		key := c.directory.String(msg) + c.path.String(msg)
+		c.logger.Infof("Writing to COS: %s", key)
 		_, err = c.client.Object.Put(ctx, key, bytes.NewReader(data), nil)
 		if err != nil {
 			return err
