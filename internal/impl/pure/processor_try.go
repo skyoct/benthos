@@ -3,24 +3,22 @@ package pure
 import (
 	"context"
 	"strconv"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newTryProc(conf.Try, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("try", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("try", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "try",
 		Categories: []string{
@@ -70,7 +68,7 @@ pipeline:
 
 
 `,
-		Config: docs.FieldProcessor("", "").Array().HasDefault([]interface{}{}),
+		Config: docs.FieldProcessor("", "").Array().HasDefault([]any{}),
 	})
 	if err != nil {
 		panic(err)
@@ -82,10 +80,10 @@ type tryProc struct {
 	log      log.Modular
 }
 
-func newTryProc(conf []oprocessor.Config, mgr bundle.NewManagement) (*tryProc, error) {
+func newTryProc(conf []processor.Config, mgr bundle.NewManagement) (*tryProc, error) {
 	var children []processor.V1
 	for i, pconf := range conf {
-		pMgr := mgr.IntoPath("try", strconv.Itoa(i)).(bundle.NewManagement)
+		pMgr := mgr.IntoPath("try", strconv.Itoa(i))
 		proc, err := pMgr.NewProcessor(pconf)
 		if err != nil {
 			return nil, err
@@ -98,24 +96,22 @@ func newTryProc(conf []oprocessor.Config, mgr bundle.NewManagement) (*tryProc, e
 	}, nil
 }
 
-func (p *tryProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
-	resultMsgs := make([]*message.Batch, msg.Len())
+func (p *tryProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
+	resultMsgs := make([]message.Batch, msg.Len())
 	_ = msg.Iter(func(i int, p *message.Part) error {
-		tmpMsg := message.QuickBatch(nil)
-		tmpMsg.SetAll([]*message.Part{p})
-		resultMsgs[i] = tmpMsg
+		resultMsgs[i] = message.Batch{p}
 		return nil
 	})
 
 	var res error
-	if resultMsgs, res = oprocessor.ExecuteTryAll(p.children, resultMsgs...); res != nil || len(resultMsgs) == 0 {
+	if resultMsgs, res = processor.ExecuteTryAll(ctx, p.children, resultMsgs...); res != nil || len(resultMsgs) == 0 {
 		return nil, res
 	}
 
 	resMsg := message.QuickBatch(nil)
 	for _, m := range resultMsgs {
 		_ = m.Iter(func(i int, p *message.Part) error {
-			resMsg.Append(p)
+			resMsg = append(resMsg, p)
 			return nil
 		})
 	}
@@ -123,20 +119,13 @@ func (p *tryProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *mess
 		return nil, res
 	}
 
-	resMsgs := [1]*message.Batch{resMsg}
+	resMsgs := [1]message.Batch{resMsg}
 	return resMsgs[:], nil
 }
 
 func (p *tryProc) Close(ctx context.Context) error {
 	for _, c := range p.children {
-		c.CloseAsync()
-	}
-	deadline, exists := ctx.Deadline()
-	if !exists {
-		deadline = time.Now().Add(time.Second * 5)
-	}
-	for _, c := range p.children {
-		if err := c.WaitForClose(time.Until(deadline)); err != nil {
+		if err := c.Close(ctx); err != nil {
 			return err
 		}
 	}

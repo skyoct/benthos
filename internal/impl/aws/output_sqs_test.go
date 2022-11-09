@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func TestSQSHeaderCheck(t *testing.T) {
@@ -127,7 +127,7 @@ type inEntries []inMsg
 func TestSQSRetries(t *testing.T) {
 	tCtx := context.Background()
 
-	conf := ooutput.NewAmazonSQSConfig()
+	conf := output.NewAmazonSQSConfig()
 	w, err := newSQSWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
@@ -172,7 +172,7 @@ func TestSQSRetries(t *testing.T) {
 		[]byte("hello world 2"),
 		[]byte("hello world 3"),
 	})
-	require.NoError(t, w.WriteWithContext(tCtx, inMsg))
+	require.NoError(t, w.WriteBatch(tCtx, inMsg))
 
 	assert.Equal(t, []inEntries{
 		{
@@ -189,7 +189,7 @@ func TestSQSRetries(t *testing.T) {
 func TestSQSSendLimit(t *testing.T) {
 	tCtx := context.Background()
 
-	conf := ooutput.NewAmazonSQSConfig()
+	conf := output.NewAmazonSQSConfig()
 	w, err := newSQSWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
@@ -221,9 +221,9 @@ func TestSQSSendLimit(t *testing.T) {
 
 	inMsg := message.QuickBatch(nil)
 	for i := 0; i < 15; i++ {
-		inMsg.Append(message.NewPart([]byte(fmt.Sprintf("hello world %v", i+1))))
+		inMsg = append(inMsg, message.NewPart([]byte(fmt.Sprintf("hello world %v", i+1))))
 	}
-	require.NoError(t, w.WriteWithContext(tCtx, inMsg))
+	require.NoError(t, w.WriteBatch(tCtx, inMsg))
 
 	assert.Equal(t, []inEntries{
 		{

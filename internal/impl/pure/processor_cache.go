@@ -12,19 +12,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newCache(conf.Cache, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("cache", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("cache", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "cache",
 		Categories: []string{
@@ -33,6 +31,8 @@ func init() {
 		Summary: `
 Performs operations against a [cache resource](/docs/components/caches/about) for each message, allowing you to store or retrieve data within message payloads.`,
 		Description: `
+For use cases where you wish to cache the result of processors consider using the ` + "[`cached` processor](/docs/components/processors/cached)" + ` instead.
+
 This processor will interpolate functions within the ` + "`key` and `value`" + ` fields individually for each message. This allows you to specify dynamic keys and values based on the contents of the message payloads and metadata. You can find a list of functions [here](/docs/configuration/interpolation#bloblang-queries).`,
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldString("resource", "The [`cache` resource](/docs/components/caches/about) to target with this processor."),
@@ -43,7 +43,7 @@ This processor will interpolate functions within the ` + "`key` and `value`" + `
 				"ttl", "The TTL of each individual item as a duration string. After this period an item will be eligible for removal during the next compaction. Not all caches support per-key TTLs, those that do will have a configuration field `default_ttl`, and those that do not will fall back to their generally configured TTL setting.",
 				"60s", "5m", "36h",
 			).IsInterpolated().AtVersion("3.33.0").Advanced(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewCacheConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewCacheConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title: "Deduplication",
@@ -51,7 +51,7 @@ This processor will interpolate functions within the ` + "`key` and `value`" + `
 Deduplication can be done using the add operator with a key extracted from the
 message payload, since it fails when a key already exists we can remove the
 duplicates using a
-[` + "`bloblang` processor" + `](/docs/components/processors/bloblang):`,
+[` + "`mapping` processor" + `](/docs/components/processors/mapping):`,
 				Config: `
 pipeline:
   processors:
@@ -60,7 +60,7 @@ pipeline:
         operator: add
         key: '${! json("message.id") }'
         value: "storeme"
-    - bloblang: root = if errored() { deleted() }
+    - mapping: root = if errored() { deleted() }
 
 cache_resources:
   - label: foocache
@@ -87,7 +87,7 @@ pipeline:
               key: ${! content() }
               value: t
     # Delete all messages if we failed
-    - bloblang: |
+    - mapping: |
         root = if errored().from(0) {
           deleted()
         }
@@ -157,12 +157,12 @@ type cacheProc struct {
 	value *field.Expression
 	ttl   *field.Expression
 
-	mgr       interop.Manager
+	mgr       bundle.NewManagement
 	cacheName string
 	operator  cacheOperator
 }
 
-func newCache(conf oprocessor.CacheConfig, mgr interop.Manager) (*cacheProc, error) {
+func newCache(conf processor.CacheConfig, mgr bundle.NewManagement) (*cacheProc, error) {
 	cacheName := conf.Resource
 	if cacheName == "" {
 		return nil, errors.New("cache name must be specified")
@@ -251,9 +251,8 @@ func cacheOperatorFromString(operator string) (cacheOperator, error) {
 
 //------------------------------------------------------------------------------
 
-func (c *cacheProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
-	resMsg := msg.Copy()
-	_ = resMsg.Iter(func(index int, part *message.Part) error {
+func (c *cacheProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
+	_ = msg.Iter(func(index int, part *message.Part) error {
 		key := c.key.String(index, msg)
 		value := c.value.Bytes(index, msg)
 
@@ -287,12 +286,12 @@ func (c *cacheProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg
 		}
 
 		if useResult {
-			part.Set(result)
+			part.SetBytes(result)
 		}
 		return nil
 	})
 
-	return []*message.Batch{resMsg}, nil
+	return []message.Batch{msg}, nil
 }
 
 func (c *cacheProc) Close(ctx context.Context) error {

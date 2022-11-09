@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	bmock "github.com/benthosdev/benthos/v4/internal/manager/mock"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,7 +31,7 @@ func TestInputWrapperSwap(t *testing.T) {
 	select {
 	case tran, open := <-iWrapper.TransactionChan():
 		require.True(t, open)
-		assert.Equal(t, `{"name":"from root generate"}`, string(tran.Payload.Get(0).Get()))
+		assert.Equal(t, `{"name":"from root generate"}`, string(tran.Payload.Get(0).AsBytes()))
 		assert.NoError(t, tran.Ack(ctx, nil))
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
@@ -59,7 +59,7 @@ func TestInputWrapperSwap(t *testing.T) {
 			case tran, open := <-iWrapper.TransactionChan():
 				require.True(t, open, i)
 
-				actual := string(tran.Payload.Get(0).Get())
+				actual := string(tran.Payload.Get(0).AsBytes())
 				assert.NoError(t, tran.Ack(ctx, nil), i)
 				if expected == actual {
 					break consumeLoop
@@ -70,6 +70,6 @@ func TestInputWrapperSwap(t *testing.T) {
 		}
 	}
 
-	iWrapper.CloseAsync()
-	require.NoError(t, iWrapper.WaitForClose(time.Second*5))
+	iWrapper.TriggerStopConsuming()
+	require.NoError(t, iWrapper.WaitForClose(ctx))
 }

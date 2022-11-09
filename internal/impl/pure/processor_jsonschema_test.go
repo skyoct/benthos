@@ -1,13 +1,14 @@
 package pure_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestJSONSchemaExternalSchemaCheck(t *testing.T) {
@@ -87,7 +88,7 @@ func TestJSONSchemaExternalSchemaCheck(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			msgs, _ := c.ProcessMessage(message.QuickBatch(tt.arg))
+			msgs, _ := c.ProcessBatch(context.Background(), message.QuickBatch(tt.arg))
 
 			if len(msgs) != 1 {
 				t.Fatalf("Test '%v' did not succeed", tt.name)
@@ -176,7 +177,7 @@ func TestJSONSchemaInlineSchemaCheck(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			msgs, _ := c.ProcessMessage(message.QuickBatch(tt.arg))
+			msgs, _ := c.ProcessBatch(context.Background(), message.QuickBatch(tt.arg))
 
 			if len(msgs) != 1 {
 				t.Fatalf("Test '%v' did not succeed", tt.name)
@@ -278,7 +279,7 @@ func TestJSONSchemaLowercaseDescriptionCheck(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			msgs, _ := c.ProcessMessage(message.QuickBatch(tt.arg))
+			msgs, _ := c.ProcessBatch(context.Background(), message.QuickBatch(tt.arg))
 
 			if len(msgs) != 1 {
 				t.Fatalf("Test '%v' did not succeed", tt.name)
@@ -305,7 +306,7 @@ func TestJSONSchemaPathNotExist(t *testing.T) {
 
 	_, err := mock.NewManager().NewProcessor(conf)
 	if err == nil {
-		t.Error("expected error from loading non existant schema file")
+		t.Error("expected error from loading non existent schema file")
 	}
 }
 

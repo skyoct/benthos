@@ -15,19 +15,20 @@ import (
 	yaml "gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	httpdocs "github.com/benthosdev/benthos/v4/internal/http/docs"
+	"github.com/benthosdev/benthos/v4/internal/httpserver"
 	"github.com/benthosdev/benthos/v4/internal/log"
 )
 
 // Config contains the configuration fields for the Benthos API.
 type Config struct {
-	Address        string              `json:"address" yaml:"address"`
-	Enabled        bool                `json:"enabled" yaml:"enabled"`
-	RootPath       string              `json:"root_path" yaml:"root_path"`
-	DebugEndpoints bool                `json:"debug_endpoints" yaml:"debug_endpoints"`
-	CertFile       string              `json:"cert_file" yaml:"cert_file"`
-	KeyFile        string              `json:"key_file" yaml:"key_file"`
-	CORS           httpdocs.ServerCORS `json:"cors" yaml:"cors"`
+	Address        string                     `json:"address" yaml:"address"`
+	Enabled        bool                       `json:"enabled" yaml:"enabled"`
+	RootPath       string                     `json:"root_path" yaml:"root_path"`
+	DebugEndpoints bool                       `json:"debug_endpoints" yaml:"debug_endpoints"`
+	CertFile       string                     `json:"cert_file" yaml:"cert_file"`
+	KeyFile        string                     `json:"key_file" yaml:"key_file"`
+	CORS           httpserver.CORSConfig      `json:"cors" yaml:"cors"`
+	BasicAuth      httpserver.BasicAuthConfig `json:"basic_auth" yaml:"basic_auth"`
 }
 
 // NewConfig creates a new API config with default values.
@@ -39,7 +40,8 @@ func NewConfig() Config {
 		DebugEndpoints: false,
 		CertFile:       "",
 		KeyFile:        "",
-		CORS:           httpdocs.NewServerCORS(),
+		CORS:           httpserver.NewServerCORSConfig(),
+		BasicAuth:      httpserver.NewBasicAuthConfig(),
 	}
 }
 
@@ -86,7 +88,7 @@ func New(
 	version string,
 	dateBuilt string,
 	conf Config,
-	wholeConf interface{},
+	wholeConf any,
 	log log.Modular,
 	stats metrics.Type,
 	opts ...OptFunc,
@@ -103,6 +105,10 @@ func New(
 		if conf.CertFile == "" || conf.KeyFile == "" {
 			return nil, errors.New("both cert_file and key_file must be specified, or neither")
 		}
+	}
+
+	if err := conf.BasicAuth.Validate(); err != nil {
+		return nil, err
 	}
 
 	t := &Type{
@@ -126,7 +132,7 @@ func New(
 	}
 
 	handlePrintJSONConfig := func(w http.ResponseWriter, r *http.Request) {
-		var g interface{}
+		var g any
 		var err error
 		if node, ok := wholeConf.(yaml.Node); ok {
 			err = node.Decode(&g)
@@ -191,6 +197,10 @@ func New(
 			pprof.Index,
 		)
 		t.RegisterEndpoint(
+			"/debug/pprof/goroutine", "DEBUG: Responds with a pprof-formatted goroutine profile.",
+			pprof.Index,
+		)
+		t.RegisterEndpoint(
 			"/debug/pprof/block", "DEBUG: Responds with a pprof-formatted block profile.",
 			pprof.Index,
 		)
@@ -247,12 +257,13 @@ func (t *Type) RegisterEndpoint(path, desc string, handlerFunc http.HandlerFunc)
 	defer t.handlersMut.Unlock()
 
 	if _, exists := t.handlers[path]; !exists {
-		wrapHandler := func(w http.ResponseWriter, r *http.Request) {
+		wrapHandler := t.conf.BasicAuth.WrapHandler(func(w http.ResponseWriter, r *http.Request) {
 			t.handlersMut.RLock()
 			h := t.handlers[path]
 			t.handlersMut.RUnlock()
 			h(w, r)
-		}
+		})
+
 		t.mux.HandleFunc(path, wrapHandler)
 		t.mux.HandleFunc(t.conf.RootPath+path, wrapHandler)
 	}

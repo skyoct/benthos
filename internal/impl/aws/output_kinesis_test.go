@@ -52,11 +52,11 @@ func TestKinesisWriteSinglePartMessage(t *testing.T) {
 	k.partitionKey, _ = bloblang.GlobalEnvironment().NewField("${!json(\"id\")}")
 	k.hashKey, _ = bloblang.GlobalEnvironment().NewField("")
 
-	msg := message.QuickBatch(nil)
-	part := message.NewPart([]byte(`{"foo":"bar","id":123}`))
-	msg.Append(part)
+	msg := message.Batch{
+		message.NewPart([]byte(`{"foo":"bar","id":123}`)),
+	}
 
-	if err := k.WriteWithContext(context.Background(), msg); err != nil {
+	if err := k.WriteBatch(context.Background(), msg); err != nil {
 		t.Error(err)
 	}
 }
@@ -98,10 +98,10 @@ func TestKinesisWriteMultiPartMessage(t *testing.T) {
 	msg := message.QuickBatch(nil)
 	for _, p := range parts {
 		part := message.NewPart(p.data)
-		msg.Append(part)
+		msg = append(msg, part)
 	}
 
-	if err := k.WriteWithContext(context.Background(), msg); err != nil {
+	if err := k.WriteBatch(context.Background(), msg); err != nil {
 		t.Error(err)
 	}
 }
@@ -131,10 +131,10 @@ func TestKinesisWriteChunk(t *testing.T) {
 	msg := message.QuickBatch(nil)
 	for i := 0; i < n; i++ {
 		part := message.NewPart([]byte(`{"foo":"bar","id":123}`))
-		msg.Append(part)
+		msg = append(msg, part)
 	}
 
-	if err := k.WriteWithContext(context.Background(), msg); err != nil {
+	if err := k.WriteBatch(context.Background(), msg); err != nil {
 		t.Error(err)
 	}
 	if exp, act := n/kinesisMaxRecordsCount+1, len(batchLengths); act != exp {
@@ -192,14 +192,14 @@ func TestKinesisWriteChunkWithThrottling(t *testing.T) {
 	msg := message.QuickBatch(nil)
 	for i := 0; i < n; i++ {
 		part := message.NewPart([]byte(`{"foo":"bar","id":123}`))
-		msg.Append(part)
+		msg = append(msg, part)
 	}
 
 	expectedLengths := []int{
 		500, 500, 500, 300,
 	}
 
-	if err := k.WriteWithContext(context.Background(), msg); err != nil {
+	if err := k.WriteBatch(context.Background(), msg); err != nil {
 		t.Error(err)
 	}
 	if exp, act := len(expectedLengths), len(batchLengths); act != exp {
@@ -234,10 +234,11 @@ func TestKinesisWriteError(t *testing.T) {
 	k.partitionKey, _ = bloblang.GlobalEnvironment().NewField("${!json(\"id\")}")
 	k.hashKey, _ = bloblang.GlobalEnvironment().NewField("")
 
-	msg := message.QuickBatch(nil)
-	msg.Append(message.NewPart([]byte(`{"foo":"bar"}`)))
+	msg := message.Batch{
+		message.NewPart([]byte(`{"foo":"bar"}`)),
+	}
 
-	if exp, err := "blah", k.WriteWithContext(context.Background(), msg); err.Error() != exp {
+	if exp, err := "blah", k.WriteBatch(context.Background(), msg); err.Error() != exp {
 		t.Errorf("Expected err to equal %s, got %v", exp, err)
 	}
 	if exp, act := 3, calls; act != exp {
@@ -280,12 +281,13 @@ func TestKinesisWriteMessageThrottling(t *testing.T) {
 	k.partitionKey, _ = bloblang.GlobalEnvironment().NewField("${!json(\"id\")}")
 	k.hashKey, _ = bloblang.GlobalEnvironment().NewField("")
 
-	msg := message.QuickBatch(nil)
-	msg.Append(message.NewPart([]byte(`{"foo":"bar","id":123}`)))
-	msg.Append(message.NewPart([]byte(`{"foo":"baz","id":456}`)))
-	msg.Append(message.NewPart([]byte(`{"foo":"qux","id":789}`)))
+	msg := message.Batch{
+		message.NewPart([]byte(`{"foo":"bar","id":123}`)),
+		message.NewPart([]byte(`{"foo":"baz","id":456}`)),
+		message.NewPart([]byte(`{"foo":"qux","id":789}`)),
+	}
 
-	if err := k.WriteWithContext(context.Background(), msg); err != nil {
+	if err := k.WriteBatch(context.Background(), msg); err != nil {
 		t.Error(err)
 	}
 	if exp, act := msg.Len(), len(calls); act != exp {
@@ -325,10 +327,11 @@ func TestKinesisWriteBackoffMaxRetriesExceeded(t *testing.T) {
 	k.partitionKey, _ = bloblang.GlobalEnvironment().NewField("${!json(\"id\")}")
 	k.hashKey, _ = bloblang.GlobalEnvironment().NewField("")
 
-	msg := message.QuickBatch(nil)
-	msg.Append(message.NewPart([]byte(`{"foo":"bar","id":123}`)))
+	msg := message.Batch{
+		message.NewPart([]byte(`{"foo":"bar","id":123}`)),
+	}
 
-	if err := k.WriteWithContext(context.Background(), msg); err == nil {
+	if err := k.WriteBatch(context.Background(), msg); err == nil {
 		t.Error(errors.New("expected kinesis.Write to error"))
 	}
 	if exp := 3; calls != exp {

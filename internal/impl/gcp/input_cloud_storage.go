@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,28 +15,23 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/codec"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	iinput "github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c input.Config, nm bundle.NewManagement) (iinput.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		r, err := newGCPCloudStorageInput(c.GCPCloudStorage, nm.Logger(), nm.Metrics())
 		if err != nil {
 			return nil, err
 		}
-		return input.NewAsyncReader(
-			input.TypeGCPCloudStorage, true,
-			reader.NewAsyncPreserver(r),
-			nm.Logger(), nm.Metrics(),
-		)
+		return input.NewAsyncReader("gcp_cloud_storage", true, input.NewAsyncPreserver(r), nm)
 	}), docs.ComponentSpec{
-		Name:       input.TypeGCPCloudStorage,
+		Name:       "gcp_cloud_storage",
 		Type:       docs.TypeInput,
 		Status:     docs.StatusBeta,
 		Version:    "3.43.0",
@@ -151,7 +145,7 @@ func newGCPCloudStorageTargetReader(
 	it := bucket.Objects(ctx, &storage.Query{Prefix: conf.Prefix})
 	for count := 0; count < maxGCPCloudStorageListObjectsResults; count++ {
 		obj, err := it.Next()
-		if err == iterator.Done {
+		if errors.Is(err, iterator.Done) {
 			break
 		} else if err != nil {
 			return nil, fmt.Errorf("failed to list objects: %v", err)
@@ -174,7 +168,7 @@ func (r *gcpCloudStorageTargetReader) Pop(ctx context.Context) (*gcpCloudStorage
 
 		for count := 0; count < maxGCPCloudStorageListObjectsResults; count++ {
 			obj, err := r.startAfter.Next()
-			if err == iterator.Done {
+			if errors.Is(err, iterator.Done) {
 				break
 			} else if err != nil {
 				return nil, fmt.Errorf("failed to list objects: %v", err)
@@ -233,9 +227,9 @@ func newGCPCloudStorageInput(conf input.GCPCloudStorageConfig, log log.Modular, 
 	return g, nil
 }
 
-// ConnectWithContext attempts to establish a connection to the target Google
+// Connect attempts to establish a connection to the target Google
 // Cloud Storage bucket.
-func (g *gcpCloudStorageInput) ConnectWithContext(ctx context.Context) error {
+func (g *gcpCloudStorageInput) Connect(ctx context.Context) error {
 	var err error
 	g.client, err = storage.NewClient(context.Background())
 	if err != nil {
@@ -283,19 +277,18 @@ func (g *gcpCloudStorageInput) getObjectTarget(ctx context.Context) (*gcpCloudSt
 	return object, nil
 }
 
-func gcpCloudStorageMsgFromParts(p *gcpCloudStoragePendingObject, parts []*message.Part) *message.Batch {
-	msg := message.QuickBatch(nil)
-	msg.Append(parts...)
+func gcpCloudStorageMsgFromParts(p *gcpCloudStoragePendingObject, parts []*message.Part) message.Batch {
+	msg := message.Batch(parts)
 	_ = msg.Iter(func(_ int, part *message.Part) error {
-		part.MetaSet("gcs_key", p.target.key)
-		part.MetaSet("gcs_bucket", p.obj.Bucket)
-		part.MetaSet("gcs_last_modified", p.obj.Updated.Format(time.RFC3339))
-		part.MetaSet("gcs_last_modified_unix", strconv.FormatInt(p.obj.Updated.Unix(), 10))
-		part.MetaSet("gcs_content_type", p.obj.ContentType)
-		part.MetaSet("gcs_content_encoding", p.obj.ContentEncoding)
+		part.MetaSetMut("gcs_key", p.target.key)
+		part.MetaSetMut("gcs_bucket", p.obj.Bucket)
+		part.MetaSetMut("gcs_last_modified", p.obj.Updated.Format(time.RFC3339))
+		part.MetaSetMut("gcs_last_modified_unix", p.obj.Updated.Unix())
+		part.MetaSetMut("gcs_content_type", p.obj.ContentType)
+		part.MetaSetMut("gcs_content_encoding", p.obj.ContentEncoding)
 
 		for k, v := range p.obj.Metadata {
-			part.MetaSet(k, v)
+			part.MetaSetMut(k, v)
 		}
 		return nil
 	})
@@ -303,9 +296,9 @@ func gcpCloudStorageMsgFromParts(p *gcpCloudStoragePendingObject, parts []*messa
 	return msg
 }
 
-// ReadWithContext attempts to read a new message from the target Google Cloud
+// ReadBatch attempts to read a new message from the target Google Cloud
 // Storage bucket.
-func (g *gcpCloudStorageInput) ReadWithContext(ctx context.Context) (msg *message.Batch, ackFn reader.AsyncAckFn, err error) {
+func (g *gcpCloudStorageInput) ReadBatch(ctx context.Context) (msg message.Batch, ackFn input.AsyncAckFn, err error) {
 	g.objectMut.Lock()
 	defer g.objectMut.Unlock()
 
@@ -353,25 +346,18 @@ func (g *gcpCloudStorageInput) ReadWithContext(ctx context.Context) (msg *messag
 }
 
 // CloseAsync begins cleaning up resources used by this reader asynchronously.
-func (g *gcpCloudStorageInput) CloseAsync() {
-	go func() {
-		g.objectMut.Lock()
-		if g.object != nil {
-			g.object.scanner.Close(context.Background())
-			g.object = nil
-		}
+func (g *gcpCloudStorageInput) Close(ctx context.Context) (err error) {
+	g.objectMut.Lock()
+	defer g.objectMut.Unlock()
 
-		if g.client != nil {
-			g.client.Close()
-			g.client = nil
-		}
+	if g.object != nil {
+		err = g.object.scanner.Close(ctx)
+		g.object = nil
+	}
 
-		g.objectMut.Unlock()
-	}()
-}
-
-// WaitForClose will block until either the reader is closed or a specified
-// timeout occurs.
-func (g *gcpCloudStorageInput) WaitForClose(time.Duration) error {
-	return nil
+	if err == nil && g.client != nil {
+		err = g.client.Close()
+		g.client = nil
+	}
+	return
 }

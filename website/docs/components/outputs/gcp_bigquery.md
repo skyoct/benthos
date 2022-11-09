@@ -40,6 +40,7 @@ output:
     table: ""
     format: NEWLINE_DELIMITED_JSON
     max_in_flight: 64
+    job_labels: {}
     csv:
       header: []
       field_delimiter: ','
@@ -68,6 +69,7 @@ output:
     ignore_unknown_values: false
     max_bad_records: 0
     auto_detect: false
+    job_labels: {}
     csv:
       header: []
       field_delimiter: ','
@@ -124,8 +126,8 @@ For the CSV format when the field `csv.header` is specified a header row will be
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 This output benefits from sending messages as a batch for improved performance.
 Batches can be formed at both the input and output level. You can find out more
@@ -166,7 +168,7 @@ Options: `NEWLINE_DELIMITED_JSON`, `CSV`.
 
 ### `max_in_flight`
 
-The maximum number of messages to have in flight at a given time. Increase this to improve throughput.
+The maximum number of message batches to have in flight at a given time. Increase this to improve throughput.
 
 
 Type: `int`  
@@ -213,6 +215,14 @@ Indicates if we should automatically infer the options and schema for CSV and JS
 
 Type: `bool`  
 Default: `false`  
+
+### `job_labels`
+
+A list of labels to add to the load job.
+
+
+Type: `object`  
+Default: `{}`  
 
 ### `csv`
 

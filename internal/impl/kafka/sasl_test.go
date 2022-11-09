@@ -7,14 +7,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/impl/kafka"
 	"github.com/benthosdev/benthos/v4/internal/impl/kafka/sasl"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func TestApplyPlaintext(t *testing.T) {
@@ -97,7 +95,7 @@ cache_resources:
         jwt: foo
 `), &resConf))
 
-	mgr, err := manager.NewV2(resConf, mock.NewManager(), log.Noop(), metrics.Noop())
+	mgr, err := manager.New(resConf)
 	require.NoError(t, err)
 
 	require.NoError(t, kafka.ApplySASLConfig(saslConf, mgr, conf))

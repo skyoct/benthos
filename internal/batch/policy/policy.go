@@ -1,90 +1,20 @@
 package policy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"time"
 
+	"github.com/benthosdev/benthos/v4/internal/batch/policy/batchconfig"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/mapping"
+	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
-
-// Config contains configuration parameters for a batch policy.
-type Config struct {
-	ByteSize   int                `json:"byte_size" yaml:"byte_size"`
-	Count      int                `json:"count" yaml:"count"`
-	Check      string             `json:"check" yaml:"check"`
-	Period     string             `json:"period" yaml:"period"`
-	Processors []processor.Config `json:"processors" yaml:"processors"`
-}
-
-// NewConfig creates a default PolicyConfig.
-func NewConfig() Config {
-	return Config{
-		ByteSize:   0,
-		Count:      0,
-		Check:      "",
-		Period:     "",
-		Processors: []processor.Config{},
-	}
-}
-
-// IsNoop returns true if this batch policy configuration does nothing.
-func (p Config) IsNoop() bool {
-	if p.ByteSize > 0 {
-		return false
-	}
-	if p.Count > 1 {
-		return false
-	}
-	if len(p.Check) > 0 {
-		return false
-	}
-	if len(p.Period) > 0 {
-		return false
-	}
-	if len(p.Processors) > 0 {
-		return false
-	}
-	return true
-}
-
-func (p Config) isLimited() bool {
-	if p.ByteSize > 0 {
-		return true
-	}
-	if p.Count > 0 {
-		return true
-	}
-	if len(p.Period) > 0 {
-		return true
-	}
-	if len(p.Check) > 0 {
-		return true
-	}
-	return false
-}
-
-func (p Config) isHardLimited() bool {
-	if p.ByteSize > 0 {
-		return true
-	}
-	if p.Count > 0 {
-		return true
-	}
-	if len(p.Period) > 0 {
-		return true
-	}
-	return false
-}
-
-//------------------------------------------------------------------------------
 
 // Batcher implements a batching policy by buffering messages until, based on a
 // set of rules, the buffered messages are ready to be sent onwards as a batch.
@@ -109,11 +39,11 @@ type Batcher struct {
 }
 
 // New creates an empty policy with default rules.
-func New(conf Config, mgr interop.Manager) (*Batcher, error) {
-	if !conf.isLimited() {
+func New(conf batchconfig.Config, mgr bundle.NewManagement) (*Batcher, error) {
+	if !conf.IsLimited() {
 		return nil, errors.New("batch policy must have at least one active trigger")
 	}
-	if !conf.isHardLimited() {
+	if !conf.IsHardLimited() {
 		mgr.Logger().Warnln("Batch policy should have at least one of count, period or byte_size set in order to provide a hard batch ceiling.")
 	}
 	var err error
@@ -132,7 +62,7 @@ func New(conf Config, mgr interop.Manager) (*Batcher, error) {
 	var procs []iprocessor.V1
 	for i, pconf := range conf.Processors {
 		pMgr := mgr.IntoPath("processors", strconv.Itoa(i))
-		proc, err := processor.New(pconf, pMgr)
+		proc, err := pMgr.NewProcessor(pconf)
 		if err != nil {
 			return nil, err
 		}
@@ -163,7 +93,11 @@ func New(conf Config, mgr interop.Manager) (*Batcher, error) {
 // Add a new message part to this batch policy. Returns true if this part
 // triggers the conditions of the policy.
 func (p *Batcher) Add(part *message.Part) bool {
-	p.sizeTally += len(part.Get())
+	if p.byteSize > 0 {
+		// This calculation (serialisation into bytes) is potentially expensive
+		// so we only do it when there's a byte size based trigger.
+		p.sizeTally += len(part.AsBytes())
+	}
 	p.parts = append(p.parts, part)
 
 	if !p.triggered && p.count > 0 && len(p.parts) >= p.count {
@@ -177,9 +111,7 @@ func (p *Batcher) Add(part *message.Part) bool {
 		p.log.Traceln("Batching based on byte_size")
 	}
 	if p.check != nil && !p.triggered {
-		tmpMsg := message.QuickBatch(nil)
-		tmpMsg.SetAll(p.parts)
-
+		tmpMsg := message.Batch(p.parts)
 		test, err := p.check.QueryPart(tmpMsg.Len()-1, tmpMsg)
 		if err != nil {
 			test = false
@@ -196,35 +128,31 @@ func (p *Batcher) Add(part *message.Part) bool {
 
 // Flush clears all messages stored by this batch policy. Returns nil if the
 // policy is currently empty.
-func (p *Batcher) Flush() *message.Batch {
-	var newMsg *message.Batch
+func (p *Batcher) Flush(ctx context.Context) message.Batch {
+	var newMsg message.Batch
 
-	resultMsgs := p.flushAny()
+	resultMsgs := p.flushAny(ctx)
 	if len(resultMsgs) == 1 {
 		newMsg = resultMsgs[0]
 	} else if len(resultMsgs) > 1 {
-		newMsg = message.QuickBatch(nil)
-		var parts []*message.Part
 		for _, m := range resultMsgs {
 			_ = m.Iter(func(_ int, p *message.Part) error {
-				parts = append(parts, p)
+				newMsg = append(newMsg, p)
 				return nil
 			})
 		}
-		newMsg.SetAll(parts)
 	}
 	return newMsg
 }
 
-func (p *Batcher) flushAny() []*message.Batch {
-	var newMsg *message.Batch
+func (p *Batcher) flushAny(ctx context.Context) []message.Batch {
+	var newMsg message.Batch
 	if len(p.parts) > 0 {
 		if !p.triggered && p.period > 0 && time.Since(p.lastBatch) > p.period {
 			p.mPeriodBatch.Incr(1)
 			p.log.Traceln("Batching based on period")
 		}
-		newMsg = message.QuickBatch(nil)
-		newMsg.Append(p.parts...)
+		newMsg = message.Batch(p.parts)
 	}
 	p.parts = nil
 	p.sizeTally = 0
@@ -236,15 +164,15 @@ func (p *Batcher) flushAny() []*message.Batch {
 	}
 
 	if len(p.procs) > 0 {
-		resultMsgs, res := processor.ExecuteAll(p.procs, newMsg)
-		if res != nil {
-			p.log.Errorf("Batch processors resulted in error: %v, the batch has been dropped.", res)
+		resultMsgs, err := iprocessor.ExecuteAll(ctx, p.procs, newMsg)
+		if err != nil {
+			p.log.Errorf("Batch processors resulted in error: %v, the batch has been dropped.", err)
 			return nil
 		}
 		return resultMsgs
 	}
 
-	return []*message.Batch{newMsg}
+	return []message.Batch{newMsg}
 }
 
 // Count returns the number of currently buffered message parts within this
@@ -265,18 +193,10 @@ func (p *Batcher) UntilNext() time.Duration {
 
 //------------------------------------------------------------------------------
 
-// CloseAsync shuts down the policy resources.
-func (p *Batcher) CloseAsync() {
+// Close shuts down the policy resources.
+func (p *Batcher) Close(ctx context.Context) error {
 	for _, c := range p.procs {
-		c.CloseAsync()
-	}
-}
-
-// WaitForClose blocks until the processor has closed down.
-func (p *Batcher) WaitForClose(timeout time.Duration) error {
-	stopBy := time.Now().Add(timeout)
-	for _, c := range p.procs {
-		if err := c.WaitForClose(time.Until(stopBy)); err != nil {
+		if err := c.Close(ctx); err != nil {
 			return err
 		}
 	}

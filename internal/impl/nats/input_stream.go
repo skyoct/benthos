@@ -16,21 +16,16 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/nats/auth"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		return newNATSStreamInput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllInputs.Add(processors.WrapConstructor(newNATSStreamInput), docs.ComponentSpec{
 		Name:    "nats_stream",
 		Summary: `Subscribe to a NATS Stream subject. Joining a queue is optional and allows multiple clients of a subject to consume using queue semantics.`,
 		Description: `
@@ -68,7 +63,7 @@ You can access these metadata fields using [function interpolation](/docs/config
 			docs.FieldString("ack_wait", "An optional duration to specify at which a message that is yet to be acked will be automatically retried.").Advanced(),
 			btls.FieldSpec(),
 			auth.FieldSpec(),
-		).ChildDefaultAndTypesFromStruct(oinput.NewNATSStreamConfig()),
+		).ChildDefaultAndTypesFromStruct(input.NewNATSStreamConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -78,18 +73,18 @@ You can access these metadata fields using [function interpolation](/docs/config
 	}
 }
 
-func newNATSStreamInput(conf oinput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (input.Streamed, error) {
-	var c reader.Async
+func newNATSStreamInput(conf input.Config, mgr bundle.NewManagement) (input.Streamed, error) {
+	var c input.Async
 	var err error
-	if c, err = newNATSStreamReader(conf.NATSStream, log); err != nil {
+	if c, err = newNATSStreamReader(conf.NATSStream, mgr); err != nil {
 		return nil, err
 	}
-	return oinput.NewAsyncReader("nats_stream", true, c, log, stats)
+	return input.NewAsyncReader("nats_stream", true, c, mgr)
 }
 
 type natsStreamReader struct {
 	urls    string
-	conf    oinput.NATSStreamConfig
+	conf    input.NATSStreamConfig
 	ackWait time.Duration
 
 	log log.Modular
@@ -103,10 +98,11 @@ type natsStreamReader struct {
 
 	msgChan       chan *stan.Msg
 	interruptChan chan struct{}
+	interruptOnce sync.Once
 	tlsConf       *tls.Config
 }
 
-func newNATSStreamReader(conf oinput.NATSStreamConfig, log log.Modular) (*natsStreamReader, error) {
+func newNATSStreamReader(conf input.NATSStreamConfig, mgr bundle.NewManagement) (*natsStreamReader, error) {
 	if conf.ClientID == "" {
 		u4, err := uuid.NewV4()
 		if err != nil {
@@ -126,7 +122,7 @@ func newNATSStreamReader(conf oinput.NATSStreamConfig, log log.Modular) (*natsSt
 	n := natsStreamReader{
 		conf:          conf,
 		ackWait:       ackWait,
-		log:           log,
+		log:           mgr.Logger(),
 		msgChan:       make(chan *stan.Msg),
 		interruptChan: make(chan struct{}),
 	}
@@ -135,7 +131,7 @@ func newNATSStreamReader(conf oinput.NATSStreamConfig, log log.Modular) (*natsSt
 	n.urls = strings.Join(conf.URLs, ",")
 	var err error
 	if conf.TLS.Enabled {
-		if n.tlsConf, err = conf.TLS.Get(); err != nil {
+		if n.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -160,7 +156,7 @@ func (n *natsStreamReader) disconnect() {
 	}
 }
 
-func (n *natsStreamReader) ConnectWithContext(ctx context.Context) error {
+func (n *natsStreamReader) Connect(ctx context.Context) error {
 	n.cMut.Lock()
 	defer n.cMut.Unlock()
 
@@ -173,7 +169,7 @@ func (n *natsStreamReader) ConnectWithContext(ctx context.Context) error {
 		opts = append(opts, nats.Secure(n.tlsConf))
 	}
 
-	opts = append(opts, auth.GetOptions(n.conf.Auth)...)
+	opts = append(opts, authConfToOptions(n.conf.Auth)...)
 
 	natsConn, err := nats.Connect(n.urls, opts...)
 	if err != nil {
@@ -274,7 +270,7 @@ func (n *natsStreamReader) read(ctx context.Context) (*stan.Msg, error) {
 	return msg, nil
 }
 
-func (n *natsStreamReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (n *natsStreamReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	msg, err := n.read(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -282,8 +278,8 @@ func (n *natsStreamReader) ReadWithContext(ctx context.Context) (*message.Batch,
 
 	bmsg := message.QuickBatch([][]byte{msg.Data})
 	part := bmsg.Get(0)
-	part.MetaSet("nats_stream_subject", msg.Subject)
-	part.MetaSet("nats_stream_sequence", strconv.FormatUint(msg.Sequence, 10))
+	part.MetaSetMut("nats_stream_subject", msg.Subject)
+	part.MetaSetMut("nats_stream_sequence", strconv.FormatUint(msg.Sequence, 10))
 
 	return bmsg, func(rctx context.Context, res error) error {
 		if res == nil {
@@ -293,11 +289,9 @@ func (n *natsStreamReader) ReadWithContext(ctx context.Context) (*message.Batch,
 	}, nil
 }
 
-func (n *natsStreamReader) CloseAsync() {
-	close(n.interruptChan)
-}
-
-func (n *natsStreamReader) WaitForClose(timeout time.Duration) error {
-	n.disconnect()
-	return nil
+func (n *natsStreamReader) Close(ctx context.Context) (err error) {
+	n.interruptOnce.Do(func() {
+		close(n.interruptChan)
+	})
+	return
 }

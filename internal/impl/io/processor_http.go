@@ -4,28 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/http"
-	ihttpdocs "github.com/benthosdev/benthos/v4/internal/http/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
+	"github.com/benthosdev/benthos/v4/internal/httpclient"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newHTTPProc(conf.HTTP, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("http", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("http", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "http",
 		Categories: []string{
@@ -72,9 +68,9 @@ When all retry attempts for a message are exhausted the processor cancels the
 attempt. These failed messages will continue through the pipeline unchanged, but
 can be dropped or placed in a dead letter queue according to your config, you
 can read about these patterns [here](/docs/configuration/error_handling).`,
-		Config: ihttpdocs.ClientFieldSpec(false,
+		Config: httpclient.OldFieldSpec(false,
 			docs.FieldBool("batch_as_multipart", "Send message batches as a single request using [RFC1341](https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html).").Advanced().HasDefault(false),
-			docs.FieldBool("parallel", "When processing batched messages, whether to send messages of the batch in parallel, otherwise they are sent serially.").HasDefault(false)).ChildDefaultAndTypesFromStruct(oprocessor.NewHTTPConfig()),
+			docs.FieldBool("parallel", "When processing batched messages, whether to send messages of the batch in parallel, otherwise they are sent serially.").HasDefault(false)).ChildDefaultAndTypesFromStruct(processor.NewHTTPConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title: "Branched Request",
@@ -100,14 +96,14 @@ pipeline:
 }
 
 type httpProc struct {
-	client      *http.Client
+	client      *httpclient.Client
 	asMultipart bool
 	parallel    bool
 	rawURL      string
 	log         log.Modular
 }
 
-func newHTTPProc(conf oprocessor.HTTPConfig, mgr interop.Manager) (processor.V2Batched, error) {
+func newHTTPProc(conf processor.HTTPConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	g := &httpProc{
 		rawURL:      conf.URL,
 		log:         mgr.Logger(),
@@ -116,34 +112,29 @@ func newHTTPProc(conf oprocessor.HTTPConfig, mgr interop.Manager) (processor.V2B
 	}
 
 	var err error
-	if g.client, err = http.NewClient(
-		conf.Config,
-		http.OptSetLogger(mgr.Logger()),
-		http.OptSetStats(mgr.Metrics()),
-		http.OptSetManager(mgr),
-	); err != nil {
+	if g.client, err = httpclient.NewClientFromOldConfig(conf.OldConfig, mgr); err != nil {
 		return nil, err
 	}
 	return g, nil
 }
 
-func (h *httpProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
-	var responseMsg *message.Batch
+func (h *httpProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
+	var responseMsg message.Batch
 
 	if h.asMultipart || msg.Len() == 1 {
 		// Easy, just do a single request.
-		resultMsg, err := h.client.Send(context.Background(), msg, msg)
+		resultMsg, err := h.client.Send(context.Background(), msg)
 		if err != nil {
-			var codeStr string
+			var code int
 			var hErr component.ErrUnexpectedHTTPRes
 			if ok := errors.As(err, &hErr); ok {
-				codeStr = strconv.Itoa(hErr.Code)
+				code = hErr.Code
 			}
 			h.log.Errorf("HTTP request to '%v' failed: %v", h.rawURL, err)
-			responseMsg = msg.Copy()
+			responseMsg = msg.ShallowCopy()
 			_ = responseMsg.Iter(func(i int, p *message.Part) error {
-				if len(codeStr) > 0 {
-					p.MetaSet("http_status_code", codeStr)
+				if code > 0 {
+					p.MetaSetMut("http_status_code", code)
 				}
 				p.ErrorSet(err)
 				return nil
@@ -152,48 +143,47 @@ func (h *httpProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg 
 			parts := make([]*message.Part, resultMsg.Len())
 			_ = resultMsg.Iter(func(i int, p *message.Part) error {
 				if i < msg.Len() {
-					parts[i] = msg.Get(i).Copy()
+					parts[i] = msg.Get(i).ShallowCopy()
 				} else {
-					parts[i] = msg.Get(0).Copy()
+					parts[i] = msg.Get(0).ShallowCopy()
 				}
-				parts[i].Set(p.Get())
-				_ = p.MetaIter(func(k, v string) error {
-					parts[i].MetaSet(k, v)
+				parts[i].SetBytes(p.AsBytes())
+				_ = p.MetaIterMut(func(k string, v any) error {
+					parts[i].MetaSetMut(k, v)
 					return nil
 				})
 				return nil
 			})
-			responseMsg = message.QuickBatch(nil)
-			responseMsg.Append(parts...)
+			responseMsg = parts
 		}
 	} else if !h.parallel {
 		responseMsg = message.QuickBatch(nil)
 
 		_ = msg.Iter(func(i int, p *message.Part) error {
 			tmpMsg := message.QuickBatch(nil)
-			tmpMsg.Append(p)
-			result, err := h.client.Send(context.Background(), tmpMsg, tmpMsg)
+			tmpMsg = append(tmpMsg, p)
+			result, err := h.client.Send(context.Background(), tmpMsg)
 			if err != nil {
 				h.log.Errorf("HTTP request to '%v' failed: %v", h.rawURL, err)
 
-				errPart := p.Copy()
+				errPart := p.ShallowCopy()
 				var hErr component.ErrUnexpectedHTTPRes
 				if ok := errors.As(err, &hErr); ok {
-					errPart.MetaSet("http_status_code", strconv.Itoa(hErr.Code))
+					errPart.MetaSetMut("http_status_code", hErr.Code)
 				}
 				errPart.ErrorSet(err)
-				_ = responseMsg.Append(errPart)
+				responseMsg = append(responseMsg, errPart)
 				return nil
 			}
 
 			_ = result.Iter(func(i int, rp *message.Part) error {
-				tmpPart := p.Copy()
-				tmpPart.Set(rp.Get())
-				_ = rp.MetaIter(func(k, v string) error {
-					tmpPart.MetaSet(k, v)
+				tmpPart := p.ShallowCopy()
+				tmpPart.SetBytes(rp.AsBytes())
+				_ = rp.MetaIterMut(func(k string, v any) error {
+					tmpPart.MetaSetMut(k, v)
 					return nil
 				})
-				_ = responseMsg.Append(tmpPart)
+				responseMsg = append(responseMsg, tmpPart)
 				return nil
 			})
 			return nil
@@ -202,7 +192,7 @@ func (h *httpProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg 
 		// Hard, need to do parallel requests limited by max parallelism.
 		results := make([]*message.Part, msg.Len())
 		_ = msg.Iter(func(i int, p *message.Part) error {
-			results[i] = p.Copy()
+			results[i] = p.ShallowCopy()
 			return nil
 		})
 		reqChan, resChan := make(chan int), make(chan error)
@@ -210,22 +200,21 @@ func (h *httpProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg 
 		for i := 0; i < msg.Len(); i++ {
 			go func() {
 				for index := range reqChan {
-					tmpMsg := message.QuickBatch(nil)
-					tmpMsg.Append(msg.Get(index))
-					result, err := h.client.Send(context.Background(), tmpMsg, tmpMsg)
+					tmpMsg := message.Batch{msg.Get(index)}
+					result, err := h.client.Send(context.Background(), tmpMsg)
 					if err == nil && result.Len() != 1 {
 						err = fmt.Errorf("unexpected response size: %v", result.Len())
 					}
 					if err == nil {
-						results[index].Set(result.Get(0).Get())
-						_ = result.Get(0).MetaIter(func(k, v string) error {
-							results[index].MetaSet(k, v)
+						results[index].SetBytes(result.Get(0).AsBytes())
+						_ = result.Get(0).MetaIterMut(func(k string, v any) error {
+							results[index].MetaSetMut(k, v)
 							return nil
 						})
 					} else {
 						var hErr component.ErrUnexpectedHTTPRes
 						if ok := errors.As(err, &hErr); ok {
-							results[index].MetaSet("http_status_code", strconv.Itoa(hErr.Code))
+							results[index].MetaSetMut("http_status_code", hErr.Code)
 						}
 						results[index].ErrorSet(err)
 					}
@@ -245,14 +234,13 @@ func (h *httpProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg 
 		}
 
 		close(reqChan)
-		responseMsg = message.QuickBatch(nil)
-		responseMsg.Append(results...)
+		responseMsg = results
 	}
 
 	if responseMsg.Len() < 1 {
 		return nil, fmt.Errorf("HTTP response from '%v' was empty", h.rawURL)
 	}
-	return []*message.Batch{responseMsg}, nil
+	return []message.Batch{responseMsg}, nil
 }
 
 func (h *httpProc) Close(ctx context.Context) error {

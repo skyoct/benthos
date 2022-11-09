@@ -63,6 +63,7 @@ output:
       id: ""
       secret: ""
       token: ""
+      from_ec2_role: false
       role: ""
       role_external_id: ""
 ```
@@ -80,8 +81,8 @@ allowing you to transfer data across accounts. You can find out more
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 ## Fields
 
@@ -199,6 +200,15 @@ The token for the credentials being used, required when using short term credent
 
 Type: `string`  
 Default: `""`  
+
+### `credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
 
 ### `credentials.role`
 

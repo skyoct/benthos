@@ -6,20 +6,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newSplit(conf.Split, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("split", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("split", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "split",
 		Categories: []string{
@@ -48,7 +46,7 @@ type splitProc struct {
 	byteSize int
 }
 
-func newSplit(conf oprocessor.SplitConfig, mgr interop.Manager) (*splitProc, error) {
+func newSplit(conf processor.SplitConfig, mgr bundle.NewManagement) (*splitProc, error) {
 	return &splitProc{
 		log:      mgr.Logger(),
 		size:     conf.Size,
@@ -56,29 +54,29 @@ func newSplit(conf oprocessor.SplitConfig, mgr interop.Manager) (*splitProc, err
 	}, nil
 }
 
-func (s *splitProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (s *splitProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	if msg.Len() == 0 {
 		return nil, nil
 	}
 
-	msgs := []*message.Batch{}
+	msgs := []message.Batch{}
 
 	nextMsg := message.QuickBatch(nil)
 	byteSize := 0
 
 	_ = msg.Iter(func(i int, p *message.Part) error {
 		if (s.size > 0 && nextMsg.Len() >= s.size) ||
-			(s.byteSize > 0 && (byteSize+len(p.Get())) > s.byteSize) {
+			(s.byteSize > 0 && (byteSize+len(p.AsBytes())) > s.byteSize) {
 			if nextMsg.Len() > 0 {
 				msgs = append(msgs, nextMsg)
 				nextMsg = message.QuickBatch(nil)
 				byteSize = 0
 			} else {
-				s.log.Warnf("A single message exceeds the target batch byte size of '%v', actual size: '%v'", s.byteSize, len(p.Get()))
+				s.log.Warnf("A single message exceeds the target batch byte size of '%v', actual size: '%v'", s.byteSize, len(p.AsBytes()))
 			}
 		}
-		nextMsg.Append(p)
-		byteSize += len(p.Get())
+		nextMsg = append(nextMsg, p)
+		byteSize += len(p.AsBytes())
 		return nil
 	})
 

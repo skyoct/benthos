@@ -8,18 +8,16 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
-	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/input/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
 )
 
-var (
-	// ErrBrokerNoInputs is returned when creating a broker with zero inputs.
-	ErrBrokerNoInputs = errors.New("attempting to create broker input type with no inputs")
-)
+// ErrBrokerNoInputs is returned when creating a broker with zero inputs.
+var ErrBrokerNoInputs = errors.New("attempting to create broker input type with no inputs")
 
 func init() {
-	err := bundle.AllInputs.Add(newBrokerInput, docs.ComponentSpec{
+	err := bundle.AllInputs.Add(processors.WrapConstructor(newBrokerInput), docs.ComponentSpec{
 		Name: "broker",
 		Summary: `
 Allows you to combine multiple inputs into a single stream of data, where each input will be read in parallel.`,
@@ -41,7 +39,7 @@ input:
 
         # Optional list of input specific processing steps
         processors:
-          - bloblang: |
+          - mapping: |
               root.message = this
               root.meta.link_count = this.links.length()
               root.user.age = this.user.age.number()
@@ -77,7 +75,7 @@ child nodes processors.`,
 		},
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldInt("copies", "Whatever is specified within `inputs` will be created this many times.").Advanced().HasDefault(1),
-			docs.FieldInput("inputs", "A list of inputs to create.").Array().HasDefault([]interface{}{}),
+			docs.FieldInput("inputs", "A list of inputs to create.").Array().HasDefault([]any{}),
 			policy.FieldSpec(),
 		),
 	})
@@ -86,11 +84,8 @@ child nodes processors.`,
 	}
 }
 
-func newBrokerInput(conf oinput.Config, mgr bundle.NewManagement, pipelines ...iprocessor.PipelineConstructorFunc) (input.Streamed, error) {
-	pipelines = oinput.AppendProcessorsFromConfig(conf, mgr, pipelines...)
-
+func newBrokerInput(conf input.Config, mgr bundle.NewManagement) (input.Streamed, error) {
 	lInputs := len(conf.Broker.Inputs) * conf.Broker.Copies
-
 	if lInputs <= 0 {
 		return nil, ErrBrokerNoInputs
 	}
@@ -98,7 +93,7 @@ func newBrokerInput(conf oinput.Config, mgr bundle.NewManagement, pipelines ...i
 	var err error
 	var b input.Streamed
 	if lInputs == 1 {
-		if b, err = mgr.NewInput(conf.Broker.Inputs[0], pipelines...); err != nil {
+		if b, err = mgr.NewInput(conf.Broker.Inputs[0]); err != nil {
 			return nil, err
 		}
 	} else {
@@ -106,8 +101,8 @@ func newBrokerInput(conf oinput.Config, mgr bundle.NewManagement, pipelines ...i
 
 		for j := 0; j < conf.Broker.Copies; j++ {
 			for i, iConf := range conf.Broker.Inputs {
-				iMgr := mgr.IntoPath("broker", "inputs", strconv.Itoa(i)).(bundle.NewManagement)
-				inputs[len(conf.Broker.Inputs)*j+i], err = iMgr.NewInput(iConf, pipelines...)
+				iMgr := mgr.IntoPath("broker", "inputs", strconv.Itoa(i))
+				inputs[len(conf.Broker.Inputs)*j+i], err = iMgr.NewInput(iConf)
 				if err != nil {
 					return nil, err
 				}
@@ -129,5 +124,5 @@ func newBrokerInput(conf oinput.Config, mgr bundle.NewManagement, pipelines ...i
 		return nil, fmt.Errorf("failed to construct batch policy: %v", err)
 	}
 
-	return oinput.NewBatcher(policy, b, mgr.Logger(), mgr.Metrics()), nil
+	return batcher.New(policy, b, mgr.Logger(), mgr.Metrics()), nil
 }

@@ -161,6 +161,27 @@ root.c = range(0, -this.max, -2)
 # Out: {"a":[0,1,2,3,4,5,6,7,8,9],"b":[0,2,4,6,8],"c":[0,-2,-4,-6,-8]}
 ```
 
+### `snowflake_id`
+
+Generate a new snowflake ID each time it is invoked and prints a string representation. I.e.: 1559229974454472704
+
+#### Parameters
+
+**`node_id`** &lt;integer, default `1`&gt; It is possible to specify the node_id.  
+
+#### Examples
+
+
+```coffee
+root.id = snowflake_id()
+```
+
+It is possible to specify the node_id.
+
+```coffee
+root.id = snowflake_id(2)
+```
+
 ### `throw`
 
 Throws an error similar to a regular mapping error. This is useful for abandoning a mapping entirely given certain conditions.
@@ -308,8 +329,9 @@ root.all_metadata = meta()
 
 ### `root_meta`
 
-BETA: This function is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with it is found.
-
+:::caution BETA
+This function is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with it is found.
+:::
 Returns the value of a metadata key from the new message being created, or `null` if the key does not exist. Changes made to metadata during a mapping will be reflected by this function.
 
 #### Parameters
@@ -327,6 +349,37 @@ The key parameter is optional and if omitted the entire metadata contents are re
 
 ```coffee
 root.all_metadata = root_meta()
+```
+
+### `tracing_id`
+
+:::caution EXPERIMENTAL
+This function is experimental and therefore breaking changes could be made to it outside of major version releases.
+:::
+Provides the message trace id. The returned value will be zeroed if the message does not contain a span.
+
+#### Examples
+
+
+```coffee
+meta trace_id = tracing_id()
+```
+
+### `tracing_span`
+
+:::caution EXPERIMENTAL
+This function is experimental and therefore breaking changes could be made to it outside of major version releases.
+:::
+Provides the message tracing span [(created via Open Telemetry APIs)](/docs/components/tracers/about) as an object serialised via text map formatting. The returned value will be `null` if the message does not have a span.
+
+#### Examples
+
+
+```coffee
+root.headers.traceparent = tracing_span().traceparent
+
+# In:  {"some_stuff":"just can't be explained by science"}
+# Out: {"headers":{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}}
 ```
 
 ## Environment
@@ -377,7 +430,7 @@ root.thing.host = hostname()
 
 ### `now`
 
-Returns the current timestamp as a string in ISO 8601 format with the local timezone. Use the method `format_timestamp` in order to change the format and timezone.
+Returns the current timestamp as a string in RFC 3339 format with the local timezone. Use the method `ts_format` in order to change the format and timezone.
 
 #### Examples
 
@@ -387,7 +440,7 @@ root.received_at = now()
 ```
 
 ```coffee
-root.received_at = now().format_timestamp("Mon Jan 2 15:04:05 -0700 MST 2006", "UTC")
+root.received_at = now().ts_format("Mon Jan 2 15:04:05 -0700 MST 2006", "UTC")
 ```
 
 ### `timestamp_unix`
@@ -410,6 +463,46 @@ Returns the current unix timestamp in nanoseconds.
 
 ```coffee
 root.received_at = timestamp_unix_nano()
+```
+
+## Fake Data Generation
+
+### `fake`
+
+:::caution EXPERIMENTAL
+This function is experimental and therefore breaking changes could be made to it outside of major version releases.
+:::
+Takes in a string that maps to a [faker](https://github.com/bxcodec/faker) function and returns the result from that faker function. Returns an error if the given string doesn't match a supported faker function. Supported functions: `latitude`, `longitude`, `unix_time`, `date`, `time_string`, `month_name`, `year_string`, `day_of_week`, `day_of_month`, `timestamp`, `century`, `timezone`, `time_period`, `email`, `mac_address`, `domain_name`, `url`, `username`, `ipv4`, `ipv6`, `password`, `jwt`, `word`, `sentence`, `paragraph`, `cc_type`, `cc_number`, `currency`, `amount_with_currency`, `title_male`, `title_female`, `first_name`, `first_name_male`, `first_name_female`, `last_name`, `name`, `gender`, `chinese_first_name`, `chinese_last_name`, `chinese_name`, `phone_number`, `toll_free_phone_number`, `e164_phone_number`, `uuid_hyphenated`, `uuid_digit`. Refer to the [faker](https://github.com/bxcodec/faker) docs for details on these functions.
+
+#### Parameters
+
+**`function`** &lt;string, default `""`&gt; The name of the function to use to generate the value.  
+
+#### Examples
+
+
+Use `time_string` to generate a time in the format `00:00:00`:
+
+```coffee
+root.time = fake("time_string")
+```
+
+Use `email` to generate a string in email address format:
+
+```coffee
+root.email = fake("email")
+```
+
+Use `jwt` to generate a JWT token:
+
+```coffee
+root.jwt = fake("jwt")
+```
+
+Use `uuid_hyphenated` to generate a hypenated UUID:
+
+```coffee
+root.uuid = fake("uuid_hyphenated")
 ```
 
 [error_handling]: /docs/configuration/error_handling

@@ -10,8 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/component/buffer"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
 )
 
@@ -79,7 +78,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	tChan := make(chan message.Transaction)
 	resChan := make(chan error)
 
-	b := buffer.NewStream("meow", newAirGapBatchBuffer(newMemoryBuffer(int(total))), log.Noop(), metrics.Noop())
+	b := buffer.NewStream("meow", newAirGapBatchBuffer(newMemoryBuffer(int(total))), mock.NewManager())
 	require.NoError(t, b.Consume(tChan))
 
 	var i uint8
@@ -109,7 +108,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 		var outTr message.Transaction
 		select {
 		case outTr = <-b.TransactionChan():
-			assert.Equal(t, i, outTr.Payload.Get(0).Get()[0])
+			assert.Equal(t, i, outTr.Payload.Get(0).AsBytes()[0])
 		case <-time.After(time.Second):
 			t.Fatalf("Timed out waiting for unbuffered message %v read", i)
 		}
@@ -162,7 +161,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	// Extract last message
 	select {
 	case outTr = <-b.TransactionChan():
-		assert.Equal(t, byte(0), outTr.Payload.Get(0).Get()[0])
+		assert.Equal(t, byte(0), outTr.Payload.Get(0).AsBytes()[0])
 		require.NoError(t, outTr.Ack(ctx, nil))
 	case <-time.After(time.Second):
 		t.Fatalf("Timed out waiting for final buffered message read")
@@ -180,7 +179,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	for i = 1; i <= total; i++ {
 		select {
 		case outTr = <-b.TransactionChan():
-			assert.Equal(t, i, outTr.Payload.Get(0).Get()[0])
+			assert.Equal(t, i, outTr.Payload.Get(0).AsBytes()[0])
 		case <-time.After(time.Second):
 			t.Fatalf("Timed out waiting for buffered message %v read", i)
 		}
@@ -195,8 +194,8 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	}
 	require.NoError(t, outTr.Ack(ctx, nil))
 
-	b.CloseAsync()
-	require.NoError(t, b.WaitForClose(time.Second))
+	b.TriggerCloseNow()
+	require.NoError(t, b.WaitForClose(ctx))
 
 	close(resChan)
 	close(tChan)
@@ -211,7 +210,7 @@ func TestStreamBufferClosing(t *testing.T) {
 	tChan := make(chan message.Transaction)
 	resChan := make(chan error)
 
-	b := buffer.NewStream("meow", newAirGapBatchBuffer(newMemoryBuffer(int(total))), log.Noop(), metrics.Noop())
+	b := buffer.NewStream("meow", newAirGapBatchBuffer(newMemoryBuffer(int(total))), mock.NewManager())
 	require.NoError(t, b.Consume(tChan))
 
 	var i uint8
@@ -242,7 +241,7 @@ func TestStreamBufferClosing(t *testing.T) {
 	for i = 0; i < total; i++ {
 		select {
 		case val := <-b.TransactionChan():
-			assert.Equal(t, i, val.Payload.Get(0).Get()[0])
+			assert.Equal(t, i, val.Payload.Get(0).AsBytes()[0])
 			require.NoError(t, val.Ack(ctx, nil))
 		case <-time.After(time.Second):
 			t.Fatalf("Timed out waiting for final buffered message read")
@@ -258,5 +257,5 @@ func TestStreamBufferClosing(t *testing.T) {
 	}
 
 	// Should already be shut down.
-	assert.NoError(t, b.WaitForClose(time.Second))
+	assert.NoError(t, b.WaitForClose(ctx))
 }

@@ -1,14 +1,15 @@
 package pure_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
 	"testing"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestInsertBoundaries(t *testing.T) {
@@ -30,7 +31,7 @@ func TestInsertBoundaries(t *testing.T) {
 				parts = append(parts, []byte("foo"))
 			}
 
-			msgs, res := proc.ProcessMessage(message.QuickBatch(parts))
+			msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(parts))
 			if len(msgs) != 1 {
 				t.Error("Insert Part failed")
 			} else if res != nil {
@@ -168,7 +169,7 @@ func TestInsertPart(t *testing.T) {
 			return
 		}
 
-		msgs, res := proc.ProcessMessage(message.QuickBatch(test.in))
+		msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(test.in))
 		if len(msgs) != 1 {
 			t.Errorf("Insert Part failed on: %s", test.in)
 		} else if res != nil {
@@ -219,7 +220,7 @@ func TestInsertPartInterpolation(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		msgs, res := proc.ProcessMessage(message.QuickBatch(test.in))
+		msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(test.in))
 		if len(msgs) != 1 {
 			t.Errorf("Insert Part failed on: %s", test.in)
 		} else if res != nil {

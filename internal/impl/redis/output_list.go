@@ -4,29 +4,25 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 
 	ibatch "github.com/benthosdev/benthos/v4/internal/batch"
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/redis/old"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newRedisListOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newRedisListOutput), docs.ComponentSpec{
 		Name: "redis_list",
 		Summary: `
 Pushes messages onto the end of a Redis list (which is created if it doesn't
@@ -40,9 +36,9 @@ you to create a unique key for each message.`),
 				"key", "The key for each message, function interpolations can be optionally used to create a unique key per message.",
 				"benthos_list", "${!meta(\"kafka_key\")}", "${!json(\"doc.id\")}", "${!count(\"msgs\")}",
 			).IsInterpolated(),
-			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
+			docs.FieldInt("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time."),
 			policy.FieldSpec(),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewRedisListConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewRedisListConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -52,22 +48,23 @@ you to create a unique key for each message.`),
 	}
 }
 
-func newRedisListOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	w, err := newRedisListWriter(conf.RedisList, mgr, log)
+func newRedisListOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	w, err := newRedisListWriter(conf.RedisList, mgr)
 	if err != nil {
 		return nil, err
 	}
-	a, err := ooutput.NewAsyncWriter("redis_list", conf.RedisList.MaxInFlight, w, log, stats)
+	a, err := output.NewAsyncWriter("redis_list", conf.RedisList.MaxInFlight, w, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.NewBatcherFromConfig(conf.RedisList.Batching, a, mgr, log, stats)
+	return batcher.NewFromConfig(conf.RedisList.Batching, a, mgr)
 }
 
 type redisListWriter struct {
+	mgr bundle.NewManagement
 	log log.Modular
 
-	conf ooutput.RedisListConfig
+	conf output.RedisListConfig
 
 	keyStr *field.Expression
 
@@ -75,9 +72,10 @@ type redisListWriter struct {
 	connMut sync.RWMutex
 }
 
-func newRedisListWriter(conf ooutput.RedisListConfig, mgr interop.Manager, log log.Modular) (*redisListWriter, error) {
+func newRedisListWriter(conf output.RedisListConfig, mgr bundle.NewManagement) (*redisListWriter, error) {
 	r := &redisListWriter{
-		log:  log,
+		mgr:  mgr,
+		log:  mgr.Logger(),
 		conf: conf,
 	}
 
@@ -85,22 +83,22 @@ func newRedisListWriter(conf ooutput.RedisListConfig, mgr interop.Manager, log l
 	if r.keyStr, err = mgr.BloblEnvironment().NewField(conf.Key); err != nil {
 		return nil, fmt.Errorf("failed to parse key expression: %v", err)
 	}
-	if _, err := clientFromConfig(conf.Config); err != nil {
+	if _, err := clientFromConfig(mgr.FS(), conf.Config); err != nil {
 		return nil, err
 	}
 
 	return r, nil
 }
 
-func (r *redisListWriter) ConnectWithContext(ctx context.Context) error {
+func (r *redisListWriter) Connect(ctx context.Context) error {
 	r.connMut.Lock()
 	defer r.connMut.Unlock()
 
-	client, err := clientFromConfig(r.conf.Config)
+	client, err := clientFromConfig(r.mgr.FS(), r.conf.Config)
 	if err != nil {
 		return err
 	}
-	if _, err = client.Ping().Result(); err != nil {
+	if _, err = client.Ping(ctx).Result(); err != nil {
 		return err
 	}
 
@@ -108,7 +106,7 @@ func (r *redisListWriter) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (r *redisListWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (r *redisListWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	r.connMut.RLock()
 	client := r.client
 	r.connMut.RUnlock()
@@ -119,7 +117,7 @@ func (r *redisListWriter) WriteWithContext(ctx context.Context, msg *message.Bat
 
 	if msg.Len() == 1 {
 		key := r.keyStr.String(0, msg)
-		if err := client.RPush(key, msg.Get(0).Get()).Err(); err != nil {
+		if err := client.RPush(ctx, key, msg.Get(0).AsBytes()).Err(); err != nil {
 			_ = r.disconnect()
 			r.log.Errorf("Error from redis: %v\n", err)
 			return component.ErrNotConnected
@@ -130,10 +128,10 @@ func (r *redisListWriter) WriteWithContext(ctx context.Context, msg *message.Bat
 	pipe := client.Pipeline()
 	_ = msg.Iter(func(i int, p *message.Part) error {
 		key := r.keyStr.String(0, msg)
-		_ = pipe.RPush(key, p.Get())
+		_ = pipe.RPush(ctx, key, p.AsBytes())
 		return nil
 	})
-	cmders, err := pipe.Exec()
+	cmders, err := pipe.Exec(ctx)
 	if err != nil {
 		_ = r.disconnect()
 		r.log.Errorf("Error from redis: %v\n", err)
@@ -166,12 +164,6 @@ func (r *redisListWriter) disconnect() error {
 	return nil
 }
 
-func (r *redisListWriter) CloseAsync() {
-	go func() {
-		_ = r.disconnect()
-	}()
-}
-
-func (r *redisListWriter) WaitForClose(timeout time.Duration) error {
-	return nil
+func (r *redisListWriter) Close(context.Context) error {
+	return r.disconnect()
 }

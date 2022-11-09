@@ -3,13 +3,10 @@ package service
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
-	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 // AckFunc is a common function returned by inputs that must be called once for
@@ -100,18 +97,16 @@ type BatchInput interface {
 
 //------------------------------------------------------------------------------
 
-// Implements input.AsyncReader
+// Implements input.AsyncReader.
 type airGapReader struct {
 	r Input
-
-	sig *shutdown.Signaller
 }
 
-func newAirGapReader(r Input) reader.Async {
-	return &airGapReader{r, shutdown.NewSignaller()}
+func newAirGapReader(r Input) input.Async {
+	return &airGapReader{r: r}
 }
 
-func (a *airGapReader) ConnectWithContext(ctx context.Context) error {
+func (a *airGapReader) Connect(ctx context.Context) error {
 	err := a.r.Connect(ctx)
 	if err != nil && errors.Is(err, ErrEndOfInput) {
 		err = component.ErrTypeClosed
@@ -119,7 +114,7 @@ func (a *airGapReader) ConnectWithContext(ctx context.Context) error {
 	return err
 }
 
-func (a *airGapReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (a *airGapReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	msg, ackFn, err := a.r.Read(ctx)
 	if err != nil {
 		if errors.Is(err, ErrNotConnected) {
@@ -129,44 +124,29 @@ func (a *airGapReader) ReadWithContext(ctx context.Context) (*message.Batch, rea
 		}
 		return nil, nil, err
 	}
-	tMsg := message.QuickBatch(nil)
-	tMsg.Append(msg.part)
+
+	tMsg := message.Batch{msg.part}
 	return tMsg, func(c context.Context, r error) error {
 		return ackFn(c, r)
 	}, nil
 }
 
-func (a *airGapReader) CloseAsync() {
-	go func() {
-		// TODO: Determine whether to continue trying or log/exit.
-		_ = a.r.Close(context.Background())
-		a.sig.ShutdownComplete()
-	}()
-}
-
-func (a *airGapReader) WaitForClose(tout time.Duration) error {
-	select {
-	case <-a.sig.HasClosedChan():
-	case <-time.After(tout):
-		return component.ErrTimeout
-	}
-	return nil
+func (a *airGapReader) Close(ctx context.Context) error {
+	return a.r.Close(ctx)
 }
 
 //------------------------------------------------------------------------------
 
-// Implements input.AsyncReader
+// Implements input.AsyncReader.
 type airGapBatchReader struct {
 	r BatchInput
-
-	sig *shutdown.Signaller
 }
 
-func newAirGapBatchReader(r BatchInput) reader.Async {
-	return &airGapBatchReader{r, shutdown.NewSignaller()}
+func newAirGapBatchReader(r BatchInput) input.Async {
+	return &airGapBatchReader{r: r}
 }
 
-func (a *airGapBatchReader) ConnectWithContext(ctx context.Context) error {
+func (a *airGapBatchReader) Connect(ctx context.Context) error {
 	err := a.r.Connect(ctx)
 	if err != nil && errors.Is(err, ErrEndOfInput) {
 		err = component.ErrTypeClosed
@@ -174,7 +154,7 @@ func (a *airGapBatchReader) ConnectWithContext(ctx context.Context) error {
 	return err
 }
 
-func (a *airGapBatchReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (a *airGapBatchReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	batch, ackFn, err := a.r.ReadBatch(ctx)
 	if err != nil {
 		if errors.Is(err, ErrNotConnected) {
@@ -184,30 +164,60 @@ func (a *airGapBatchReader) ReadWithContext(ctx context.Context) (*message.Batch
 		}
 		return nil, nil, err
 	}
-	tMsg := message.QuickBatch(nil)
-	for _, msg := range batch {
-		tMsg.Append(msg.part)
+
+	mBatch := make(message.Batch, len(batch))
+	for i, p := range batch {
+		mBatch[i] = p.part
 	}
-	return tMsg, func(c context.Context, r error) error {
+	return mBatch, func(c context.Context, r error) error {
+		r = toPublicBatchError(r)
 		return ackFn(c, r)
 	}, nil
 }
 
-func (a *airGapBatchReader) CloseAsync() {
-	go func() {
-		if err := a.r.Close(context.Background()); err == nil {
-			a.sig.ShutdownComplete()
-		}
-	}()
+func (a *airGapBatchReader) Close(ctx context.Context) error {
+	return a.r.Close(ctx)
 }
 
-func (a *airGapBatchReader) WaitForClose(tout time.Duration) error {
+//------------------------------------------------------------------------------
+
+// ResourceInput provides access to an input resource.
+type ResourceInput struct {
+	i input.Streamed
+}
+
+func newResourceInput(i input.Streamed) *ResourceInput {
+	return &ResourceInput{i: i}
+}
+
+// ReadBatch attempts to read a message batch from the input, along with a
+// function to be called once the entire batch can be either acked (successfully
+// sent or intentionally filtered) or nacked (failed to be processed or
+// dispatched to the output).
+//
+// If this method returns ErrEndOfInput then that indicates that the input has
+// finished and will no longer yield new messages.
+func (r *ResourceInput) ReadBatch(ctx context.Context) (MessageBatch, AckFunc, error) {
+	var tran message.Transaction
+	var open bool
 	select {
-	case <-a.sig.HasClosedChan():
-	case <-time.After(tout):
-		return component.ErrTimeout
+	case tran, open = <-r.i.TransactionChan():
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
 	}
-	return nil
+	if !open {
+		return nil, nil, ErrEndOfInput
+	}
+
+	var b MessageBatch
+	_ = tran.Payload.Iter(func(i int, part *message.Part) error {
+		b = append(b, newMessageFromPart(part))
+		return nil
+	})
+	return b, func(c context.Context, r error) error {
+		r = fromPublicBatchError(r)
+		return tran.Ack(c, r)
+	}, nil
 }
 
 //------------------------------------------------------------------------------
@@ -220,7 +230,7 @@ type OwnedInput struct {
 	i input.Streamed
 }
 
-// ReadBatch attemps to read a message batch from the input, along with a
+// ReadBatch attempts to read a message batch from the input, along with a
 // function to be called once the entire batch can be either acked (successfully
 // sent or intentionally filtered) or nacked (failed to be processed or
 // dispatched to the output).
@@ -244,22 +254,14 @@ func (o *OwnedInput) ReadBatch(ctx context.Context) (MessageBatch, AckFunc, erro
 		b = append(b, newMessageFromPart(part))
 		return nil
 	})
-	return b, tran.Ack, nil
+	return b, func(c context.Context, r error) error {
+		r = fromPublicBatchError(r)
+		return tran.Ack(c, r)
+	}, nil
 }
 
 // Close the input.
 func (o *OwnedInput) Close(ctx context.Context) error {
-	o.i.CloseAsync()
-	for {
-		// Gross but will do for now until we replace these with context params.
-		if err := o.i.WaitForClose(time.Millisecond * 100); err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-	}
-
+	o.i.TriggerStopConsuming()
+	return o.i.WaitForClose(ctx)
 }

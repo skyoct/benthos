@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,16 +16,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle/tracing"
 	"github.com/benthosdev/benthos/v4/internal/component/buffer"
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/component/ratelimit"
+	"github.com/benthosdev/benthos/v4/internal/component/tracer"
 	"github.com/benthosdev/benthos/v4/internal/config"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 )
 
@@ -35,11 +35,12 @@ import (
 // defaults of a standard Benthos configuration. Environment variable
 // interpolations are also parsed and resolved the same as regular configs.
 //
-// Benthos streams register HTTP endpoints by default that expose metrics and
-// ready checks. If your intention is to execute multiple streams in the same
-// process then it is recommended that you disable the HTTP server in config, or
-// use `SetHTTPMux` with prefixed multiplexers in order to share it across the
-// streams.
+// Streams built with a stream builder have the HTTP server for exposing metrics
+// and ready checks disabled by default, which is the only deviation away from a
+// standard Benthos default configuration. In order to enable the server set the
+// configuration field `http.enabled` to `true` explicitly, or use `SetHTTPMux`
+// in order to provide an explicit HTTP multiplexer for registering those
+// endpoints.
 type StreamBuilder struct {
 	http       api.Config
 	threads    int
@@ -49,6 +50,7 @@ type StreamBuilder struct {
 	outputs    []output.Config
 	resources  manager.ResourceConfig
 	metrics    metrics.Config
+	tracer     tracer.Config
 	logger     log.Config
 
 	producerChan chan message.Transaction
@@ -65,11 +67,14 @@ type StreamBuilder struct {
 
 // NewStreamBuilder creates a new StreamBuilder.
 func NewStreamBuilder() *StreamBuilder {
+	httpConf := api.NewConfig()
+	httpConf.Enabled = false
 	return &StreamBuilder{
-		http:      api.NewConfig(),
+		http:      httpConf,
 		buffer:    buffer.NewConfig(),
 		resources: manager.NewResourceConfig(),
 		metrics:   metrics.NewConfig(),
+		tracer:    tracer.NewConfig(),
 		logger:    log.NewConfig(),
 		env:       globalEnvironment,
 	}
@@ -100,8 +105,8 @@ func (s *StreamBuilder) SetThreads(n int) {
 
 // PrintLogger is a simple Print based interface implemented by custom loggers.
 type PrintLogger interface {
-	Printf(format string, v ...interface{})
-	Println(v ...interface{})
+	Printf(format string, v ...any)
+	Println(v ...any)
 }
 
 // SetPrintLogger sets a custom logger supporting a simple Print based interface
@@ -160,13 +165,12 @@ func (s *StreamBuilder) AddProducerFunc() (MessageHandlerFunc, error) {
 	s.producerID = uuid.String()
 
 	conf := input.NewConfig()
-	conf.Type = input.TypeInproc
+	conf.Type = "inproc"
 	conf.Inproc = input.InprocConfig(s.producerID)
 	s.inputs = append(s.inputs, conf)
 
 	return func(ctx context.Context, m *Message) error {
-		tmpMsg := message.QuickBatch(nil)
-		tmpMsg.Append(m.part)
+		tmpMsg := message.Batch{m.part}
 		resChan := make(chan error)
 		select {
 		case tChan <- message.NewTransaction(tmpMsg, resChan):
@@ -209,14 +213,14 @@ func (s *StreamBuilder) AddBatchProducerFunc() (MessageBatchHandlerFunc, error) 
 	s.producerID = uuid.String()
 
 	conf := input.NewConfig()
-	conf.Type = input.TypeInproc
+	conf.Type = "inproc"
 	conf.Inproc = input.InprocConfig(s.producerID)
 	s.inputs = append(s.inputs, conf)
 
 	return func(ctx context.Context, b MessageBatch) error {
-		tmpMsg := message.QuickBatch(nil)
-		for _, m := range b {
-			tmpMsg.Append(m.part)
+		tmpMsg := make(message.Batch, len(b))
+		for i, m := range b {
+			tmpMsg[i] = m.part
 		}
 		resChan := make(chan error)
 		select {
@@ -248,7 +252,7 @@ func (s *StreamBuilder) AddInputYAML(conf string) error {
 
 	iconf := input.NewConfig()
 	if err := nconf.Decode(&iconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.inputs = append(s.inputs, iconf)
@@ -270,7 +274,7 @@ func (s *StreamBuilder) AddProcessorYAML(conf string) error {
 
 	pconf := processor.NewConfig()
 	if err := nconf.Decode(&pconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.processors = append(s.processors, pconf)
@@ -290,7 +294,7 @@ func (s *StreamBuilder) AddProcessorYAML(conf string) error {
 // return an error.
 func (s *StreamBuilder) AddConsumerFunc(fn MessageHandlerFunc) error {
 	if s.consumerFunc != nil {
-		return errors.New("unable to add multiple producer funcs to a stream builder")
+		return errors.New("unable to add multiple consumer funcs to a stream builder")
 	}
 
 	uuid, err := uuid.NewV4()
@@ -309,7 +313,7 @@ func (s *StreamBuilder) AddConsumerFunc(fn MessageHandlerFunc) error {
 	s.consumerID = uuid.String()
 
 	conf := output.NewConfig()
-	conf.Type = output.TypeInproc
+	conf.Type = "inproc"
 	conf.Inproc = s.consumerID
 	s.outputs = append(s.outputs, conf)
 
@@ -333,7 +337,7 @@ func (s *StreamBuilder) AddConsumerFunc(fn MessageHandlerFunc) error {
 // message contents.
 func (s *StreamBuilder) AddBatchConsumerFunc(fn MessageBatchHandlerFunc) error {
 	if s.consumerFunc != nil {
-		return errors.New("unable to add multiple producer funcs to a stream builder")
+		return errors.New("unable to add multiple consumer funcs to a stream builder")
 	}
 
 	uuid, err := uuid.NewV4()
@@ -345,7 +349,7 @@ func (s *StreamBuilder) AddBatchConsumerFunc(fn MessageBatchHandlerFunc) error {
 	s.consumerID = uuid.String()
 
 	conf := output.NewConfig()
-	conf.Type = output.TypeInproc
+	conf.Type = "inproc"
 	conf.Inproc = s.consumerID
 	s.outputs = append(s.outputs, conf)
 
@@ -367,7 +371,7 @@ func (s *StreamBuilder) AddOutputYAML(conf string) error {
 
 	oconf := output.NewConfig()
 	if err := nconf.Decode(&oconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.outputs = append(s.outputs, oconf)
@@ -388,7 +392,7 @@ func (s *StreamBuilder) AddCacheYAML(conf string) error {
 
 	cconf := cache.NewConfig()
 	if err := nconf.Decode(&cconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 	if cconf.Label == "" {
 		return errors.New("a label must be specified for cache resources")
@@ -417,7 +421,7 @@ func (s *StreamBuilder) AddRateLimitYAML(conf string) error {
 
 	rconf := ratelimit.NewConfig()
 	if err := nconf.Decode(&rconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 	if rconf.Label == "" {
 		return errors.New("a label must be specified for rate limit resources")
@@ -445,7 +449,7 @@ func (s *StreamBuilder) AddResourcesYAML(conf string) error {
 
 	rconf := manager.NewResourceConfig()
 	if err := node.Decode(&rconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	return s.resources.AddFrom(&rconf)
@@ -474,8 +478,9 @@ func (s *StreamBuilder) SetYAML(conf string) error {
 	}
 
 	sconf := config.New()
+	sconf.HTTP.Enabled = false
 	if err := node.Decode(&sconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.setFromConfig(sconf)
@@ -486,7 +491,7 @@ func (s *StreamBuilder) SetYAML(conf string) error {
 // dot path to a value. The argument must be a variadic list of pairs, where the
 // first element is a string containing the target field dot path, and the
 // second element is a typed value to set the field to.
-func (s *StreamBuilder) SetFields(pathValues ...interface{}) error {
+func (s *StreamBuilder) SetFields(pathValues ...any) error {
 	if s.producerChan != nil {
 		return errors.New("attempted to override config after adding a func producer")
 	}
@@ -530,8 +535,9 @@ func (s *StreamBuilder) SetFields(pathValues ...interface{}) error {
 	}
 
 	sconf := config.New()
+	sconf.HTTP.Enabled = false
 	if err := rootNode.Decode(&sconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.setFromConfig(sconf)
@@ -548,6 +554,7 @@ func (s *StreamBuilder) setFromConfig(sconf config.Type) {
 	s.resources = sconf.ResourceConfig
 	s.logger = sconf.Logger
 	s.metrics = sconf.Metrics
+	s.tracer = sconf.Tracer
 }
 
 // SetBufferYAML parses a buffer YAML configuration and sets it to the builder
@@ -565,7 +572,7 @@ func (s *StreamBuilder) SetBufferYAML(conf string) error {
 
 	bconf := buffer.NewConfig()
 	if err := nconf.Decode(&bconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.buffer = bconf
@@ -586,10 +593,31 @@ func (s *StreamBuilder) SetMetricsYAML(conf string) error {
 
 	mconf := metrics.NewConfig()
 	if err := nconf.Decode(&mconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.metrics = mconf
+	return nil
+}
+
+// SetTracerYAML parses a tracer YAML configuration and adds it to the builder
+// such that all stream components emit tracing spans through it.
+func (s *StreamBuilder) SetTracerYAML(conf string) error {
+	nconf, err := getYAMLNode([]byte(conf))
+	if err != nil {
+		return err
+	}
+
+	if err := s.lintYAMLComponent(nconf, docs.TypeTracer); err != nil {
+		return err
+	}
+
+	tconf := tracer.NewConfig()
+	if err := nconf.Decode(&tconf); err != nil {
+		return convertDocsLintErr(err)
+	}
+
+	s.tracer = tconf
 	return nil
 }
 
@@ -607,7 +635,7 @@ func (s *StreamBuilder) SetLoggerYAML(conf string) error {
 
 	lconf := log.NewConfig()
 	if err := node.Decode(&lconf); err != nil {
-		return err
+		return convertDocsLintErr(err)
 	}
 
 	s.logger = lconf
@@ -702,12 +730,33 @@ func (s *StreamBuilder) buildWithEnv(env *bundle.Environment) (*Stream, error) {
 		}
 	}
 
-	stats, err := bundle.AllMetrics.Init(s.metrics, logger)
+	// This temporary manager is a very lazy way of instantiating a manager that
+	// restricts the bloblang and component environments to custom plugins.
+	// Ideally we would break out the constructor for our general purpose
+	// manager to allow for a two-tier initialisation where we can defer
+	// resource constructors until after this metrics exporter is initialised.
+	tmpMgr, err := manager.New(
+		manager.NewResourceConfig(),
+		manager.OptSetLogger(logger),
+		manager.OptSetEnvironment(env),
+		manager.OptSetBloblangEnvironment(s.env.getBloblangParserEnv()),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	tracer, err := env.TracersInit(s.tracer, tmpMgr)
+	if err != nil {
+		return nil, err
+	}
+
+	stats, err := env.MetricsInit(s.metrics, tmpMgr)
 	if err != nil {
 		return nil, err
 	}
 
 	apiMut := s.apiMut
+	var apiType *api.Type
 	if apiMut == nil {
 		var sanitNode yaml.Node
 		err := sanitNode.Encode(conf)
@@ -717,16 +766,21 @@ func (s *StreamBuilder) buildWithEnv(env *bundle.Environment) (*Stream, error) {
 			sanitConf.DocsProvider = env
 			_ = config.Spec().SanitiseYAML(&sanitNode, sanitConf)
 		}
-		if apiMut, err = api.New("", "", s.http, sanitNode, logger, stats); err != nil {
+		if apiType, err = api.New("", "", s.http, sanitNode, logger, stats); err != nil {
 			return nil, fmt.Errorf("unable to create stream HTTP server due to: %w. Tip: you can disable the server with `http.enabled` set to `false`, or override the configured server with SetHTTPMux", err)
 		}
+		apiMut = apiType
 	} else if hler := stats.HandlerFunc(); hler != nil {
 		apiMut.RegisterEndpoint("/stats", "Exposes service-wide metrics in the format configured.", hler)
 		apiMut.RegisterEndpoint("/metrics", "Exposes service-wide metrics in the format configured.", hler)
 	}
 
-	mgr, err := manager.NewV2(
-		conf.ResourceConfig, apiMut, logger, stats,
+	mgr, err := manager.New(
+		conf.ResourceConfig,
+		manager.OptSetAPIReg(apiMut),
+		manager.OptSetLogger(logger),
+		manager.OptSetMetrics(stats),
+		manager.OptSetTracer(tracer),
 		manager.OptSetEnvironment(env),
 		manager.OptSetBloblangEnvironment(s.env.getBloblangParserEnv()),
 	)
@@ -738,7 +792,7 @@ func (s *StreamBuilder) buildWithEnv(env *bundle.Environment) (*Stream, error) {
 		mgr.SetPipe(s.producerID, s.producerChan)
 	}
 
-	return newStream(conf.Config, mgr, stats, logger, func() {
+	return newStream(conf.Config, apiType, mgr, stats, tracer, logger, func() {
 		if err := s.runConsumerFunc(mgr); err != nil {
 			logger.Errorf("Failed to run func consumer: %v", err)
 		}
@@ -751,6 +805,7 @@ type builderConfig struct {
 	manager.ResourceConfig `yaml:",inline"`
 	Metrics                metrics.Config `yaml:"metrics"`
 	Logger                 *log.Config    `yaml:"logger,omitempty"`
+	Tracer                 tracer.Config  `yaml:"tracer"`
 }
 
 func (s *StreamBuilder) buildConfig() builderConfig {
@@ -765,7 +820,7 @@ func (s *StreamBuilder) buildConfig() builderConfig {
 	if len(s.inputs) == 1 {
 		conf.Input = s.inputs[0]
 	} else if len(s.inputs) > 1 {
-		conf.Input.Type = input.TypeBroker
+		conf.Input.Type = "broker"
 		conf.Input.Broker.Inputs = s.inputs
 	}
 
@@ -777,12 +832,13 @@ func (s *StreamBuilder) buildConfig() builderConfig {
 	if len(s.outputs) == 1 {
 		conf.Output = s.outputs[0]
 	} else if len(s.outputs) > 1 {
-		conf.Output.Type = output.TypeBroker
+		conf.Output.Type = "broker"
 		conf.Output.Broker.Outputs = s.outputs
 	}
 
 	conf.ResourceConfig = s.resources
 	conf.Metrics = s.metrics
+	conf.Tracer = s.tracer
 	if s.customLogger == nil {
 		conf.Logger = &s.logger
 	}
@@ -801,39 +857,6 @@ func getYAMLNode(b []byte) (*yaml.Node, error) {
 		return nconf.Content[0], nil
 	}
 	return &nconf, nil
-}
-
-// Lint represents a configuration file linting error.
-type Lint struct {
-	Line int
-	What string
-}
-
-// LintError is an error type that represents one or more configuration file
-// linting errors that were encountered.
-type LintError []Lint
-
-// Error returns an error string.
-func (e LintError) Error() string {
-	var lintsCollapsed bytes.Buffer
-	for i, l := range e {
-		if i > 0 {
-			lintsCollapsed.WriteString("\n")
-		}
-		fmt.Fprintf(&lintsCollapsed, "line %v: %v", l.Line, l.What)
-	}
-	return fmt.Sprintf("lint errors: %v", lintsCollapsed.String())
-}
-
-func lintsToErr(lints []docs.Lint) error {
-	if len(lints) == 0 {
-		return nil
-	}
-	var e LintError
-	for _, l := range lints {
-		e = append(e, Lint{Line: l.Line, What: l.What})
-	}
-	return e
 }
 
 func (s *StreamBuilder) lintYAMLSpec(spec docs.FieldSpecs, node *yaml.Node) error {

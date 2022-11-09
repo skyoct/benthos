@@ -5,22 +5,20 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/codec"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		return newSocketOutput(c, nm, nm.Logger(), nm.Metrics())
 	}), docs.ComponentSpec{
 		Name:    "socket",
@@ -31,7 +29,7 @@ func init() {
 			),
 			docs.FieldString("address", "The address (or path) to connect to.", "/tmp/benthos.sock", "localhost:9000"),
 			codec.WriterDocs,
-		).ChildDefaultAndTypesFromStruct(ooutput.NewSocketConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewSocketConfig()),
 		Categories: []string{
 			"Network",
 		},
@@ -41,12 +39,12 @@ func init() {
 	}
 }
 
-func newSocketOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
+func newSocketOutput(conf output.Config, mgr bundle.NewManagement, log log.Modular, stats metrics.Type) (output.Streamed, error) {
 	t, err := newSocketWriter(conf.Socket, mgr, log)
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.NewAsyncWriter("socket", 1, t, log, stats)
+	return output.NewAsyncWriter("socket", 1, t, mgr)
 }
 
 type socketWriter struct {
@@ -61,7 +59,7 @@ type socketWriter struct {
 	writerMut sync.Mutex
 }
 
-func newSocketWriter(conf ooutput.SocketConfig, mgr interop.Manager, log log.Modular) (*socketWriter, error) {
+func newSocketWriter(conf output.SocketConfig, mgr bundle.NewManagement, log log.Modular) (*socketWriter, error) {
 	switch conf.Network {
 	case "tcp", "udp", "unix":
 	default:
@@ -81,7 +79,7 @@ func newSocketWriter(conf ooutput.SocketConfig, mgr interop.Manager, log log.Mod
 	return &t, nil
 }
 
-func (s *socketWriter) ConnectWithContext(ctx context.Context) error {
+func (s *socketWriter) Connect(ctx context.Context) error {
 	s.writerMut.Lock()
 	defer s.writerMut.Unlock()
 	if s.writer != nil {
@@ -103,7 +101,7 @@ func (s *socketWriter) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (s *socketWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (s *socketWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	s.writerMut.Lock()
 	w := s.writer
 	s.writerMut.Unlock()
@@ -124,15 +122,14 @@ func (s *socketWriter) WriteWithContext(ctx context.Context, msg *message.Batch)
 	})
 }
 
-func (s *socketWriter) CloseAsync() {
+func (s *socketWriter) Close(ctx context.Context) error {
 	s.writerMut.Lock()
+	defer s.writerMut.Unlock()
+
+	var err error
 	if s.writer != nil {
-		s.writer.Close(context.Background())
+		err = s.writer.Close(context.Background())
 		s.writer = nil
 	}
-	s.writerMut.Unlock()
-}
-
-func (s *socketWriter) WaitForClose(timeout time.Duration) error {
-	return nil
+	return err
 }

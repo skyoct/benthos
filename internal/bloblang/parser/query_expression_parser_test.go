@@ -13,14 +13,14 @@ import (
 func TestExpressionsParser(t *testing.T) {
 	type easyMsg struct {
 		content string
-		meta    map[string]string
+		meta    map[string]any
 	}
 
 	tests := map[string]struct {
 		input    string
 		output   string
 		messages []easyMsg
-		value    *interface{}
+		value    *any
 		index    int
 	}{
 		"match literals": {
@@ -262,10 +262,10 @@ func TestExpressionsParser(t *testing.T) {
 				part := message.NewPart([]byte(m.content))
 				if m.meta != nil {
 					for k, v := range m.meta {
-						part.MetaSet(k, v)
+						part.MetaSetMut(k, v)
 					}
 				}
-				msg.Append(part)
+				msg = append(msg, part)
 			}
 
 			e, err := tryParseQuery(test.input)
@@ -273,12 +273,12 @@ func TestExpressionsParser(t *testing.T) {
 
 			res := query.ExecToString(e, query.FunctionContext{
 				Index: test.index, MsgBatch: msg,
-			}.WithValueFunc(func() *interface{} { return test.value }))
+			}.WithValueFunc(func() *any { return test.value }))
 
 			assert.Equal(t, test.output, res)
 			res = string(query.ExecToBytes(e, query.FunctionContext{
 				Index: test.index, MsgBatch: msg,
-			}.WithValueFunc(func() *interface{} { return test.value })))
+			}.WithValueFunc(func() *any { return test.value })))
 			assert.Equal(t, test.output, res)
 		})
 	}

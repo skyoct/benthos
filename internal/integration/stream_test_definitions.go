@@ -27,7 +27,7 @@ func StreamTestOpenClose() StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			require.NoError(t, sendMessage(env.ctx, t, tranChan, "hello world"))
@@ -49,13 +49,13 @@ func StreamTestOpenCloseIsolated() StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			output := initOutput(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 			require.NoError(t, sendMessage(env.ctx, t, tranChan, "hello world"))
 
 			input := initInput(t, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, nil)
+				closeConnectors(t, env, input, nil)
 			})
 			messageMatch(t, receiveMessage(env.ctx, t, input.TransactionChan(), nil), "hello world")
 		},
@@ -73,7 +73,7 @@ func StreamTestMetadata() StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			require.NoError(t, sendMessage(
@@ -107,7 +107,7 @@ func StreamTestMetadataFilter() StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			require.NoError(t, sendMessage(
@@ -118,7 +118,7 @@ func StreamTestMetadataFilter() StreamTestDefinition {
 			))
 
 			p := receiveMessage(env.ctx, t, input.TransactionChan(), nil)
-			assert.Empty(t, p.MetaGet("foo"))
+			assert.Empty(t, p.MetaGetStr("foo"))
 			messageMatch(t, p, "hello world", "bar", "bar_value")
 		},
 	)
@@ -134,7 +134,7 @@ func StreamTestSendBatch(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -148,7 +148,7 @@ func StreamTestSendBatch(n int) StreamTestDefinition {
 			assert.NoError(t, err)
 
 			for len(set) > 0 {
-				messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+				messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 			}
 		},
 	)
@@ -166,7 +166,7 @@ func StreamTestSendBatches(batchSize, batches, parallelism int) StreamTestDefini
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -198,7 +198,7 @@ func StreamTestSendBatches(batchSize, batches, parallelism int) StreamTestDefini
 			go func() {
 				defer wg.Done()
 				for len(set) > 0 {
-					messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+					messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 				}
 			}()
 
@@ -230,7 +230,7 @@ func StreamTestSendBatchCount(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			resChan := make(chan error)
@@ -239,8 +239,9 @@ func StreamTestSendBatchCount(n int) StreamTestDefinition {
 			for i := 0; i < n; i++ {
 				payload := fmt.Sprintf("hello world %v", i)
 				set[payload] = nil
-				msg := message.QuickBatch(nil)
-				msg.Append(message.NewPart([]byte(payload)))
+				msg := message.Batch{
+					message.NewPart([]byte(payload)),
+				}
 				select {
 				case tranChan <- message.NewTransaction(msg, resChan):
 				case res := <-resChan:
@@ -260,7 +261,7 @@ func StreamTestSendBatchCount(n int) StreamTestDefinition {
 			}
 
 			for len(set) > 0 {
-				messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+				messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 			}
 		},
 	)
@@ -279,7 +280,7 @@ func StreamTestSendBatchCountIsolated(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			output := initOutput(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			resChan := make(chan error)
@@ -288,8 +289,9 @@ func StreamTestSendBatchCountIsolated(n int) StreamTestDefinition {
 			for i := 0; i < n; i++ {
 				payload := fmt.Sprintf("hello world %v", i)
 				set[payload] = nil
-				msg := message.QuickBatch(nil)
-				msg.Append(message.NewPart([]byte(payload)))
+				msg := message.Batch{
+					message.NewPart([]byte(payload)),
+				}
 				select {
 				case tranChan <- message.NewTransaction(msg, resChan):
 				case res := <-resChan:
@@ -310,11 +312,11 @@ func StreamTestSendBatchCountIsolated(n int) StreamTestDefinition {
 
 			input := initInput(t, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, nil)
+				closeConnectors(t, env, input, nil)
 			})
 
 			for len(set) > 0 {
-				messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+				messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 			}
 		},
 	)
@@ -333,7 +335,7 @@ func StreamTestReceiveBatchCount(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -352,10 +354,7 @@ func StreamTestReceiveBatchCount(n int) StreamTestDefinition {
 			}
 
 			assert.Equal(t, n, tran.Payload.Len())
-			_ = tran.Payload.Iter(func(_ int, p *message.Part) error {
-				messageInSet(t, true, false, p, set)
-				return nil
-			})
+			messagesInSet(t, true, false, tran.Payload, set)
 
 			require.NoError(t, tran.Ack(env.ctx, nil))
 		},
@@ -373,7 +372,7 @@ func StreamTestStreamSequential(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -385,7 +384,7 @@ func StreamTestStreamSequential(n int) StreamTestDefinition {
 			}
 
 			for len(set) > 0 {
-				messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+				messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 			}
 		},
 	)
@@ -402,7 +401,7 @@ func StreamTestStreamIsolated(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			output := initOutput(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			set := map[string][]string{}
@@ -415,11 +414,11 @@ func StreamTestStreamIsolated(n int) StreamTestDefinition {
 
 			input := initInput(t, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, nil)
+				closeConnectors(t, env, input, nil)
 			})
 
 			for len(set) > 0 {
-				messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+				messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 			}
 		},
 	)
@@ -436,7 +435,7 @@ func StreamTestCheckpointCapture() StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			go func() {
@@ -451,27 +450,27 @@ func StreamTestCheckpointCapture() StreamTestDefinition {
 			responseFns := make([]func(context.Context, error) error, 5)
 
 			msg, responseFns[0] = receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-			assert.Equal(t, "A", string(msg.Get()))
+			assert.Equal(t, "A", string(msg.AsBytes()))
 			require.NoError(t, responseFns[0](env.ctx, nil))
 
 			msg, responseFns[1] = receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-			assert.Equal(t, "B", string(msg.Get()))
+			assert.Equal(t, "B", string(msg.AsBytes()))
 			require.NoError(t, responseFns[1](env.ctx, nil))
 
 			msg, responseFns[2] = receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-			assert.Equal(t, "C", string(msg.Get()))
+			assert.Equal(t, "C", string(msg.AsBytes()))
 
 			msg, responseFns[3] = receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-			assert.Equal(t, "D", string(msg.Get()))
+			assert.Equal(t, "D", string(msg.AsBytes()))
 			require.NoError(t, responseFns[3](env.ctx, nil))
 
 			msg, responseFns[4] = receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-			assert.Equal(t, "E", string(msg.Get()))
+			assert.Equal(t, "E", string(msg.AsBytes()))
 
 			require.NoError(t, responseFns[2](env.ctx, errors.New("rejecting just cus")))
 			require.NoError(t, responseFns[4](env.ctx, errors.New("rejecting just cus")))
 
-			closeConnectors(t, input, nil)
+			closeConnectors(t, env, input, nil)
 
 			select {
 			case <-time.After(time.Second * 5):
@@ -481,17 +480,17 @@ func StreamTestCheckpointCapture() StreamTestDefinition {
 
 			input = initInput(t, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, nil)
+				closeConnectors(t, env, input, nil)
 			})
 
 			msg = receiveMessage(env.ctx, t, input.TransactionChan(), nil)
-			assert.Equal(t, "C", string(msg.Get()))
+			assert.Equal(t, "C", string(msg.AsBytes()))
 
 			msg = receiveMessage(env.ctx, t, input.TransactionChan(), nil)
-			assert.Equal(t, "D", string(msg.Get()))
+			assert.Equal(t, "D", string(msg.AsBytes()))
 
 			msg = receiveMessage(env.ctx, t, input.TransactionChan(), nil)
-			assert.Equal(t, "E", string(msg.Get()))
+			assert.Equal(t, "E", string(msg.AsBytes()))
 		},
 	)
 }
@@ -506,7 +505,7 @@ func StreamTestStreamParallel(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction, n)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -529,7 +528,7 @@ func StreamTestStreamParallel(n int) StreamTestDefinition {
 			go func() {
 				defer wg.Done()
 				for len(set) > 0 {
-					messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+					messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 				}
 			}()
 
@@ -553,7 +552,7 @@ func StreamTestStreamSaturatedUnacked(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction, n)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -565,9 +564,9 @@ func StreamTestStreamSaturatedUnacked(n int) StreamTestDefinition {
 
 			resFns := make([]func(context.Context, error) error, n/2)
 			for i := range resFns {
-				var b *message.Part
-				b, resFns[i] = receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-				messageInSet(t, true, env.allowDuplicateMessages, b, set)
+				var b message.Batch
+				b, resFns[i] = receiveBatchNoRes(env.ctx, t, input.TransactionChan())
+				messagesInSet(t, true, env.allowDuplicateMessages, b, set)
 			}
 
 			<-time.After(time.Second * 5)
@@ -577,7 +576,7 @@ func StreamTestStreamSaturatedUnacked(n int) StreamTestDefinition {
 
 			// Consume all remaining messages
 			for len(set) > 0 {
-				messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+				messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 			}
 		},
 	)
@@ -594,7 +593,7 @@ func StreamTestAtLeastOnceDelivery() StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			expectedMessages := map[string]struct{}{
@@ -611,7 +610,7 @@ func StreamTestAtLeastOnceDelivery() StreamTestDefinition {
 
 			for i := 0; i < len(expectedMessages); i++ {
 				msg, responseFn := receiveMessageNoRes(env.ctx, t, input.TransactionChan())
-				key := string(msg.Get())
+				key := string(msg.AsBytes())
 				assert.Contains(t, expectedMessages, key)
 				delete(expectedMessages, key)
 				if key != "C" && key != "E" {
@@ -631,7 +630,7 @@ func StreamTestAtLeastOnceDelivery() StreamTestDefinition {
 				t.Fatal(env.ctx.Err())
 			}
 
-			closeConnectors(t, input, nil)
+			closeConnectors(t, env, input, nil)
 
 			select {
 			case <-time.After(time.Second * 5):
@@ -641,7 +640,7 @@ func StreamTestAtLeastOnceDelivery() StreamTestDefinition {
 
 			input = initInput(t, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, nil)
+				closeConnectors(t, env, input, nil)
 			})
 
 			expectedMessages = map[string]struct{}{
@@ -650,7 +649,7 @@ func StreamTestAtLeastOnceDelivery() StreamTestDefinition {
 
 			for i := 0; i < len(expectedMessages); i++ {
 				msg = receiveMessage(env.ctx, t, input.TransactionChan(), nil)
-				key := string(msg.Get())
+				key := string(msg.AsBytes())
 				assert.Contains(t, expectedMessages, key)
 				delete(expectedMessages, key)
 			}
@@ -669,7 +668,7 @@ func StreamTestStreamParallelLossy(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, input, output)
+				closeConnectors(t, env, input, output)
 			})
 
 			set := map[string][]string{}
@@ -695,19 +694,19 @@ func StreamTestStreamParallelLossy(n int) StreamTestDefinition {
 				for i := 0; i < n; i++ {
 					if i%10 == 1 {
 						rejected++
-						messageInSet(
+						messagesInSet(
 							t, false, true,
-							receiveMessage(env.ctx, t, input.TransactionChan(), errors.New("rejected just cus")),
+							receiveBatch(env.ctx, t, input.TransactionChan(), errors.New("rejected just cus")),
 							set,
 						)
 					} else {
-						messageInSet(t, true, true, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+						messagesInSet(t, true, true, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 					}
 				}
 
 				t.Log("Finished first loop, looping through rejected messages.")
 				for len(set) > 0 {
-					messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+					messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 				}
 			}()
 
@@ -727,7 +726,7 @@ func StreamTestStreamParallelLossyThroughReconnect(n int) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			input, output := initConnectors(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			set := map[string][]string{}
@@ -753,26 +752,26 @@ func StreamTestStreamParallelLossyThroughReconnect(n int) StreamTestDefinition {
 				for i := 0; i < n; i++ {
 					if i%10 == 1 {
 						rejected++
-						messageInSet(
+						messagesInSet(
 							t, false, env.allowDuplicateMessages,
-							receiveMessage(env.ctx, t, input.TransactionChan(), errors.New("rejected just cus")),
+							receiveBatch(env.ctx, t, input.TransactionChan(), errors.New("rejected just cus")),
 							set,
 						)
 					} else {
-						messageInSet(t, true, env.allowDuplicateMessages, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+						messagesInSet(t, true, env.allowDuplicateMessages, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 					}
 				}
 
-				closeConnectors(t, input, nil)
+				closeConnectors(t, env, input, nil)
 
 				input = initInput(t, env)
 				t.Cleanup(func() {
-					closeConnectors(t, input, nil)
+					closeConnectors(t, env, input, nil)
 				})
 
 				t.Log("Finished first loop, looping through rejected messages.")
 				for len(set) > 0 {
-					messageInSet(t, true, true, receiveMessage(env.ctx, t, input.TransactionChan(), nil), set)
+					messagesInSet(t, true, true, receiveBatch(env.ctx, t, input.TransactionChan(), nil), set)
 				}
 			}()
 
@@ -796,7 +795,7 @@ func StreamTestOutputOnlySendSequential(n int, getFn GetMessageFunc) StreamTestD
 			tranChan := make(chan message.Transaction)
 			output := initOutput(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			set := map[string]string{}
@@ -826,7 +825,7 @@ func StreamTestOutputOnlySendBatch(n int, getFn GetMessageFunc) StreamTestDefini
 			tranChan := make(chan message.Transaction)
 			output := initOutput(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			set := map[string]string{}
@@ -859,7 +858,7 @@ func StreamTestOutputOnlyOverride(getFn GetMessageFunc) StreamTestDefinition {
 			tranChan := make(chan message.Transaction)
 			output := initOutput(t, tranChan, env)
 			t.Cleanup(func() {
-				closeConnectors(t, nil, output)
+				closeConnectors(t, env, nil, output)
 			})
 
 			first := `{"content":"this should be overridden","id":1}`

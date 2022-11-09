@@ -14,7 +14,7 @@ func (k *kgoLogger) Level() kgo.LogLevel {
 	return kgo.LogLevelDebug
 }
 
-func (k *kgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...interface{}) {
+func (k *kgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...any) {
 	tmpL := k.l
 	if len(keyvals) > 0 {
 		tmpL = k.l.With(keyvals...)
@@ -28,6 +28,6 @@ func (k *kgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...interface{}) 
 	case kgo.LogLevelInfo:
 		tmpL.Info(msg)
 	case kgo.LogLevelDebug:
-		tmpL.Debug(msg)
+		tmpL.Trace(msg)
 	}
 }

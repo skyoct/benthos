@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -12,7 +13,6 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 )
 
@@ -21,25 +21,20 @@ type StreamStatus struct {
 	stoppedAfter int64
 	config       stream.Config
 	strm         *stream.Type
-	logger       log.Modular
 	metrics      *metrics.Local
 	createdAt    time.Time
 }
 
-// NewStreamStatus creates a new StreamStatus.
-func NewStreamStatus(
-	conf stream.Config,
-	strm *stream.Type,
-	logger log.Modular,
-	stats *metrics.Local,
-) *StreamStatus {
+func newStreamStatus(conf stream.Config, stats *metrics.Local) *StreamStatus {
 	return &StreamStatus{
 		config:    conf,
-		strm:      strm,
-		logger:    logger,
 		metrics:   stats,
 		createdAt: time.Now(),
 	}
+}
+
+func (s *StreamStatus) setStream(strm *stream.Type) {
+	s.strm = strm
 }
 
 // IsRunning returns a boolean indicating whether the stream is currently
@@ -146,9 +141,14 @@ func (m *Type) Create(id string, conf stream.Config) error {
 	}
 
 	strmFlatMetrics := metrics.NewLocal()
-	sMgr := m.manager.ForStream(id).WithAddedMetrics(strmFlatMetrics).(bundle.NewManagement)
+	sMgr := m.manager.ForStream(id).WithAddedMetrics(strmFlatMetrics)
 
-	var wrapper *StreamStatus
+	// Note we initialise the status without a stream pointer, this is okay as
+	// long as we do not add it to m.streams without one set.
+	//
+	// This seems a bit wonky but we can't rule out a race condition between
+	// the stream terminating and setClosed and actually initialising a status.
+	wrapper := newStreamStatus(conf, strmFlatMetrics)
 	strm, err := stream.New(conf, sMgr, stream.OptOnClose(func() {
 		wrapper.setClosed()
 	}))
@@ -156,7 +156,7 @@ func (m *Type) Create(id string, conf stream.Config) error {
 		return err
 	}
 
-	wrapper = NewStreamStatus(conf, strm, sMgr.Logger(), strmFlatMetrics)
+	wrapper.setStream(strm)
 	m.streams[id] = wrapper
 	return nil
 }
@@ -181,7 +181,7 @@ func (m *Type) Read(id string) (*StreamStatus, error) {
 
 // Update attempts to stop an existing stream and replace it with a new version
 // of the same stream.
-func (m *Type) Update(id string, conf stream.Config, timeout time.Duration) error {
+func (m *Type) Update(ctx context.Context, id string, conf stream.Config) error {
 	m.lock.Lock()
 	wrapper, exists := m.streams[id]
 	closed := m.closed
@@ -198,7 +198,7 @@ func (m *Type) Update(id string, conf stream.Config, timeout time.Duration) erro
 		return nil
 	}
 
-	if err := m.Delete(id, timeout); err != nil {
+	if err := m.Delete(ctx, id); err != nil {
 		return err
 	}
 	return m.Create(id, conf)
@@ -207,7 +207,7 @@ func (m *Type) Update(id string, conf stream.Config, timeout time.Duration) erro
 // Delete attempts to stop and remove a stream by its ID. Returns an error if
 // the stream was not found, or if clean shutdown fails in the specified period
 // of time.
-func (m *Type) Delete(id string, timeout time.Duration) error {
+func (m *Type) Delete(ctx context.Context, id string) error {
 	m.lock.Lock()
 	if m.closed {
 		m.lock.Unlock()
@@ -220,7 +220,7 @@ func (m *Type) Delete(id string, timeout time.Duration) error {
 		return ErrStreamDoesNotExist
 	}
 
-	if err := wrapper.strm.Stop(timeout); err != nil {
+	if err := wrapper.strm.Stop(ctx); err != nil {
 		return err
 	}
 
@@ -235,7 +235,7 @@ func (m *Type) Delete(id string, timeout time.Duration) error {
 
 // Stop attempts to gracefully shut down all active streams and close the
 // stream manager.
-func (m *Type) Stop(timeout time.Duration) error {
+func (m *Type) Stop(ctx context.Context) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -243,7 +243,7 @@ func (m *Type) Stop(timeout time.Duration) error {
 
 	for k, v := range m.streams {
 		go func(id string, strm *StreamStatus) {
-			if err := strm.strm.Stop(timeout); err != nil {
+			if err := strm.strm.Stop(ctx); err != nil {
 				resultChan <- id
 			} else {
 				resultChan <- ""
@@ -266,5 +266,3 @@ func (m *Type) Stop(timeout time.Duration) error {
 	}
 	return nil
 }
-
-//------------------------------------------------------------------------------

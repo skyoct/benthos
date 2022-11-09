@@ -68,6 +68,7 @@ output:
       id: ""
       secret: ""
       token: ""
+      from_ec2_role: false
       role: ""
       role_external_id: ""
     max_retries: 0
@@ -95,8 +96,8 @@ allowing you to transfer data across accounts. You can find out more
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 This output benefits from sending messages as a batch for improved performance.
 Batches can be formed at both the input and output level. You can find out more
@@ -132,7 +133,7 @@ Default: `""`
 
 ### `max_in_flight`
 
-The maximum number of messages to have in flight at a given time. Increase this to improve throughput.
+The maximum number of parallel message batches to have in flight at any given time.
 
 
 Type: `int`  
@@ -289,6 +290,15 @@ The token for the credentials being used, required when using short term credent
 
 Type: `string`  
 Default: `""`  
+
+### `credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
 
 ### `credentials.role`
 

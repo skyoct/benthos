@@ -58,6 +58,7 @@ input:
       id: ""
       secret: ""
       token: ""
+      from_ec2_role: false
       role: ""
       role_external_id: ""
     force_path_style_urls: false
@@ -183,6 +184,15 @@ The token for the credentials being used, required when using short term credent
 Type: `string`  
 Default: `""`  
 
+### `credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
+
 ### `credentials.role`
 
 A role ARN to assume.
@@ -217,7 +227,7 @@ Default: `false`
 
 ### `codec`
 
-The way in which the bytes of a data source should be converted into discrete messages, codecs are useful for specifying how large files or contiunous streams of data might be processed in small chunks rather than loading it all in memory. It's possible to consume lines using a custom delimiter with the `delim:x` codec, where x is the character sequence custom delimiter. Codecs can be chained with `/`, for example a gzip compressed CSV file can be consumed with the codec `gzip/csv`.
+The way in which the bytes of a data source should be converted into discrete messages, codecs are useful for specifying how large files or continuous streams of data might be processed in small chunks rather than loading it all in memory. It's possible to consume lines using a custom delimiter with the `delim:x` codec, where x is the character sequence custom delimiter. Codecs can be chained with `/`, for example a gzip compressed CSV file can be consumed with the codec `gzip/csv`.
 
 
 Type: `string`  
@@ -227,6 +237,7 @@ Default: `"all-bytes"`
 |---|---|
 | `auto` | EXPERIMENTAL: Attempts to derive a codec for each file based on information such as the extension. For example, a .tar.gz file would be consumed with the `gzip/tar` codec. Defaults to all-bytes. |
 | `all-bytes` | Consume the entire file as a single binary message. |
+| `avro-ocf:marshaler=x` | EXPERIMENTAL: Consume a stream of Avro OCF datum. The `marshaler` parameter is optional and has the options: `goavro` (default), `json`. Use `goavro` if OCF contains logical types. |
 | `chunker:x` | Consume the file in chunks of a given number of bytes. |
 | `csv` | Consume structured rows as comma separated values, the first row must be a header row. |
 | `csv:x` | Consume structured rows as values separated by a custom delimiter, the first row must be a header row. The custom delimiter must be a single character, e.g. the codec `"csv:\t"` would consume a tab delimited file. |

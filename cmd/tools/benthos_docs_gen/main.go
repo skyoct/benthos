@@ -8,18 +8,12 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle"
+	"github.com/benthosdev/benthos/v4/internal/api"
 	tdocs "github.com/benthosdev/benthos/v4/internal/cli/test/docs"
-	"github.com/benthosdev/benthos/v4/internal/component/buffer"
-	"github.com/benthosdev/benthos/v4/internal/component/cache"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/component/ratelimit"
-	"github.com/benthosdev/benthos/v4/internal/component/tracer"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
+	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/template"
+	"github.com/benthosdev/benthos/v4/public/service"
 
 	_ "github.com/benthosdev/benthos/v4/public/components/all"
 )
@@ -36,36 +30,23 @@ func create(t, path string, resBytes []byte) {
 	fmt.Printf("Documentation for '%v' has changed, updating: %v\n", t, path)
 }
 
-func render(dir string, embed bool, conf interface{}, spec docs.ComponentSpec) {
-	mdSpec, err := spec.AsMarkdown(embed, conf)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to generate docs for '%v': %v", spec.Name, err))
-	}
-
-	create(spec.Name, dir, mdSpec)
-}
-
 func main() {
 	docsDir := "./website/docs/components"
 	flag.StringVar(&docsDir, "dir", docsDir, "The directory to write docs to")
 	flag.Parse()
 
-	if _, err := template.InitTemplates(); err != nil {
+	if err := template.InitNativeTemplates(); err != nil {
 		panic(err)
 	}
 
-	doInputs(docsDir)
-	doBuffers(docsDir)
-	doCaches(docsDir)
-	// Note, disabling condition docs generation now as a convenience, but we
-	// can add it back in if there are automated changes required.
-	// TODO: V4 Delete entirely
-	// doConditions(docsDir)
-	doMetrics(docsDir)
-	doOutputs(docsDir)
-	doProcessors(docsDir)
-	doRateLimits(docsDir)
-	doTracers(docsDir)
+	service.GlobalEnvironment().WalkInputs(viewForDir(path.Join(docsDir, "./inputs")))
+	service.GlobalEnvironment().WalkBuffers(viewForDir(path.Join(docsDir, "./buffers")))
+	service.GlobalEnvironment().WalkCaches(viewForDir(path.Join(docsDir, "./caches")))
+	service.GlobalEnvironment().WalkMetrics(viewForDir(path.Join(docsDir, "./metrics")))
+	service.GlobalEnvironment().WalkOutputs(viewForDir(path.Join(docsDir, "./outputs")))
+	service.GlobalEnvironment().WalkProcessors(viewForDir(path.Join(docsDir, "./processors")))
+	service.GlobalEnvironment().WalkRateLimits(viewForDir(path.Join(docsDir, "./rate_limits")))
+	service.GlobalEnvironment().WalkTracers(viewForDir(path.Join(docsDir, "./tracers")))
 
 	// Bloblang stuff
 	doBloblang(docsDir)
@@ -73,71 +54,23 @@ func main() {
 	// Unit test docs
 	doTestDocs(docsDir)
 
+	// HTTP docs
+	doHTTP(docsDir)
+
+	// Logger docs
+	doLogger(docsDir)
+
 	// Template docs
 	doTemplates(docsDir)
 }
 
-func doInputs(docsDir string) {
-	for _, v := range bundle.AllInputs.Docs() {
-		conf := input.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./inputs", v.Name+".md"), true, conf, v)
-	}
-}
-
-func doBuffers(docsDir string) {
-	for _, v := range bundle.AllBuffers.Docs() {
-		conf := buffer.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./buffers", v.Name+".md"), true, conf, v)
-	}
-}
-
-func doCaches(docsDir string) {
-	for _, v := range bundle.AllCaches.Docs() {
-		conf := cache.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./caches", v.Name+".md"), false, conf, v)
-	}
-}
-
-func doMetrics(docsDir string) {
-	for _, v := range bundle.AllMetrics.Docs() {
-		conf := metrics.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./metrics", v.Name+".md"), true, conf, v)
-	}
-}
-
-func doOutputs(docsDir string) {
-	for _, v := range bundle.AllOutputs.Docs() {
-		conf := output.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./outputs", v.Name+".md"), true, conf, v)
-	}
-}
-
-func doProcessors(docsDir string) {
-	for _, v := range bundle.AllProcessors.Docs() {
-		conf := processor.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./processors", v.Name+".md"), false, conf, v)
-	}
-}
-
-func doRateLimits(docsDir string) {
-	for _, v := range bundle.AllRateLimits.Docs() {
-		conf := ratelimit.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./rate_limits", v.Name+".md"), false, conf, v)
-	}
-}
-
-func doTracers(docsDir string) {
-	for _, v := range bundle.AllTracers.Docs() {
-		conf := tracer.NewConfig()
-		conf.Type = v.Name
-		render(path.Join(docsDir, "./tracers", v.Name+".md"), true, conf, v)
+func viewForDir(docsDir string) func(name string, config *service.ConfigView) {
+	return func(name string, config *service.ConfigView) {
+		mdSpec, err := config.RenderDocs()
+		if err != nil {
+			panic(fmt.Sprintf("Failed to generate docs for '%v': %v", name, err))
+		}
+		create(name, path.Join(docsDir, name+".md"), mdSpec)
 	}
 }
 
@@ -163,6 +96,24 @@ func doTestDocs(dir string) {
 	}
 
 	create("test docs", filepath.Join(dir, "..", "configuration", "unit_testing.md"), mdSpec)
+}
+
+func doHTTP(dir string) {
+	mdSpec, err := api.DocsMarkdown()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to generate docs for http: %v", err))
+	}
+
+	create("http docs", filepath.Join(dir, "http", "about.md"), mdSpec)
+}
+
+func doLogger(dir string) {
+	mdSpec, err := log.DocsMarkdown()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to generate docs for logger: %v", err))
+	}
+
+	create("logger docs", filepath.Join(dir, "logger", "about.md"), mdSpec)
 }
 
 func doTemplates(dir string) {

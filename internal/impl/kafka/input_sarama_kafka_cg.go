@@ -45,10 +45,10 @@ func (k *kafkaReader) ConsumeClaim(sess sarama.ConsumerGroupSession, claim saram
 		<-time.After(time.Second)
 		return err
 	}
-	defer batchPolicy.CloseAsync()
+	defer batchPolicy.Close(context.Background())
 
 	var nextTimedBatchChan <-chan time.Time
-	var flushBatch func(context.Context, chan<- asyncMessage, *message.Batch, int64) bool
+	var flushBatch func(context.Context, chan<- asyncMessage, message.Batch, int64) bool
 	if k.conf.CheckpointLimit > 1 {
 		flushBatch = k.asyncCheckpointer(claim.Topic(), claim.Partition())
 	} else {
@@ -64,7 +64,7 @@ func (k *kafkaReader) ConsumeClaim(sess sarama.ConsumerGroupSession, claim saram
 		select {
 		case <-nextTimedBatchChan:
 			nextTimedBatchChan = nil
-			if !flushBatch(sess.Context(), k.msgChan, batchPolicy.Flush(), latestOffset+1) {
+			if !flushBatch(sess.Context(), k.msgChan, batchPolicy.Flush(sess.Context()), latestOffset+1) {
 				return nil
 			}
 		case data, open := <-claim.Messages():
@@ -73,11 +73,11 @@ func (k *kafkaReader) ConsumeClaim(sess sarama.ConsumerGroupSession, claim saram
 			}
 
 			latestOffset = data.Offset
-			part := dataToPart(claim.HighWaterMarkOffset(), data)
+			part := dataToPart(claim.HighWaterMarkOffset(), data, k.conf.MultiHeader)
 
 			if batchPolicy.Add(part) {
 				nextTimedBatchChan = nil
-				if !flushBatch(sess.Context(), k.msgChan, batchPolicy.Flush(), latestOffset+1) {
+				if !flushBatch(sess.Context(), k.msgChan, batchPolicy.Flush(sess.Context()), latestOffset+1) {
 					return nil
 				}
 			}

@@ -3,7 +3,6 @@ package mqtt
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,27 +13,21 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	mqttconf "github.com/benthosdev/benthos/v4/internal/impl/mqtt/shared"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	"github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(conf oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		m, err := newMQTTReader(conf.MQTT, nm.Logger())
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(conf input.Config, nm bundle.NewManagement) (input.Streamed, error) {
+		m, err := newMQTTReader(conf.MQTT, nm)
 		if err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader(
-			"mqtt",
-			true,
-			reader.NewAsyncPreserver(m),
-			nm.Logger(), nm.Metrics(),
-		)
+		return input.NewAsyncReader("mqtt", true, input.NewAsyncPreserver(m), nm)
 	}), docs.ComponentSpec{
 		Name: "mqtt",
 		Summary: `
@@ -66,10 +59,10 @@ You can access these metadata fields using
 			mqttconf.WillFieldSpec(),
 			docs.FieldString("connect_timeout", "The maximum amount of time to wait in order to establish a connection before the attempt is abandoned.", "1s", "500ms").HasDefault("30s").AtVersion("3.58.0"),
 			docs.FieldString("user", "A username to assume for the connection.").Advanced(),
-			docs.FieldString("password", "A password to provide for the connection.").Advanced(),
+			docs.FieldString("password", "A password to provide for the connection.").Advanced().Secret(),
 			docs.FieldInt("keepalive", "Max seconds of inactivity before a keepalive message is sent.").Advanced(),
 			tls.FieldSpec().AtVersion("3.45.0"),
-		).ChildDefaultAndTypesFromStruct(oinput.NewMQTTConfig()),
+		).ChildDefaultAndTypesFromStruct(input.NewMQTTConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -85,20 +78,22 @@ type mqttReader struct {
 	cMut    sync.Mutex
 
 	connectTimeout time.Duration
-	conf           oinput.MQTTConfig
+	conf           input.MQTTConfig
 
 	interruptChan chan struct{}
 
 	urls []string
 
 	log log.Modular
+	mgr bundle.NewManagement
 }
 
-func newMQTTReader(conf oinput.MQTTConfig, log log.Modular) (*mqttReader, error) {
+func newMQTTReader(conf input.MQTTConfig, mgr bundle.NewManagement) (*mqttReader, error) {
 	m := &mqttReader{
 		conf:          conf,
 		interruptChan: make(chan struct{}),
-		log:           log,
+		log:           mgr.Logger(),
+		mgr:           mgr,
 	}
 
 	var err error
@@ -133,7 +128,7 @@ func newMQTTReader(conf oinput.MQTTConfig, log log.Modular) (*mqttReader, error)
 	return m, nil
 }
 
-func (m *mqttReader) ConnectWithContext(ctx context.Context) error {
+func (m *mqttReader) Connect(ctx context.Context) error {
 	m.cMut.Lock()
 	defer m.cMut.Unlock()
 
@@ -195,7 +190,7 @@ func (m *mqttReader) ConnectWithContext(ctx context.Context) error {
 	}
 
 	if m.conf.TLS.Enabled {
-		tlsConf, err := m.conf.TLS.Get()
+		tlsConf, err := m.conf.TLS.Get(m.mgr.FS())
 		if err != nil {
 			return err
 		}
@@ -244,7 +239,7 @@ func (m *mqttReader) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (m *mqttReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (m *mqttReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	m.cMut.Lock()
 	msgChan := m.msgChan
 	m.cMut.Unlock()
@@ -266,11 +261,11 @@ func (m *mqttReader) ReadWithContext(ctx context.Context) (*message.Batch, reade
 		message := message.QuickBatch([][]byte{msg.Payload()})
 
 		p := message.Get(0)
-		p.MetaSet("mqtt_duplicate", strconv.FormatBool(msg.Duplicate()))
-		p.MetaSet("mqtt_qos", strconv.Itoa(int(msg.Qos())))
-		p.MetaSet("mqtt_retained", strconv.FormatBool(msg.Retained()))
-		p.MetaSet("mqtt_topic", msg.Topic())
-		p.MetaSet("mqtt_message_id", strconv.Itoa(int(msg.MessageID())))
+		p.MetaSetMut("mqtt_duplicate", msg.Duplicate())
+		p.MetaSetMut("mqtt_qos", int(msg.Qos()))
+		p.MetaSetMut("mqtt_retained", msg.Retained())
+		p.MetaSetMut("mqtt_topic", msg.Topic())
+		p.MetaSetMut("mqtt_message_id", int(msg.MessageID()))
 
 		return message, func(ctx context.Context, res error) error {
 			if res == nil {
@@ -285,16 +280,14 @@ func (m *mqttReader) ReadWithContext(ctx context.Context) (*message.Batch, reade
 	return nil, nil, component.ErrTimeout
 }
 
-func (m *mqttReader) CloseAsync() {
+func (m *mqttReader) Close(ctx context.Context) (err error) {
 	m.cMut.Lock()
+	defer m.cMut.Unlock()
+
 	if m.client != nil {
 		m.client.Disconnect(0)
 		m.client = nil
 		close(m.interruptChan)
 	}
-	m.cMut.Unlock()
-}
-
-func (m *mqttReader) WaitForClose(timeout time.Duration) error {
-	return nil
+	return
 }

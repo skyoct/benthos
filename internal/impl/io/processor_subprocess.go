@@ -18,20 +18,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newSubprocess(conf.Subprocess, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("subprocess", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("subprocess", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "subprocess",
 		Categories: []string{
@@ -65,7 +63,7 @@ If a message contains line breaks each line of the message is piped to the subpr
 			docs.FieldString(
 				"codec_recv", "Determines how messages read from the subprocess are decoded, which allows them to be logically separated.",
 			).HasOptions("lines", "length_prefixed_uint32_be", "netstring").AtVersion("3.37.0").Advanced(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewSubprocessConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewSubprocessConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -80,7 +78,7 @@ type subprocessProc struct {
 	mut      sync.Mutex
 }
 
-func newSubprocess(conf oprocessor.SubprocessConfig, mgr interop.Manager) (*subprocessProc, error) {
+func newSubprocess(conf processor.SubprocessConfig, mgr bundle.NewManagement) (*subprocessProc, error) {
 	e := &subprocessProc{
 		log: mgr.Logger(),
 	}
@@ -101,7 +99,7 @@ func (e *subprocessProc) getSendSubprocessorFunc(codec string) (func(part *messa
 			const prefixBytes int = 4
 
 			lenBuf := make([]byte, prefixBytes)
-			m := part.Get()
+			m := part.AsBytes()
 			binary.BigEndian.PutUint32(lenBuf, uint32(len(m)))
 
 			res, err := e.subproc.Send(lenBuf, m, nil)
@@ -111,13 +109,13 @@ func (e *subprocessProc) getSendSubprocessorFunc(codec string) (func(part *messa
 			}
 			res2 := make([]byte, len(res))
 			copy(res2, res)
-			part.Set(res2)
+			part.SetBytes(res2)
 			return nil
 		}, nil
 	case "netstring":
 		return func(part *message.Part) error {
 			lenBuf := make([]byte, 0)
-			m := part.Get()
+			m := part.AsBytes()
 			lenBuf = append(strconv.AppendUint(lenBuf, uint64(len(m)), 10), ':')
 			res, err := e.subproc.Send(lenBuf, m, commaBytes)
 			if err != nil {
@@ -126,13 +124,13 @@ func (e *subprocessProc) getSendSubprocessorFunc(codec string) (func(part *messa
 			}
 			res2 := make([]byte, len(res))
 			copy(res2, res)
-			part.Set(res2)
+			part.SetBytes(res2)
 			return nil
 		}, nil
 	case "lines":
 		return func(part *message.Part) error {
 			results := [][]byte{}
-			splitMsg := bytes.Split(part.Get(), newLineBytes)
+			splitMsg := bytes.Split(part.AsBytes(), newLineBytes)
 			for j, p := range splitMsg {
 				if len(p) == 0 && len(splitMsg) > 1 && j == (len(splitMsg)-1) {
 					results = append(results, []byte(""))
@@ -145,7 +143,7 @@ func (e *subprocessProc) getSendSubprocessorFunc(codec string) (func(part *messa
 				}
 				results = append(results, res)
 			}
-			part.Set(bytes.Join(results, newLineBytes))
+			part.SetBytes(bytes.Join(results, newLineBytes))
 			return nil
 		}, nil
 	}
@@ -444,19 +442,20 @@ func (s *subprocWrapper) Send(prolog, payload, epilog []byte) ([]byte, error) {
 
 //------------------------------------------------------------------------------
 
-var newLineBytes = []byte("\n")
-var commaBytes = []byte(",")
+var (
+	newLineBytes = []byte("\n")
+	commaBytes   = []byte(",")
+)
 
 // ProcessMessage logs an event and returns the message unchanged.
 func (e *subprocessProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
 	e.mut.Lock()
 	defer e.mut.Unlock()
 
-	result := msg.Copy()
-	if err := e.procFunc(result); err != nil {
+	if err := e.procFunc(msg); err != nil {
 		return nil, err
 	}
-	return []*message.Part{result}, nil
+	return []*message.Part{msg}, nil
 }
 
 func (e *subprocessProc) Close(ctx context.Context) error {

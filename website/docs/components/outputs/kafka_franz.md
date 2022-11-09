@@ -65,6 +65,7 @@ output:
       include_prefixes: []
       include_patterns: []
     max_in_flight: 10
+    timeout: 10s
     batching:
       count: 0
       byte_size: 0
@@ -144,6 +145,7 @@ Type: `string`
 | Option | Summary |
 |---|---|
 | `least_backup` | Chooses the least backed up partition (the partition with the fewest amount of buffered records). Partitions are selected per batch. |
+| `murmur2_hash` | Kafka's default hash algorithm that uses a 32-bit murmur2 hash of the key to compute which partition the record will be on. |
 | `round_robin` | Round-robin's messages through all available partitions. This algorithm has lower throughput and causes higher CPU load on brokers, but can be useful if you want to ensure an even distribution of records to partitions. |
 
 
@@ -199,6 +201,14 @@ The maximum number of batches to be sending in parallel at any given time.
 
 Type: `int`  
 Default: `10`  
+
+### `timeout`
+
+The maximum period of time to wait for message sends before abandoning the request and retrying
+
+
+Type: `string`  
+Default: `"10s"`  
 
 ### `batching`
 
@@ -355,6 +365,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -413,6 +426,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -420,7 +436,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -433,6 +449,25 @@ The path of a certificate key to use.
 
 Type: `string`  
 Default: `""`  
+
+### `tls.client_certs[].password`
+
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+password: foo
+
+password: ${KEY_PASSWORD}
+```
 
 ### `sasl`
 
@@ -459,10 +494,12 @@ Type: `string`
 
 | Option | Summary |
 |---|---|
+| `AWS_MSK_IAM` | AWS IAM based authentication as specified by the 'aws-msk-iam-auth' java library. |
 | `OAUTHBEARER` | OAuth Bearer based authentication. |
 | `PLAIN` | Plain text authentication. |
 | `SCRAM-SHA-256` | SCRAM based authentication as specified in RFC5802. |
 | `SCRAM-SHA-512` | SCRAM based authentication as specified in RFC5802. |
+| `none` | Disable sasl authentication |
 
 
 ### `sasl[].username`
@@ -476,6 +513,9 @@ Default: `""`
 ### `sasl[].password`
 
 A password to provide for PLAIN or SCRAM-* authentication.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -495,5 +535,95 @@ Key/value pairs to add to OAUTHBEARER authentication requests.
 
 
 Type: `object`  
+
+### `sasl[].aws`
+
+Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.
+
+
+Type: `object`  
+
+### `sasl[].aws.region`
+
+The AWS region to target.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.endpoint`
+
+Allows you to specify a custom endpoint for the AWS API.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials`
+
+Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/cloud/aws).
+
+
+Type: `object`  
+
+### `sasl[].aws.credentials.profile`
+
+A profile from `~/.aws/credentials` to use.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.id`
+
+The ID of credentials to use.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.secret`
+
+The secret for the credentials being used.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.token`
+
+The token for the credentials being used, required when using short term credentials.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
+
+### `sasl[].aws.credentials.role`
+
+A role ARN to assume.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.role_external_id`
+
+An external ID to provide when assuming a role.
+
+
+Type: `string`  
+Default: `""`  
 
 

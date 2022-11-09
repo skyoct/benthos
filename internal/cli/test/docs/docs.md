@@ -32,7 +32,7 @@ input:
 
 pipeline:
   processors:
-  - bloblang: '"%vend".format(content().uppercase().string())'
+  - mapping: '"%vend".format(content().uppercase().string())'
 
 output:
   aws_s3:
@@ -53,7 +53,7 @@ tests:
           example_key: example metadata value
     output_batches:
       -
-        - content_equals: example content
+        - content_equals: EXAMPLE CONTENTend
           metadata_equals:
             example_key: example metadata value
 ```
@@ -130,7 +130,7 @@ tests:
           example_key: example metadata value
     output_batches:
       -
-        - content_equals: example content
+        - content_equals: EXAMPLE CONTENTend
           metadata_equals:
             example_key: example metadata value
 ```
@@ -168,7 +168,7 @@ A map of key/value pairs that sets the metadata values of the message.
 ### `bloblang`
 
 ```yml
-bloblang: 'this.age > 10 && meta("foo").length() > 0'
+bloblang: 'this.age > 10 && @foo.length() > 0'
 ```
 
 Executes a [Bloblang expression][bloblang] on a message, if the result is anything other than a boolean equalling `true` the test fails.
@@ -241,7 +241,7 @@ Checks that both the message and the condition are valid JSON documents, and tha
 
 Executing tests for a specific config can be done by pointing the subcommand `test` at either the config to be tested or its test definition, e.g. `benthos test ./config.yaml` and `benthos test ./config_benthos_test.yaml` are equivalent.
 
-In order to execute all tests of a directory simply point `test` to that directory, e.g. `benthos test ./foo` will execute all tests found in the directory `foo`. In order to walk a directory tree and execute all tests found you can use the shortcut `./...`, e.g. `benthos test ./...` will execute all tests found in the current directory, any child directories, and so on.
+The `test` subcommand also supports wildcard patterns e.g. `benthos test ./foo/*.yaml` will execute all tests within matching files. In order to walk a directory tree and execute all tests found you can use the shortcut `./...`, e.g. `benthos test ./...` will execute all tests found in the current directory, any child directories, and so on.
 
 If you want to allow components to write logs at a provided level to stdout when running the tests, you can use
 `benthos test --log <level>`. Please consult the [logger docs][logger] for further details.
@@ -255,15 +255,15 @@ Sometimes you'll want to write tests for a series of processors, where one or mo
 ```yaml
 pipeline:
   processors:
-    - bloblang: 'root = "simon says: " + content()'
+    - mapping: 'root = "simon says: " + content()'
     - label: get_foobar_api
       http:
         url: http://example.com/foobar
         verb: GET
-    - bloblang: 'root = content().uppercase()'
+    - mapping: 'root = content().uppercase()'
 ```
 
-Rather than create a fake service for the `http` processor to interact with we can define a mock in our test definition that replaces it with a `bloblang` processor. Mocks are configured as a map of labels that identify a processor to replace and the config to replace it with:
+Rather than create a fake service for the `http` processor to interact with we can define a mock in our test definition that replaces it with a [`mapping` processor][processors.mapping]. Mocks are configured as a map of labels that identify a processor to replace and the config to replace it with:
 
 ```yaml
 tests:
@@ -271,14 +271,14 @@ tests:
     target_processors: '/pipeline/processors'
     mocks:
       get_foobar_api:
-        bloblang: 'root = content().string() + " this is some mock content"'
+        mapping: 'root = content().string() + " this is some mock content"'
     input_batch:
       - content: "hello world"
     output_batches:
       - - content_equals: "SIMON SAYS: HELLO WORLD THIS IS SOME MOCK CONTENT"
 ```
 
-With the above test definition the `http` processor will be swapped out for `bloblang: 'root = content().string() + " this is some mock content"'`. For the purposes of mocking it is recommended that you use a `bloblang` processor that simply mutates the message in a way that you would expect the mocked processor to.
+With the above test definition the `http` processor will be swapped out for `mapping: 'root = content().string() + " this is some mock content"'`. For the purposes of mocking it is recommended that you use a [`mapping` processor][processors.mapping] that simply mutates the message in a way that you would expect the mocked processor to.
 
 > Note: It's not currently possible to mock components that are imported as separate resource files (using `--resource`/`-r`). It is recommended that you mock these by maintaining separate definitions for test purposes (`-r "./test/*.yaml"`).
 
@@ -292,7 +292,7 @@ tests:
     target_processors: '/pipeline/processors'
     mocks:
       /pipeline/processors/1:
-        bloblang: 'root = content().string() + " this is some mock content"'
+        mapping: 'root = content().string() + " this is some mock content"'
     input_batch:
       - content: "hello world"
     output_batches:
@@ -308,3 +308,4 @@ The schema of a template file is as follows:
 [json-pointer]: https://tools.ietf.org/html/rfc6901
 [bloblang]: /docs/guides/bloblang/about
 [logger]: /docs/components/logger/about
+[processors.mapping]: /docs/components/processors/mapping

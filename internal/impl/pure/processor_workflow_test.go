@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strconv"
@@ -12,13 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/impl/pure"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestWorkflowDeps(t *testing.T) {
@@ -208,7 +207,7 @@ func newMockProcProvider(t *testing.T, confs map[string]processor.Config) bundle
 		resConf.ResourceProcessors = append(resConf.ResourceProcessors, v)
 	}
 
-	mgr, err := manager.NewV2(resConf, mock.NewManager(), log.Noop(), metrics.Noop())
+	mgr, err := manager.New(resConf)
 	require.NoError(t, err)
 
 	return mgr
@@ -452,16 +451,16 @@ func TestWorkflows(t *testing.T) {
 				part := message.NewPart([]byte(m.content))
 				if m.meta != nil {
 					for k, v := range m.meta {
-						part.MetaSet(k, v)
+						part.MetaSetMut(k, v)
 					}
 				}
 				if m.err != nil {
 					part.ErrorSet(m.err)
 				}
-				inputMsg.Append(part)
+				inputMsg = append(inputMsg, part)
 			}
 
-			msgs, res := p.ProcessMessage(inputMsg)
+			msgs, res := p.ProcessBatch(context.Background(), inputMsg.ShallowCopy())
 			if len(test.err) > 0 {
 				require.NotNil(t, res)
 				require.EqualError(t, res, test.err)
@@ -470,11 +469,11 @@ func TestWorkflows(t *testing.T) {
 				assert.Equal(t, len(test.output), msgs[0].Len())
 				for i, out := range test.output {
 					comparePart := mockMsg{
-						content: string(msgs[0].Get(i).Get()),
+						content: string(msgs[0].Get(i).AsBytes()),
 						meta:    map[string]string{},
 					}
 
-					_ = msgs[0].Get(i).MetaIter(func(k, v string) error {
+					_ = msgs[0].Get(i).MetaIterStr(func(k, v string) error {
 						comparePart.meta[k] = v
 						return nil
 					})
@@ -493,11 +492,12 @@ func TestWorkflows(t *testing.T) {
 
 			// Ensure nothing changed
 			for i, m := range test.input {
-				assert.Equal(t, m.content, string(inputMsg.Get(i).Get()))
+				assert.Equal(t, m.content, string(inputMsg.Get(i).AsBytes()))
 			}
 
-			p.CloseAsync()
-			assert.NoError(t, p.WaitForClose(time.Second))
+			ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+			defer done()
+			assert.NoError(t, p.Close(ctx))
 		})
 	}
 }
@@ -648,7 +648,7 @@ func TestWorkflowsWithResources(t *testing.T) {
 				parts = append(parts, []byte(input))
 			}
 
-			msgs, res := p.ProcessMessage(message.QuickBatch(parts))
+			msgs, res := p.ProcessBatch(context.Background(), message.QuickBatch(parts))
 			if len(test.err) > 0 {
 				require.NotNil(t, res)
 				require.EqualError(t, res, test.err)
@@ -661,8 +661,9 @@ func TestWorkflowsWithResources(t *testing.T) {
 				assert.Equal(t, test.output, output)
 			}
 
-			p.CloseAsync()
-			assert.NoError(t, p.WaitForClose(time.Second))
+			ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+			defer done()
+			assert.NoError(t, p.Close(ctx))
 		})
 	}
 }
@@ -725,7 +726,7 @@ func TestWorkflowsParallel(t *testing.T) {
 						parts = append(parts, []byte(input))
 					}
 
-					msgs, res := p.ProcessMessage(message.QuickBatch(parts))
+					msgs, res := p.ProcessBatch(context.Background(), message.QuickBatch(parts))
 					require.Nil(t, res)
 					require.Len(t, msgs, 1)
 					var actual []string
@@ -740,8 +741,9 @@ func TestWorkflowsParallel(t *testing.T) {
 		close(startChan)
 		wg.Wait()
 
-		p.CloseAsync()
-		assert.NoError(t, p.WaitForClose(time.Second))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		assert.NoError(t, p.Close(ctx))
+		done()
 	}
 }
 
@@ -906,7 +908,7 @@ func TestWorkflowsWithOrderResources(t *testing.T) {
 				parts = append(parts, []byte(input))
 			}
 
-			msgs, res := p.ProcessMessage(message.QuickBatch(parts))
+			msgs, res := p.ProcessBatch(context.Background(), message.QuickBatch(parts))
 			if len(test.err) > 0 {
 				require.NotNil(t, res)
 				require.EqualError(t, res, test.err)
@@ -919,8 +921,9 @@ func TestWorkflowsWithOrderResources(t *testing.T) {
 				assert.Equal(t, test.output, output)
 			}
 
-			p.CloseAsync()
-			assert.NoError(t, p.WaitForClose(time.Second))
+			ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+			defer done()
+			assert.NoError(t, p.Close(ctx))
 		})
 	}
 }

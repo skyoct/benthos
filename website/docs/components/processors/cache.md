@@ -53,6 +53,8 @@ cache:
 </TabItem>
 </Tabs>
 
+For use cases where you wish to cache the result of processors consider using the [`cached` processor](/docs/components/processors/cached) instead.
+
 This processor will interpolate functions within the `key` and `value` fields individually for each message. This allows you to specify dynamic keys and values based on the contents of the message payloads and metadata. You can find a list of functions [here](/docs/configuration/interpolation#bloblang-queries).
 
 ## Examples
@@ -69,7 +71,7 @@ This processor will interpolate functions within the `key` and `value` fields in
 Deduplication can be done using the add operator with a key extracted from the
 message payload, since it fails when a key already exists we can remove the
 duplicates using a
-[`bloblang` processor](/docs/components/processors/bloblang):
+[`mapping` processor](/docs/components/processors/mapping):
 
 ```yaml
 pipeline:
@@ -79,7 +81,7 @@ pipeline:
         operator: add
         key: '${! json("message.id") }'
         value: "storeme"
-    - bloblang: root = if errored() { deleted() }
+    - mapping: root = if errored() { deleted() }
 
 cache_resources:
   - label: foocache
@@ -108,7 +110,7 @@ pipeline:
               key: ${! content() }
               value: t
     # Delete all messages if we failed
-    - bloblang: |
+    - mapping: |
         root = if errored().from(0) {
           deleted()
         }

@@ -9,20 +9,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newBloblang(conf.Bloblang, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("bloblang", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("bloblang", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "bloblang",
 		Categories: []string{
@@ -35,7 +33,11 @@ Executes a [Bloblang](/docs/guides/bloblang/about) mapping on messages.`,
 		Description: `
 Bloblang is a powerful language that enables a wide range of mapping, transformation and filtering tasks. For more information [check out the docs](/docs/guides/bloblang/about).
 
-If your mapping is large and you'd prefer for it to live in a separate file then you can execute a mapping directly from a file with the expression ` + "`from \"<path>\"`" + `, where the path must be absolute, or relative from the location that Benthos is executed from.`,
+If your mapping is large and you'd prefer for it to live in a separate file then you can execute a mapping directly from a file with the expression ` + "`from \"<path>\"`" + `, where the path must be absolute, or relative from the location that Benthos is executed from.
+
+## Component Rename
+
+This processor was recently renamed to the ` + "[`mapping` processor](/docs/components/processors/mapping)" + ` in order to make the purpose of the processor more prominent. It is still valid to use the existing ` + "`bloblang`" + ` name but eventually it will be deprecated and replaced by the new name in example configs.`,
 		Footnotes: `
 ## Error Handling
 
@@ -132,7 +134,7 @@ type bloblangProc struct {
 	log  log.Modular
 }
 
-func newBloblang(conf string, mgr interop.Manager) (processor.V2Batched, error) {
+func newBloblang(conf string, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	exec, err := mgr.BloblEnvironment().NewMapping(conf)
 	if err != nil {
 		if perr, ok := err.(*parser.Error); ok {
@@ -146,12 +148,12 @@ func newBloblang(conf string, mgr interop.Manager) (processor.V2Batched, error) 
 	}, nil
 }
 
-func (b *bloblangProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (b *bloblangProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	newParts := make([]*message.Part, 0, msg.Len())
 	_ = msg.Iter(func(i int, part *message.Part) error {
 		p, err := b.exec.MapPart(i, msg)
 		if err != nil {
-			p = part.Copy()
+			p = part
 			b.log.Errorf("%v\n", err)
 			processor.MarkErr(p, spans[i], err)
 		}
@@ -163,10 +165,7 @@ func (b *bloblangProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, 
 	if len(newParts) == 0 {
 		return nil, nil
 	}
-
-	newMsg := message.QuickBatch(nil)
-	newMsg.SetAll(newParts)
-	return []*message.Batch{newMsg}, nil
+	return []message.Batch{newParts}, nil
 }
 
 func (b *bloblangProc) Close(context.Context) error {

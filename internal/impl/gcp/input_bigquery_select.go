@@ -3,6 +3,7 @@ package gcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"cloud.google.com/go/bigquery"
@@ -14,10 +15,11 @@ import (
 )
 
 type bigQuerySelectInputConfig struct {
-	project     string
-	queryParts  *bqQueryParts
-	argsMapping *bloblang.Executor
-	jobLabels   map[string]string
+	project       string
+	queryParts    *bqQueryParts
+	argsMapping   *bloblang.Executor
+	queryPriority bigquery.QueryPriority
+	jobLabels     map[string]string
 }
 
 func bigQuerySelectInputConfigFromParsed(inConf *service.ParsedConfig) (conf bigQuerySelectInputConfig, err error) {
@@ -66,6 +68,10 @@ func bigQuerySelectInputConfigFromParsed(inConf *service.ParsedConfig) (conf big
 		}
 	}
 
+	if conf.queryPriority, err = parseQueryPriority(inConf, "priority"); err != nil {
+		return
+	}
+
 	return
 }
 
@@ -86,9 +92,10 @@ func newBigQuerySelectInputConfig() *service.ConfigSpec {
 			Optional(),
 		).
 		Field(service.NewStringMapField("job_labels").Description("A list of labels to add to the query job.").Default(map[string]string{})).
+		Field(service.NewStringField("priority").Description("The priority with which to schedule the query.").Default("")).
 		Field(service.NewBloblangField("args_mapping").
 			Description("An optional [Bloblang mapping](/docs/guides/bloblang/about) which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `where`.").
-			Example(`root = [ "article", now().format_timestamp("2006-01-02") ]`).
+			Example(`root = [ "article", now().ts_format("2006-01-02") ]`).
 			Optional()).
 		Field(service.NewStringField("prefix").
 			Description("An optional prefix to prepend to the select query (before SELECT).").
@@ -156,7 +163,7 @@ func (inp *bigQuerySelectInput) Connect(ctx context.Context) error {
 		inp.client = wrapBQClient(client, inp.logger)
 	}
 
-	var args []interface{}
+	var args []any
 	argsMapping := inp.config.argsMapping
 
 	if argsMapping != nil {
@@ -165,7 +172,7 @@ func (inp *bigQuerySelectInput) Connect(ctx context.Context) error {
 			return err
 		}
 
-		checkedArgs, ok := rawArgs.([]interface{})
+		checkedArgs, ok := rawArgs.([]any)
 		if !ok {
 			return fmt.Errorf("mapping returned non-array result: %T", rawArgs)
 		}
@@ -174,9 +181,10 @@ func (inp *bigQuerySelectInput) Connect(ctx context.Context) error {
 	}
 
 	iter, err := inp.client.RunQuery(jobctx, &bqQueryBuilderOptions{
-		queryParts: inp.config.queryParts,
-		jobLabels:  inp.config.jobLabels,
-		args:       args,
+		queryParts:    inp.config.queryParts,
+		jobLabels:     inp.config.jobLabels,
+		queryPriority: inp.config.queryPriority,
+		args:          args,
 	})
 	if err != nil {
 		return err
@@ -194,7 +202,7 @@ func (inp *bigQuerySelectInput) Read(ctx context.Context) (*service.Message, ser
 
 	var row map[string]bigquery.Value
 	err := inp.iterator.Next(&row)
-	if err == iterator.Done {
+	if errors.Is(err, iterator.Done) {
 		return nil, nil, service.ErrEndOfInput
 	}
 	if err != nil {
@@ -235,7 +243,6 @@ func init() {
 			}
 			return service.AutoRetryNacks(i), nil
 		})
-
 	if err != nil {
 		panic(err)
 	}

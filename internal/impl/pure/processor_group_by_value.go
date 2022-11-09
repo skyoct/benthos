@@ -8,20 +8,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newGroupByValue(conf.GroupByValue, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("group_by_value", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("group_by_value", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "group_by_value",
 		Categories: []string{
@@ -70,7 +68,7 @@ type groupByValueProc struct {
 	value *field.Expression
 }
 
-func newGroupByValue(conf oprocessor.GroupByValueConfig, mgr interop.Manager) (processor.V2Batched, error) {
+func newGroupByValue(conf processor.GroupByValueConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	value, err := mgr.BloblEnvironment().NewField(conf.Value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse value expression: %v", err)
@@ -81,13 +79,13 @@ func newGroupByValue(conf oprocessor.GroupByValueConfig, mgr interop.Manager) (p
 	}, nil
 }
 
-func (g *groupByValueProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch *message.Batch) ([]*message.Batch, error) {
+func (g *groupByValueProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch message.Batch) ([]message.Batch, error) {
 	if batch.Len() == 0 {
 		return nil, nil
 	}
 
 	groupKeys := []string{}
-	groupMap := map[string]*message.Batch{}
+	groupMap := map[string]message.Batch{}
 
 	_ = batch.Iter(func(i int, p *message.Part) error {
 		v := g.value.String(i, batch)
@@ -97,18 +95,16 @@ func (g *groupByValueProc) ProcessBatch(ctx context.Context, spans []*tracing.Sp
 		)
 		spans[i].SetTag("group", v)
 		if group, exists := groupMap[v]; exists {
-			group.Append(p)
+			groupMap[v] = append(group, p)
 		} else {
 			g.log.Tracef("New group formed: %v\n", v)
 			groupKeys = append(groupKeys, v)
-			newMsg := message.QuickBatch(nil)
-			newMsg.Append(p)
-			groupMap[v] = newMsg
+			groupMap[v] = message.Batch{p}
 		}
 		return nil
 	})
 
-	msgs := []*message.Batch{}
+	msgs := []message.Batch{}
 	for _, key := range groupKeys {
 		msgs = append(msgs, groupMap[key])
 	}

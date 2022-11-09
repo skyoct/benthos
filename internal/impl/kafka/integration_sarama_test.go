@@ -13,15 +13,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/impl/kafka"
 	"github.com/benthosdev/benthos/v4/internal/integration"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-
-	// Bring in legacy definition
-	_ "github.com/benthosdev/benthos/v4/internal/interop/legacy"
 )
 
 func TestIntegrationSaramaRedpanda(t *testing.T) {
@@ -31,7 +27,7 @@ func TestIntegrationSaramaRedpanda(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 
-	pool.MaxWait = time.Second * 30
+	pool.MaxWait = time.Minute
 
 	kafkaPort, err := integration.GetFreePort()
 	require.NoError(t, err)
@@ -47,7 +43,7 @@ func TestIntegrationSaramaRedpanda(t *testing.T) {
 			"9092/tcp": {{HostIP: "", HostPort: kafkaPortStr}},
 		},
 		Cmd: []string{
-			"redpanda", "start", "--smp 1", "--overprovisioned",
+			"redpanda", "start", "--smp 1", "--overprovisioned", "",
 			"--kafka-addr 0.0.0.0:9092",
 			fmt.Sprintf("--advertise-kafka-addr localhost:%v", kafkaPort),
 		},
@@ -59,22 +55,9 @@ func TestIntegrationSaramaRedpanda(t *testing.T) {
 	})
 
 	_ = resource.Expire(900)
+
 	require.NoError(t, pool.Retry(func() error {
-		outConf := output.NewKafkaConfig()
-		outConf.TargetVersion = "2.1.0"
-		outConf.Addresses = []string{"localhost:" + kafkaPortStr}
-		outConf.Topic = "pls_ignore_just_testing_connection"
-		tmpOutput, serr := kafka.NewKafkaWriter(outConf, mock.NewManager(), log.Noop())
-		if serr != nil {
-			return serr
-		}
-		defer tmpOutput.CloseAsync()
-		if serr := tmpOutput.ConnectWithContext(context.Background()); serr != nil {
-			return serr
-		}
-		return tmpOutput.WriteWithContext(context.Background(), message.QuickBatch([][]byte{
-			[]byte("foo message"),
-		}))
+		return createKafkaTopic("localhost:"+kafkaPortStr, "pls_ignore_just_testing_connection", 1)
 	}))
 
 	template := `
@@ -139,6 +122,7 @@ input:
 				t, template,
 				integration.StreamTestOptPreTest(func(t testing.TB, ctx context.Context, testID string, vars *integration.StreamTestConfigVars) {
 					vars.Var4 = "group" + testID
+					require.NoError(t, createKafkaTopic("localhost:"+kafkaPortStr, testID, 1))
 				}),
 				integration.StreamTestOptPort(kafkaPortStr),
 				integration.StreamTestOptVarTwo("1"),
@@ -277,7 +261,6 @@ input:
 			integration.StreamTestOptVarThree("false"),
 		)
 	})
-
 }
 
 func TestIntegrationSaramaOld(t *testing.T) {
@@ -348,15 +331,15 @@ func TestIntegrationSaramaOld(t *testing.T) {
 		outConf.TargetVersion = "2.1.0"
 		outConf.Addresses = []string{address}
 		outConf.Topic = "pls_ignore_just_testing_connection"
-		tmpOutput, serr := kafka.NewKafkaWriter(outConf, mock.NewManager(), log.Noop())
+		tmpOutput, serr := kafka.NewKafkaWriter(outConf, mock.NewManager())
 		if serr != nil {
 			return serr
 		}
-		defer tmpOutput.CloseAsync()
-		if serr := tmpOutput.ConnectWithContext(context.Background()); serr != nil {
+		defer tmpOutput.Close(context.Background())
+		if serr := tmpOutput.Connect(context.Background()); serr != nil {
 			return serr
 		}
-		return tmpOutput.WriteWithContext(context.Background(), message.QuickBatch([][]byte{
+		return tmpOutput.WriteBatch(context.Background(), message.QuickBatch([][]byte{
 			[]byte("foo message"),
 		}))
 	}))

@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -8,17 +9,18 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func TestInproc(t *testing.T) {
-	mgr, err := manager.NewV2(manager.NewResourceConfig(), nil, log.Noop(), metrics.Noop())
+	tCtx, done := context.WithTimeout(context.Background(), time.Second*5)
+	defer done()
+
+	mgr, err := manager.New(manager.NewResourceConfig())
 	require.NoError(t, err)
 
 	_, err = mgr.GetPipe("foo")
@@ -51,8 +53,8 @@ func TestInproc(t *testing.T) {
 		t.Error("Timed out")
 	}
 
-	ip.CloseAsync()
-	require.NoError(t, ip.WaitForClose(time.Second))
+	ip.TriggerCloseNow()
+	require.NoError(t, ip.WaitForClose(tCtx))
 
 	select {
 	case _, open := <-toutchan:

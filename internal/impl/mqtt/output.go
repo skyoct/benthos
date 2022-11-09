@@ -15,27 +15,25 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	mqttconf "github.com/benthosdev/benthos/v4/internal/impl/mqtt/shared"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 	"github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(conf ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		w, err := newMQTTWriter(conf.MQTT, nm, nm.Logger())
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(conf output.Config, nm bundle.NewManagement) (output.Streamed, error) {
+		w, err := newMQTTWriter(conf.MQTT, nm)
 		if err != nil {
 			return nil, err
 		}
-		a, err := ooutput.NewAsyncWriter("mqtt", conf.MQTT.MaxInFlight, w, nm.Logger(), nm.Metrics())
+		a, err := output.NewAsyncWriter("mqtt", conf.MQTT.MaxInFlight, w, nm)
 		if err != nil {
 			return nil, err
 		}
-		return ooutput.OnlySinglePayloads(a), nil
+		return output.OnlySinglePayloads(a), nil
 	}), docs.ComponentSpec{
 		Name: "mqtt",
 		Summary: `
@@ -58,11 +56,11 @@ messages these interpolations are performed per message part.`),
 			docs.FieldString("retained_interpolated", "Override the value of `retained` with an interpolable value, this allows it to be dynamically set based on message contents. The value must resolve to either `true` or `false`.").IsInterpolated().Advanced().AtVersion("3.59.0"),
 			mqttconf.WillFieldSpec(),
 			docs.FieldString("user", "A username to connect with.").Advanced(),
-			docs.FieldString("password", "A password to connect with.").Advanced(),
+			docs.FieldString("password", "A password to connect with.").Advanced().Secret(),
 			docs.FieldInt("keepalive", "Max seconds of inactivity before a keepalive message is sent.").Advanced(),
 			tls.FieldSpec().AtVersion("3.45.0"),
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewMQTTConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewMQTTConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -74,12 +72,13 @@ messages these interpolations are performed per message part.`),
 
 type mqttWriter struct {
 	log log.Modular
+	mgr bundle.NewManagement
 
 	connectTimeout time.Duration
 	writeTimeout   time.Duration
 
 	urls     []string
-	conf     ooutput.MQTTConfig
+	conf     output.MQTTConfig
 	topic    *field.Expression
 	retained *field.Expression
 
@@ -87,13 +86,10 @@ type mqttWriter struct {
 	connMut sync.RWMutex
 }
 
-func newMQTTWriter(
-	conf ooutput.MQTTConfig,
-	mgr interop.Manager,
-	log log.Modular,
-) (*mqttWriter, error) {
+func newMQTTWriter(conf output.MQTTConfig, mgr bundle.NewManagement) (*mqttWriter, error) {
 	m := &mqttWriter{
-		log:  log,
+		log:  mgr.Logger(),
+		mgr:  mgr,
 		conf: conf,
 	}
 
@@ -142,7 +138,7 @@ func newMQTTWriter(
 	return m, nil
 }
 
-func (m *mqttWriter) ConnectWithContext(ctx context.Context) error {
+func (m *mqttWriter) Connect(ctx context.Context) error {
 	m.connMut.Lock()
 	defer m.connMut.Unlock()
 
@@ -170,7 +166,7 @@ func (m *mqttWriter) ConnectWithContext(ctx context.Context) error {
 	}
 
 	if m.conf.TLS.Enabled {
-		tlsConf, err := m.conf.TLS.Get()
+		tlsConf, err := m.conf.TLS.Get(m.mgr.FS())
 		if err != nil {
 			return err
 		}
@@ -197,7 +193,7 @@ func (m *mqttWriter) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (m *mqttWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (m *mqttWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	m.connMut.RLock()
 	client := m.client
 	m.connMut.RUnlock()
@@ -206,7 +202,7 @@ func (m *mqttWriter) WriteWithContext(ctx context.Context, msg *message.Batch) e
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
 		retained := m.conf.Retained
 		if m.retained != nil {
 			var parseErr error
@@ -215,7 +211,7 @@ func (m *mqttWriter) WriteWithContext(ctx context.Context, msg *message.Batch) e
 				m.log.Errorf("Error parsing boolean value from retained flag: %v \n", parseErr)
 			}
 		}
-		mtok := client.Publish(m.topic.String(i, msg), m.conf.QoS, retained, p.Get())
+		mtok := client.Publish(m.topic.String(i, msg), m.conf.QoS, retained, p.AsBytes())
 		mtok.Wait()
 		sendErr := mtok.Error()
 		if sendErr == mqtt.ErrNotConnected {
@@ -228,17 +224,13 @@ func (m *mqttWriter) WriteWithContext(ctx context.Context, msg *message.Batch) e
 	})
 }
 
-func (m *mqttWriter) CloseAsync() {
-	go func() {
-		m.connMut.Lock()
-		if m.client != nil {
-			m.client.Disconnect(0)
-			m.client = nil
-		}
-		m.connMut.Unlock()
-	}()
-}
+func (m *mqttWriter) Close(context.Context) error {
+	m.connMut.Lock()
+	defer m.connMut.Unlock()
 
-func (m *mqttWriter) WaitForClose(timeout time.Duration) error {
+	if m.client != nil {
+		m.client.Disconnect(0)
+		m.client = nil
+	}
 	return nil
 }

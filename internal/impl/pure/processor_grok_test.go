@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestGrokAllParts(t *testing.T) {
@@ -31,7 +32,7 @@ func TestGrokAllParts(t *testing.T) {
 		[]byte(`foo,1`),
 		[]byte(`foo,2`),
 	})
-	msgs, res := gSet.ProcessMessage(msgIn)
+	msgs, res := gSet.ProcessBatch(context.Background(), msgIn)
 	if len(msgs) != 1 {
 		t.Fatal("Wrong count of messages")
 	}
@@ -94,10 +95,10 @@ func TestGrok(t *testing.T) {
 			require.NoError(t, err)
 
 			inMsg := message.QuickBatch([][]byte{[]byte(test.input)})
-			msgs, _ := gSet.ProcessMessage(inMsg)
+			msgs, _ := gSet.ProcessBatch(context.Background(), inMsg)
 			require.Len(t, msgs, 1)
 
-			assert.Equal(t, test.output, string(msgs[0].Get(0).Get()))
+			assert.Equal(t, test.output, string(msgs[0].Get(0).AsBytes()))
 		})
 	}
 
@@ -112,10 +113,10 @@ func TestGrok(t *testing.T) {
 			require.NoError(t, err)
 
 			inMsg := message.QuickBatch([][]byte{[]byte(test.input)})
-			msgs, _ := gSet.ProcessMessage(inMsg)
+			msgs, _ := gSet.ProcessBatch(context.Background(), inMsg)
 			require.Len(t, msgs, 1)
 
-			assert.Equal(t, test.output, string(msgs[0].Get(0).Get()))
+			assert.Equal(t, test.output, string(msgs[0].Get(0).AsBytes()))
 		})
 	}
 }
@@ -138,12 +139,12 @@ FOONESTED %{INT:nested.first:int} %{WORD:nested.second} %{WORD:nested.third}
 	require.NoError(t, err)
 
 	inMsg := message.QuickBatch([][]byte{[]byte(`hello foo bar`)})
-	msgs, _ := gSet.ProcessMessage(inMsg)
+	msgs, _ := gSet.ProcessBatch(context.Background(), inMsg)
 	require.Len(t, msgs, 1)
-	assert.Equal(t, `{"first":"hello","second":"foo","third":"bar"}`, string(msgs[0].Get(0).Get()))
+	assert.Equal(t, `{"first":"hello","second":"foo","third":"bar"}`, string(msgs[0].Get(0).AsBytes()))
 
 	inMsg = message.QuickBatch([][]byte{[]byte(`10 foo bar`)})
-	msgs, _ = gSet.ProcessMessage(inMsg)
+	msgs, _ = gSet.ProcessBatch(context.Background(), inMsg)
 	require.Len(t, msgs, 1)
-	assert.Equal(t, `{"nested":{"first":10,"second":"foo","third":"bar"}}`, string(msgs[0].Get(0).Get()))
+	assert.Equal(t, `{"nested":{"first":10,"second":"foo","third":"bar"}}`, string(msgs[0].Get(0).AsBytes()))
 }

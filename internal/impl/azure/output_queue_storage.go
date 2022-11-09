@@ -10,21 +10,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/azure/shared"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newAzureQueueStorageOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newAzureQueueStorageOutput), docs.ComponentSpec{
 		Name:    "azure_queue_storage",
 		Status:  docs.StatusBeta,
 		Version: "3.36.0",
@@ -43,9 +39,9 @@ In order to set the `+"`queue_name`"+` you can use function interpolations descr
 				"ttl", "The TTL of each individual message as a duration string. Defaults to 0, meaning no retention period is set",
 				"60s", "5m", "36h",
 			).IsInterpolated().Advanced(),
-			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput.").AtVersion("3.45.0"),
+			docs.FieldInt("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time.").AtVersion("3.45.0"),
 			policy.FieldSpec(),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewAzureQueueStorageConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewAzureQueueStorageConfig()),
 		Categories: []string{
 			"Services",
 			"Azure",
@@ -56,20 +52,20 @@ In order to set the `+"`queue_name`"+` you can use function interpolations descr
 	}
 }
 
-func newAzureQueueStorageOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	s, err := newAzureQueueStorageWriter(conf.AzureQueueStorage, mgr, log)
+func newAzureQueueStorageOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	s, err := newAzureQueueStorageWriter(conf.AzureQueueStorage, mgr)
 	if err != nil {
 		return nil, err
 	}
-	w, err := ooutput.NewAsyncWriter("azure_queue_storage", conf.AzureQueueStorage.MaxInFlight, s, log, stats)
+	w, err := output.NewAsyncWriter("azure_queue_storage", conf.AzureQueueStorage.MaxInFlight, s, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.NewBatcherFromConfig(conf.AzureQueueStorage.Batching, ooutput.OnlySinglePayloads(w), mgr, log, stats)
+	return batcher.NewFromConfig(conf.AzureQueueStorage.Batching, output.OnlySinglePayloads(w), mgr)
 }
 
 type azureQueueStorageWriter struct {
-	conf ooutput.AzureQueueStorageConfig
+	conf output.AzureQueueStorageConfig
 
 	queueName  *field.Expression
 	ttl        *field.Expression
@@ -78,14 +74,14 @@ type azureQueueStorageWriter struct {
 	log log.Modular
 }
 
-func newAzureQueueStorageWriter(conf ooutput.AzureQueueStorageConfig, mgr interop.Manager, log log.Modular) (*azureQueueStorageWriter, error) {
+func newAzureQueueStorageWriter(conf output.AzureQueueStorageConfig, mgr bundle.NewManagement) (*azureQueueStorageWriter, error) {
 	serviceURL, err := shared.GetQueueServiceURL(conf.StorageAccount, conf.StorageAccessKey, conf.StorageConnectionString)
 	if err != nil {
 		return nil, err
 	}
 	s := &azureQueueStorageWriter{
 		conf:       conf,
-		log:        log,
+		log:        mgr.Logger(),
 		serviceURL: serviceURL,
 	}
 
@@ -100,12 +96,12 @@ func newAzureQueueStorageWriter(conf ooutput.AzureQueueStorageConfig, mgr intero
 	return s, nil
 }
 
-func (a *azureQueueStorageWriter) ConnectWithContext(ctx context.Context) error {
+func (a *azureQueueStorageWriter) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (a *azureQueueStorageWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+func (a *azureQueueStorageWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
 		queueURL := a.serviceURL.NewQueueURL(a.queueName.String(i, msg))
 		msgURL := queueURL.NewMessagesURL()
 		var ttl *time.Duration
@@ -123,7 +119,7 @@ func (a *azureQueueStorageWriter) WriteWithContext(ctx context.Context, msg *mes
 			}
 			return 0
 		}()
-		message := string(p.Get())
+		message := string(p.AsBytes())
 		_, err := msgURL.Enqueue(ctx, message, 0, timeToLive)
 		if err != nil {
 			if cerr, ok := err.(azqueue.StorageError); ok {
@@ -148,9 +144,6 @@ func (a *azureQueueStorageWriter) WriteWithContext(ctx context.Context, msg *mes
 	})
 }
 
-func (a *azureQueueStorageWriter) CloseAsync() {
-}
-
-func (a *azureQueueStorageWriter) WaitForClose(time.Duration) error {
+func (a *azureQueueStorageWriter) Close(context.Context) error {
 	return nil
 }

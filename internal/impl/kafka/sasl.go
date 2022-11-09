@@ -7,9 +7,10 @@ import (
 
 	"github.com/Shopify/sarama"
 
+	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
+	"github.com/benthosdev/benthos/v4/internal/impl/aws/config"
 	ksasl "github.com/benthosdev/benthos/v4/internal/impl/kafka/sasl"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/public/service"
 
 	"github.com/twmb/franz-go/pkg/sasl"
@@ -18,38 +19,52 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-var saslField = service.NewObjectListField("sasl",
-	service.NewStringAnnotatedEnumField("mechanism", map[string]string{
-		"PLAIN":         "Plain text authentication.",
-		"OAUTHBEARER":   "OAuth Bearer based authentication.",
-		"SCRAM-SHA-256": "SCRAM based authentication as specified in RFC5802.",
-		"SCRAM-SHA-512": "SCRAM based authentication as specified in RFC5802.",
-	}).
-		Description("The SASL mechanism to use."),
-	service.NewStringField("username").
-		Description("A username to provide for PLAIN or SCRAM-* authentication.").
-		Default(""),
-	service.NewStringField("password").
-		Description("A password to provide for PLAIN or SCRAM-* authentication.").
-		Default(""),
-	service.NewStringField("token").
-		Description("The token to use for a single session's OAUTHBEARER authentication.").
-		Default(""),
-	service.NewStringMapField("extensions").
-		Description("Key/value pairs to add to OAUTHBEARER authentication requests.").
-		Optional(),
-).
-	Description("Specify one or more methods of SASL authentication. SASL is tried in order; if the broker supports the first mechanism, all connections will use that mechanism. If the first mechanism fails, the client will pick the first supported mechanism. If the broker does not support any client mechanisms, connections will fail.").
-	Advanced().Optional().
-	Example(
-		[]interface{}{
-			map[string]interface{}{
-				"mechanism": "SCRAM-SHA-512",
-				"username":  "foo",
-				"password":  "bar",
+func notImportedAWSFn(c *service.ParsedConfig) (sasl.Mechanism, error) {
+	return nil, errors.New("unable to configure AWS SASL as this binary does not import components/aws")
+}
+
+// AWSSASLFromConfigFn is populated with the child `aws` package when imported.
+var AWSSASLFromConfigFn = notImportedAWSFn
+
+func saslField() *service.ConfigField {
+	return service.NewObjectListField("sasl",
+		service.NewStringAnnotatedEnumField("mechanism", map[string]string{
+			"none":          "Disable sasl authentication",
+			"PLAIN":         "Plain text authentication.",
+			"OAUTHBEARER":   "OAuth Bearer based authentication.",
+			"SCRAM-SHA-256": "SCRAM based authentication as specified in RFC5802.",
+			"SCRAM-SHA-512": "SCRAM based authentication as specified in RFC5802.",
+			"AWS_MSK_IAM":   "AWS IAM based authentication as specified by the 'aws-msk-iam-auth' java library.",
+		}).
+			Description("The SASL mechanism to use."),
+		service.NewStringField("username").
+			Description("A username to provide for PLAIN or SCRAM-* authentication.").
+			Default(""),
+		service.NewStringField("password").
+			Description("A password to provide for PLAIN or SCRAM-* authentication.").
+			Default("").Secret(),
+		service.NewStringField("token").
+			Description("The token to use for a single session's OAUTHBEARER authentication.").
+			Default(""),
+		service.NewStringMapField("extensions").
+			Description("Key/value pairs to add to OAUTHBEARER authentication requests.").
+			Optional(),
+		service.NewObjectField("aws", config.SessionFields()...).
+			Description("Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.").
+			Optional(),
+	).
+		Description("Specify one or more methods of SASL authentication. SASL is tried in order; if the broker supports the first mechanism, all connections will use that mechanism. If the first mechanism fails, the client will pick the first supported mechanism. If the broker does not support any client mechanisms, connections will fail.").
+		Advanced().Optional().
+		Example(
+			[]any{
+				map[string]any{
+					"mechanism": "SCRAM-SHA-512",
+					"username":  "foo",
+					"password":  "bar",
+				},
 			},
-		},
-	)
+		)
+}
 
 func saslMechanismsFromConfig(c *service.ParsedConfig) ([]sasl.Mechanism, error) {
 	if !c.Contains("sasl") {
@@ -61,19 +76,29 @@ func saslMechanismsFromConfig(c *service.ParsedConfig) ([]sasl.Mechanism, error)
 		return nil, err
 	}
 
-	mechanisms := make([]sasl.Mechanism, len(sList))
+	var mechanisms []sasl.Mechanism
+	var mechanism sasl.Mechanism
 	for i, mConf := range sList {
 		mechStr, err := mConf.FieldString("mechanism")
 		if err == nil {
 			switch mechStr {
+			case "", "none":
+				continue
 			case "PLAIN":
-				mechanisms[i], err = plainSaslFromConfig(mConf)
+				mechanism, err = plainSaslFromConfig(mConf)
+				mechanisms = append(mechanisms, mechanism)
 			case "OAUTHBEARER":
-				mechanisms[i], err = oauthSaslFromConfig(mConf)
+				mechanism, err = oauthSaslFromConfig(mConf)
+				mechanisms = append(mechanisms, mechanism)
 			case "SCRAM-SHA-256":
-				mechanisms[i], err = scram256SaslFromConfig(mConf)
+				mechanism, err = scram256SaslFromConfig(mConf)
+				mechanisms = append(mechanisms, mechanism)
 			case "SCRAM-SHA-512":
-				mechanisms[i], err = scram512SaslFromConfig(mConf)
+				mechanism, err = scram512SaslFromConfig(mConf)
+				mechanisms = append(mechanisms, mechanism)
+			case "AWS_MSK_IAM":
+				mechanism, err = AWSSASLFromConfigFn(mConf)
+				mechanisms = append(mechanisms, mechanism)
 			default:
 				err = fmt.Errorf("unknown mechanism: %v", mechStr)
 			}
@@ -167,7 +192,7 @@ var (
 )
 
 // ApplySASLConfig applies a SASL config to a sarama config.
-func ApplySASLConfig(s ksasl.Config, mgr interop.Manager, conf *sarama.Config) error {
+func ApplySASLConfig(s ksasl.Config, mgr bundle.NewManagement, conf *sarama.Config) error {
 	switch s.Mechanism {
 	case sarama.SASLTypeOAuth:
 		var tp sarama.AccessTokenProvider
@@ -216,12 +241,12 @@ func ApplySASLConfig(s ksasl.Config, mgr interop.Manager, conf *sarama.Config) e
 
 // cacheAccessTokenProvider fetches SASL OAUTHBEARER access tokens from a cache.
 type cacheAccessTokenProvider struct {
-	mgr       interop.Manager
+	mgr       bundle.NewManagement
 	cacheName string
 	key       string
 }
 
-func newCacheAccessTokenProvider(mgr interop.Manager, cache, key string) (*cacheAccessTokenProvider, error) {
+func newCacheAccessTokenProvider(mgr bundle.NewManagement, cache, key string) (*cacheAccessTokenProvider, error) {
 	if !mgr.ProbeCache(cache) {
 		return nil, fmt.Errorf("cache resource '%v' was not found", cache)
 	}

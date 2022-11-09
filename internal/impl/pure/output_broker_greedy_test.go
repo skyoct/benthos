@@ -24,8 +24,8 @@ func TestGreedyDoubleClose(t *testing.T) {
 	}
 
 	// This shouldn't cause a panic
-	oTM.CloseAsync()
-	oTM.CloseAsync()
+	oTM.TriggerCloseNow()
+	oTM.TriggerCloseNow()
 }
 
 //------------------------------------------------------------------------------
@@ -67,8 +67,8 @@ func TestBasicGreedy(t *testing.T) {
 			var ts message.Transaction
 			select {
 			case ts = <-mockOutputs[0].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 			case <-time.After(time.Second):
 				t.Errorf("Timed out waiting for broker propagate")
@@ -95,8 +95,8 @@ func TestBasicGreedy(t *testing.T) {
 		}
 	}
 
-	oTM.CloseAsync()
-	if err := oTM.WaitForClose(time.Second * 10); err != nil {
+	oTM.TriggerCloseNow()
+	if err := oTM.WaitForClose(tCtx); err != nil {
 		t.Error(err)
 	}
 }

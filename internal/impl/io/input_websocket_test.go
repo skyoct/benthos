@@ -7,14 +7,14 @@ import (
 	"net/url"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
 )
 
 func TestWebsocketBasic(t *testing.T) {
@@ -42,7 +42,7 @@ func TestWebsocketBasic(t *testing.T) {
 		}
 	}))
 
-	conf := oinput.NewWebsocketConfig()
+	conf := input.NewWebsocketConfig()
 	if wsURL, err := url.Parse(server.URL); err != nil {
 		t.Fatal(err)
 	} else {
@@ -50,30 +50,27 @@ func TestWebsocketBasic(t *testing.T) {
 		conf.URL = wsURL.String()
 	}
 
-	m, err := newWebsocketReader(conf, log.Noop())
+	m, err := newWebsocketReader(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx := context.Background()
 
-	if err = m.ConnectWithContext(ctx); err != nil {
+	if err = m.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, exp := range expMsgs {
-		var actMsg *message.Batch
-		if actMsg, _, err = m.ReadWithContext(ctx); err != nil {
+		var actMsg message.Batch
+		if actMsg, _, err = m.ReadBatch(ctx); err != nil {
 			t.Error(err)
-		} else if act := string(actMsg.Get(0).Get()); act != exp {
+		} else if act := string(actMsg.Get(0).AsBytes()); act != exp {
 			t.Errorf("Wrong result: %v != %v", act, exp)
 		}
 	}
 
-	m.CloseAsync()
-	if err = m.WaitForClose(time.Second); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, m.Close(ctx))
 }
 
 func TestWebsocketOpenMsg(t *testing.T) {
@@ -109,7 +106,7 @@ func TestWebsocketOpenMsg(t *testing.T) {
 		}
 	}))
 
-	conf := oinput.NewWebsocketConfig()
+	conf := input.NewWebsocketConfig()
 	conf.OpenMsg = "hello world"
 	if wsURL, err := url.Parse(server.URL); err != nil {
 		t.Fatal(err)
@@ -118,30 +115,27 @@ func TestWebsocketOpenMsg(t *testing.T) {
 		conf.URL = wsURL.String()
 	}
 
-	m, err := newWebsocketReader(conf, log.Noop())
+	m, err := newWebsocketReader(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx := context.Background()
 
-	if err = m.ConnectWithContext(ctx); err != nil {
+	if err = m.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, exp := range expMsgs {
-		var actMsg *message.Batch
-		if actMsg, _, err = m.ReadWithContext(ctx); err != nil {
+		var actMsg message.Batch
+		if actMsg, _, err = m.ReadBatch(ctx); err != nil {
 			t.Error(err)
-		} else if act := string(actMsg.Get(0).Get()); act != exp {
+		} else if act := string(actMsg.Get(0).AsBytes()); act != exp {
 			t.Errorf("Wrong result: %v != %v", act, exp)
 		}
 	}
 
-	m.CloseAsync()
-	if err = m.WaitForClose(time.Second); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, m.Close(ctx))
 }
 
 func TestWebsocketClose(t *testing.T) {
@@ -159,7 +153,7 @@ func TestWebsocketClose(t *testing.T) {
 		<-closeChan
 	}))
 
-	conf := oinput.NewWebsocketConfig()
+	conf := input.NewWebsocketConfig()
 	if wsURL, err := url.Parse(server.URL); err != nil {
 		t.Fatal(err)
 	} else {
@@ -167,28 +161,25 @@ func TestWebsocketClose(t *testing.T) {
 		conf.URL = wsURL.String()
 	}
 
-	m, err := newWebsocketReader(conf, log.Noop())
+	m, err := newWebsocketReader(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx := context.Background()
 
-	if err = m.ConnectWithContext(ctx); err != nil {
+	if err = m.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		require.NoError(t, m.Close(ctx))
 		wg.Done()
 	}()
 
-	if _, _, err = m.ReadWithContext(ctx); err != component.ErrTypeClosed && err != component.ErrNotConnected {
+	if _, _, err = m.ReadBatch(ctx); err != component.ErrTypeClosed && err != component.ErrNotConnected {
 		t.Errorf("Wrong error: %v != %v", err, component.ErrTypeClosed)
 	}
 

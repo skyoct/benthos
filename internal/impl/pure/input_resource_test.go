@@ -1,22 +1,25 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
 )
 
 func TestResourceInput(t *testing.T) {
-	mgr := bmock.NewManager()
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
+	defer done()
+
+	mgr := mock.NewManager()
 	mgr.Inputs["foo"] = mock.NewInput(nil)
 
-	nConf := oinput.NewConfig()
+	nConf := input.NewConfig()
 	nConf.Type = "resource"
 	nConf.Resource = "foo"
 
@@ -25,16 +28,16 @@ func TestResourceInput(t *testing.T) {
 
 	assert.NotNil(t, p.TransactionChan())
 
-	p.CloseAsync()
-	assert.NoError(t, p.WaitForClose(time.Second))
+	p.TriggerStopConsuming()
+	assert.NoError(t, p.WaitForClose(ctx))
 }
 
 func TestResourceInputBadName(t *testing.T) {
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "resource"
 	conf.Resource = "foo"
 
-	_, err := bmock.NewManager().NewInput(conf)
+	_, err := mock.NewManager().NewInput(conf)
 	if err == nil {
 		t.Error("expected error from bad resource")
 	}

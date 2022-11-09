@@ -6,28 +6,22 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/http/docs/auth"
-	"github.com/benthosdev/benthos/v4/internal/interop"
+	"github.com/benthosdev/benthos/v4/internal/httpclient"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		return newWebsocketInput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllInputs.Add(processors.WrapConstructor(newWebsocketInput), docs.ComponentSpec{
 		Name:        "websocket",
 		Summary:     `Connects to a websocket server and continuously receives messages.`,
 		Description: `It is possible to configure an ` + "`open_message`" + `, which when set to a non-empty string will be sent to the websocket server each time a connection is first established.`,
@@ -35,7 +29,7 @@ func init() {
 			docs.FieldString("url", "The URL to connect to.", "ws://localhost:4195/get/ws"),
 			docs.FieldString("open_message", "An optional message to send to the server upon connection.").Advanced(),
 			btls.FieldSpec(),
-		).WithChildren(auth.FieldSpecs()...).ChildDefaultAndTypesFromStruct(oinput.NewWebsocketConfig()),
+		).WithChildren(httpclient.OldAuthFieldSpecs()...).ChildDefaultAndTypesFromStruct(input.NewWebsocketConfig()),
 		Categories: []string{
 			"Network",
 		},
@@ -45,33 +39,35 @@ func init() {
 	}
 }
 
-func newWebsocketInput(conf oinput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (input.Streamed, error) {
-	ws, err := newWebsocketReader(conf.Websocket, log)
+func newWebsocketInput(conf input.Config, mgr bundle.NewManagement) (input.Streamed, error) {
+	ws, err := newWebsocketReader(conf.Websocket, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return oinput.NewAsyncReader("websocket", true, reader.NewAsyncPreserver(ws), log, stats)
+	return input.NewAsyncReader("websocket", true, input.NewAsyncPreserver(ws), mgr)
 }
 
 type websocketReader struct {
 	log log.Modular
+	mgr bundle.NewManagement
 
 	lock *sync.Mutex
 
-	conf    oinput.WebsocketConfig
+	conf    input.WebsocketConfig
 	client  *websocket.Conn
 	tlsConf *tls.Config
 }
 
-func newWebsocketReader(conf oinput.WebsocketConfig, log log.Modular) (*websocketReader, error) {
+func newWebsocketReader(conf input.WebsocketConfig, mgr bundle.NewManagement) (*websocketReader, error) {
 	ws := &websocketReader{
-		log:  log,
+		log:  mgr.Logger(),
+		mgr:  mgr,
 		lock: &sync.Mutex{},
 		conf: conf,
 	}
 	if conf.TLS.Enabled {
 		var err error
-		if ws.tlsConf, err = conf.TLS.Get(); err != nil {
+		if ws.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -85,7 +81,7 @@ func (w *websocketReader) getWS() *websocket.Conn {
 	return ws
 }
 
-func (w *websocketReader) ConnectWithContext(ctx context.Context) error {
+func (w *websocketReader) Connect(ctx context.Context) error {
 	w.lock.Lock()
 	defer w.lock.Unlock()
 
@@ -100,7 +96,7 @@ func (w *websocketReader) ConnectWithContext(ctx context.Context) error {
 		return err
 	}
 
-	if err := w.conf.Sign(&http.Request{
+	if err := w.conf.Sign(w.mgr.FS(), &http.Request{
 		URL:    purl,
 		Header: headers,
 	}); err != nil {
@@ -113,7 +109,6 @@ func (w *websocketReader) ConnectWithContext(ctx context.Context) error {
 		}
 		if client, _, err = dialer.Dial(w.conf.URL, headers); err != nil {
 			return err
-
 		}
 	} else if client, _, err = websocket.DefaultDialer.Dial(w.conf.URL, headers); err != nil {
 		return err
@@ -131,7 +126,7 @@ func (w *websocketReader) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (w *websocketReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (w *websocketReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	client := w.getWS()
 	if client == nil {
 		return nil, nil, component.ErrNotConnected
@@ -151,15 +146,13 @@ func (w *websocketReader) ReadWithContext(ctx context.Context) (*message.Batch, 
 	}, nil
 }
 
-func (w *websocketReader) CloseAsync() {
+func (w *websocketReader) Close(ctx context.Context) (err error) {
 	w.lock.Lock()
+	defer w.lock.Unlock()
+
 	if w.client != nil {
-		w.client.Close()
+		err = w.client.Close()
 		w.client = nil
 	}
-	w.lock.Unlock()
-}
-
-func (w *websocketReader) WaitForClose(timeout time.Duration) error {
-	return nil
+	return
 }

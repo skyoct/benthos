@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/mapping"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
@@ -13,17 +12,16 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newSwitchProc(conf.Switch, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("switch", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("switch", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "switch",
 		Categories: []string{
@@ -32,24 +30,24 @@ func init() {
 		Summary: `
 Conditionally processes messages based on their contents.`,
 		Description: `
-For each switch case a [Bloblang query](/docs/guides/bloblang/about/) is checked and, if the result is true (or the check is empty) the child processors are executed on the message.`,
+For each switch case a [Bloblang query](/docs/guides/bloblang/about) is checked and, if the result is true (or the check is empty) the child processors are executed on the message.`,
 		Footnotes: `
 ## Batching
 
-When a switch processor executes on a [batch of messages](/docs/configuration/batching/) they are checked individually and can be matched independently against cases. During processing the messages matched against a case are processed as a batch, although the ordering of messages during case processing cannot be guaranteed to match the order as received.
+When a switch processor executes on a [batch of messages](/docs/configuration/batching) they are checked individually and can be matched independently against cases. During processing the messages matched against a case are processed as a batch, although the ordering of messages during case processing cannot be guaranteed to match the order as received.
 
-At the end of switch processing the resulting batch will follow the same ordering as the batch was received. If any child processors have split or otherwise grouped messages this grouping will be lost as the result of a switch is always a single batch. In order to perform conditional grouping and/or splitting use the [` + "`group_by`" + ` processor](/docs/components/processors/group_by/).`,
+At the end of switch processing the resulting batch will follow the same ordering as the batch was received. If any child processors have split or otherwise grouped messages this grouping will be lost as the result of a switch is always a single batch. In order to perform conditional grouping and/or splitting use the [` + "`group_by`" + ` processor](/docs/components/processors/group_by).`,
 		Config: docs.FieldComponent().Array().WithChildren(
 			docs.FieldBloblang(
 				"check",
-				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message should have the processors of this case executed on it. If left empty the case always passes. If the check mapping throws an error the message will be flagged [as having failed](/docs/configuration/error_handling) and will not be tested against any other cases.",
+				"A [Bloblang query](/docs/guides/bloblang/about) that should return a boolean value indicating whether a message should have the processors of this case executed on it. If left empty the case always passes. If the check mapping throws an error the message will be flagged [as having failed](/docs/configuration/error_handling) and will not be tested against any other cases.",
 				`this.type == "foo"`,
 				`this.contents.urls.contains("https://benthos.dev/")`,
 			).HasDefault(""),
 			docs.FieldProcessor(
 				"processors",
 				"A list of [processors](/docs/components/processors/about/) to execute on a message.",
-			).HasDefault([]interface{}{}).Array(),
+			).HasDefault([]any{}).Array(),
 			docs.FieldBool(
 				"fallthrough",
 				"Indicates whether, if this case passes for a message, the next case should also be executed.",
@@ -77,7 +75,7 @@ pipeline:
                 type: gauge
                 name: GeorgesAnger
                 value: ${! json("user.anger") }
-            - bloblang: root = deleted()
+            - mapping: root = deleted()
 `,
 			},
 		},
@@ -100,7 +98,7 @@ type switchProc struct {
 	log   log.Modular
 }
 
-func newSwitchProc(conf oprocessor.SwitchConfig, mgr bundle.NewManagement) (*switchProc, error) {
+func newSwitchProc(conf processor.SwitchConfig, mgr bundle.NewManagement) (*switchProc, error) {
 	var cases []switchCase
 	for i, caseConf := range conf {
 		var err error
@@ -118,7 +116,7 @@ func newSwitchProc(conf oprocessor.SwitchConfig, mgr bundle.NewManagement) (*swi
 		}
 
 		for j, procConf := range caseConf.Processors {
-			pMgr := mgr.IntoPath("switch", strconv.Itoa(i), "processors", strconv.Itoa(j)).(bundle.NewManagement)
+			pMgr := mgr.IntoPath("switch", strconv.Itoa(i), "processors", strconv.Itoa(j))
 			proc, err := pMgr.NewProcessor(procConf)
 			if err != nil {
 				return nil, fmt.Errorf("case [%v] processor [%v]: %w", i, j, err)
@@ -159,7 +157,7 @@ func SwitchReorderFromGroup(group *message.SortGroup, parts []*message.Part) {
 	})
 }
 
-func (s *switchProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (s *switchProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	var result []*message.Part
 	var remaining []*message.Part
 	var carryOver []*message.Part
@@ -177,8 +175,7 @@ func (s *switchProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *m
 		// Form a message to test against, consisting of fallen through messages
 		// from prior cases plus remaining messages that haven't passed a case
 		// yet.
-		testMsg := message.QuickBatch(nil)
-		testMsg.Append(remaining...)
+		testMsg := message.Batch(remaining)
 
 		for j, p := range remaining {
 			test := switchCase.check == nil
@@ -202,10 +199,9 @@ func (s *switchProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *m
 		remaining = failed
 
 		if len(passed) > 0 {
-			execMsg := message.QuickBatch(nil)
-			execMsg.SetAll(passed)
+			execMsg := message.Batch(passed)
 
-			msgs, res := oprocessor.ExecuteAll(switchCase.processors, execMsg)
+			msgs, res := processor.ExecuteAll(ctx, switchCase.processors, execMsg)
 			if res != nil {
 				return nil, res
 			}
@@ -228,29 +224,18 @@ func (s *switchProc) ProcessBatch(ctx context.Context, _ []*tracing.Span, msg *m
 		SwitchReorderFromGroup(sortGroup, result)
 	}
 
-	resMsg := message.QuickBatch(nil)
-	resMsg.SetAll(result)
-
+	resMsg := message.Batch(result)
 	if resMsg.Len() == 0 {
 		return nil, nil
 	}
 
-	return []*message.Batch{resMsg}, nil
+	return []message.Batch{resMsg}, nil
 }
 
 func (s *switchProc) Close(ctx context.Context) error {
 	for _, c := range s.cases {
 		for _, p := range c.processors {
-			p.CloseAsync()
-		}
-	}
-	deadline, exists := ctx.Deadline()
-	if !exists {
-		deadline = time.Now().Add(time.Second * 5)
-	}
-	for _, c := range s.cases {
-		for _, p := range c.processors {
-			if err := p.WaitForClose(time.Until(deadline)); err != nil {
+			if err := p.Close(ctx); err != nil {
 				return err
 			}
 		}

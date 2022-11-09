@@ -5,10 +5,230 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Field `default_encoding` added to the `parquet_encode` processor.
+- Field `client_session_keep_alive` added to the `snowflake_put` output.
+- Bloblang now supports metadata access via `@foo` syntax, which also supports arbitrary values.
+
+## 4.10.0 - 2022-10-26
+
+### Added
+
+- The `nats_jetstream` input now adds a range of useful metadata information to messages.
+- Field `transaction_type` added to the `azure_table_storage` output, which deprecates the previous `insert_type` field and supports interpolation functions.
+- Field `logged_batch` added to the `cassandra` output.
+- All `sql` components now support Snowflake.
+- New `azure_table_storage` input.
+- New `sql_raw` input.
+- New `tracing_id` bloblang function.
+- New `with` bloblang method.
+- Field `multi_header` added to the `kafka` and `kafka_franz` inputs.
+- New `cassandra` input.
+- New `base64_encode` and `base64_decode` functions for the awk processor.
+- Param `use_number` added to the `parse_json` bloblang method.
+- Fields `init_statement` and `init_files` added to all sql components.
+- New `find` and `find_all` bloblang array methods.
+
+### Fixed
+
+- The `gcp_cloud_storage` output no longer ignores errors when closing a written file, this was masking issues when the target bucket was invalid.
+- Upgraded the `kafka_franz` input and output to use github.com/twmb/franz-go@v1.9.0 since some [bug fixes](https://github.com/twmb/franz-go/blob/master/CHANGELOG.md#v190) were made recently.
+- Fixed an issue where a `read_until` child input with processors affiliated would block graceful termination.
+- The `--labels` linting option no longer flags resource components.
+
+## 4.9.1 - 2022-10-06
+
+### Added
+
+- Go API: A new `BatchError` type added for distinguishing errors of a given batch.
+
+### Fixed
+
+- Rolled back `kafka` input and output underlying sarama client library to fix a regression introduced in 4.9.0 😅 where `invalid configuration (Consumer.Group.Rebalance.GroupStrategies and Consumer.Group.Rebalance.Strategy cannot be set at the same time)` errors would prevent consumption under certain configurations. We've decided to roll back rather than upgrade as a breaking API change was introduced that could cause issues for Go API importers (more info here: https://github.com/Shopify/sarama/issues/2358).
+
+## 4.9.0 - 2022-10-03
+
+### Added
+
+- New `parquet` input for reading a batch of Parquet files from disk.
+- Field `max_in_flight` added to the `redis_list` input.
+
+### Fixed
+
+- Upgraded `kafka` input and output underlying sarama client library to fix a regression introduced in 4.7.0 where `The requested offset is outside the range of offsets maintained by the server for the given topic/partition` errors would prevent consumption of partitions.
+- The `cassandra` output now inserts logged batches of data rather than the less efficient (and unnecessary) unlogged form.
+
+## 4.8.0 - 2022-09-30
+
+### Added
+
+- All `sql` components now support Oracle DB.
+
+### Fixed
+
+- All SQL components now accept an empty or unspecified `args_mapping` as an alias for no arguments.
+- Field `unsafe_dynamic_query` added to the `sql_raw` output.
+- Fixed a regression in 4.7.0 where HTTP client components were sending duplicate request headers.
+
+## 4.7.0 - 2022-09-27
+
+### Added
+
+- Field `avro_raw_json` added to the `schema_registry_decode` processor.
+- Field `priority` added to the `gcp_bigquery_select` input.
+- The `hash` bloblang method now supports `crc32`.
+- New `tracing_span` bloblang function.
+- All `sql` components now support SQLite.
+- New `beanstalkd` input and output.
+- Field `json_marshal_mode` added to the `mongodb` input.
+- The `schema_registry_encode` and `schema_registry_decode` processors now support Basic, OAuth and JWT authentication.
+
+### Fixed
+
+- The streams mode `/ready` endpoint no longer returns status `503` for streams that gracefully finished.
+- The performance of the bloblang `.explode` method now scales linearly with the target size.
+- The `influxdb` and `logger` metrics outputs should no longer mix up tag names.
+- Fix a potential race condition in the `read_until` connect check on terminated input.
+- The `parse_parquet` bloblang method and `parquet_decode` processor now automatically parse `BYTE_ARRAY` values as strings when the logical type is UTF8.
+- The `gcp_cloud_storage` output now correctly cleans up temporary files on error conditions when the collision mode is set to append.
+
+## 4.6.0 - 2022-08-31
+
+### Added
+
+- New `squash` bloblang method.
+- New top-level config field `shutdown_delay` for delaying graceful termination.
+- New `snowflake_id` bloblang function.
+- Field `wait_time_seconds` added to the `aws_sqs` input.
+- New `json_path` bloblang method.
+- New `file_json_contains` predicate for unit tests.
+- The `parquet_encode` processor now supports the `UTF8` logical type for columns.
+
+### Fixed
+
+- The `schema_registry_encode` processor now correctly assumes Avro JSON encoded documents by default.
+- The `redis` processor `retry_period` no longer shows linting errors for duration strings.
+- The `/inputs` and `/outputs` endpoints for dynamic inputs and outputs now correctly render configs, both structured within the JSON response and the raw config string.
+- Go API: The stream builder no longer ignores `http` configuration. Instead, the value of `http.enabled` is set to `false` by default.
+
+## 4.5.1 - 2022-08-10
+
+### Fixed
+
+- Reverted `kafka_franz` dependency back to `1.3.1` due to a regression in TLS/SASL commit retention.
+- Fixed an unintentional linting error when using interpolation functions in the `elasticsearch` outputs `action` field.
+
+## 4.5.0 - 2022-08-07
+
+### Added
+
+- Field `batch_size` added to the `generate` input.
+- The `amqp_0_9` output now supports setting the `timeout` of publish.
+- New experimental input codec `avro-ocf:marshaler=x`.
+- New `mapping` and `mutation` processors.
+- New `parse_form_url_encoded` bloblang method.
+- The `amqp_0_9` input now supports setting the `auto-delete` bit during queue declaration.
+- New `open_telemetry_collector` tracer.
+- The `kafka_franz` input and output now supports no-op SASL options with the mechanism `none`.
+- Field `content_type` added to the `gcp_cloud_storage` cache.
+
+### Fixed
+
+- The `mongodb` processor and output default `write_concern.w_timeout` empty value no longer causes configuration issues.
+- Field `message_name` added to the logger config.
+- The `amqp_1` input and output should no longer spam logs with timeout errors during graceful termination.
+- Fixed a potential crash when the `contains` bloblang method was used to compare complex types.
+- Fixed an issue where the `kafka_franz` input or output wouldn't use TLS connections without custom certificate configuration.
+- Fixed structural cycle in the CUE representation of the `retry` output.
+- Tracing headers from HTTP requests to the `http_server` input are now correctly extracted.
+
+### Changed
+
+- The `broker` input no longer applies processors before batching as this was unintentional behaviour and counter to documentation. Users that rely on this behaviour are advised to place their pre-batching processors at the level of the child inputs of the broker.
+- The `broker` output no longer applies processors after batching as this was unintentional behaviour and counter to documentation. Users that rely on this behaviour are advised to place their post-batching processors at the level of the child outputs of the broker.
+
+## 4.4.1 - 2022-07-19
+
+### Fixed
+
+- Fixed an issue where an `http_server` input or output would fail to register prometheus metrics when combined with other inputs/outputs.
+- Fixed an issue where the `jaeger` tracer was incapable of sending traces to agents outside of the default port.
+
+## 4.4.0 - 2022-07-18
+
+### Added
+
+- The service-wide `http` config now supports basic authentication.
+- The `elasticsearch` output now supports upsert operations.
+- New `fake` bloblang function.
+- New `parquet_encode` and `parquet_decode` processors.
+- New `parse_parquet` bloblang method.
+- CLI flag `--prefix-stream-endpoints` added for disabling streams mode API prefixing.
+- Field `timestamp_name` added to the logger config.
+
+## 4.3.0 - 2022-06-23
+
+### Added
+
+- Timestamp Bloblang methods are now able to emit and process `time.Time` values.
+- New `ts_tz` method for switching the timezone of timestamp values.
+- The `elasticsearch` output field `type` now supports interpolation functions.
+- The `redis` processor has been reworked to be more generally useful, the old `operator` and `key` fields are now deprecated in favour of new `command` and `args_mapping` fields.
+- Go API: Added component bundle `./public/components/aws` for all AWS components, including a `RunLambda` function.
+- New `cached` processor.
+- Go API: New APIs for registering both metrics exporters and open telemetry tracer plugins.
+- Go API: The stream builder API now supports configuring a tracer, and tracer configuration is now isolated to the stream being executed.
+- Go API: Plugin components can now access input and output resources.
+- The `redis_streams` output field `stream` field now supports interpolation functions.
+- The `kafka_franz` input and outputs now support `AWS_MSK_IAM` as a SASL mechanism.
+- New `pusher` output.
+- Field `input_batches` added to config unit tests for injecting a series of message batches.
+
+### Fixed
+
+- Corrected an issue where Prometheus metrics from batching at the buffer level would be skipped when combined with input/output level batching.
+- Go API: Fixed an issue where running the CLI API without importing a component package would result in template init crashing.
+- The `http` processor and `http_client` input and output no longer have default headers as part of their configuration. A `Content-Type` header will be added to requests with a default value of `application/octet-stream` when a message body is being sent and the configuration has not added one explicitly.
+- Logging in `logfmt` mode with `add_timestamp` enabled now works.
+
+## 4.2.0 - 2022-06-03
+
+### Added
+
+- Field `credentials.from_ec2_role` added to all AWS based components.
+- The `mongodb` input now supports aggregation filters by setting the new `operation` field.
+- New `gcp_cloudtrace` tracer.
+- New `slug` bloblang string method.
+- The `elasticsearch` output now supports the `create` action.
+- Field `tls.root_cas_file` added to the `pulsar` input and output.
+- The `fallback` output now adds a metadata field `fallback_error` to messages when shifted.
+- New bloblang methods `ts_round`, `ts_parse`, `ts_format`, `ts_strptime`, `ts_strftime`, `ts_unix` and `ts_unix_nano`. Most are aliases of (now deprecated) time methods with `timestamp_` prefixes.
+- Ability to write logs to a file (with optional rotation) instead of stdout.
+
+### Fixed
+
+- The default docker image no longer throws configuration errors when running streams mode without an explicit general config.
+- The field `metrics.mapping` now allows environment functions such as `hostname` and `env`.
+- Fixed a lock-up in the `amqp_0_9` output caused when messages sent with the `immediate` or `mandatory` flags were rejected.
+- Fixed a race condition upon creating dynamic streams that self-terminate, this was causing panics in cases where the stream finishes immediately.
+
+## 4.1.0 - 2022-05-11
+
+### Added
+
+- The `nats_jetstream` input now adds headers to messages as metadata.
+- Field `headers` added to the `nats_jetstream` output.
+- Field `lazy_quotes` added to the CSV input.
+
 ### Fixed
 
 - Fixed an issue where resource and stream configs imported via wildcard pattern could not be live-reloaded with the watcher (`-w`) flag.
 - Bloblang comparisons between numerical values (including `match` expression patterns) no longer require coercion into explicit types.
+- Reintroduced basic metrics from the `twitter` and `discord` template based inputs.
+- Prevented a metrics label mismatch when running in streams mode with resources and `prometheus` metrics.
+- Label mismatches with the `prometheus` metric type now log errors and skip the metric without stopping the service.
+- Fixed a case where empty files consumed by the `aws_s3` input would trigger early graceful termination.
 
 ## 4.0.0 - 2022-04-20
 
@@ -63,6 +283,7 @@ This is a major version release, for more information and guidance on how to mig
 - The `dedupe` processor now acts upon individual messages by default, and the `hash` field has been removed.
 - The `log` processor now executes for each individual message of a batch.
 - The `sleep` processor now executes for each individual message of a batch.
+- The `benthos test` subcommand no longer walks when targetting a directory, instead use triple-dot syntax (`./dir/...`) or wildcard patterns.
 - Go API: Module name has changed to `github.com/benthosdev/benthos/v4`.
 - Go API: All packages within the `lib` directory have been removed in favour of the newer [APIs within `public`](https://pkg.go.dev/github.com/benthosdev/benthos/v4/public).
 - Go API: Distributed tracing is now via the Open Telemetry client library.

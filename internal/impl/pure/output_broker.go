@@ -8,19 +8,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
-	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
-var (
-	// ErrBrokerNoOutputs is returned when creating a Broker type with zero
-	// outputs.
-	ErrBrokerNoOutputs = errors.New("attempting to create broker output type with no outputs")
-)
+// ErrBrokerNoOutputs is returned when creating a Broker type with zero
+// outputs.
+var ErrBrokerNoOutputs = errors.New("attempting to create broker output type with no outputs")
 
 func init() {
-	err := bundle.AllOutputs.Add(newBroker, docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newBroker), docs.ComponentSpec{
 		Name: "broker",
 		Summary: `
 Allows you to route messages to multiple child outputs using a range of
@@ -89,7 +87,7 @@ outputs.`,
 			docs.FieldString("pattern", "The brokering pattern to use.").HasOptions(
 				"fan_out", "fan_out_sequential", "round_robin", "greedy",
 			).HasDefault("fan_out"),
-			docs.FieldOutput("outputs", "A list of child outputs to broker.").Array().HasDefault([]interface{}{}),
+			docs.FieldOutput("outputs", "A list of child outputs to broker.").Array().HasDefault([]any{}),
 			policy.FieldSpec(),
 		),
 		Categories: []string{
@@ -103,33 +101,25 @@ outputs.`,
 
 //------------------------------------------------------------------------------
 
-func newBroker(conf ooutput.Config, mgr bundle.NewManagement, pipelines ...processor.PipelineConstructorFunc) (output.Streamed, error) {
-	pipelines = ooutput.AppendProcessorsFromConfig(conf, mgr, pipelines...)
-
+func newBroker(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
 	outputConfs := conf.Broker.Outputs
-
 	lOutputs := len(outputConfs) * conf.Broker.Copies
 
 	if lOutputs <= 0 {
 		return nil, ErrBrokerNoOutputs
 	}
 	if lOutputs == 1 {
-		b, err := ooutput.New(outputConfs[0], mgr, mgr.Logger(), mgr.Metrics(), pipelines...)
+		b, err := mgr.NewOutput(outputConfs[0])
 		if err != nil {
 			return nil, err
 		}
-		if b, err = ooutput.NewBatcherFromConfig(conf.Broker.Batching, b, mgr, mgr.Logger(), mgr.Metrics()); err != nil {
+		if b, err = batcher.NewFromConfig(conf.Broker.Batching, b, mgr); err != nil {
 			return nil, err
 		}
 		return b, nil
 	}
 
 	outputs := make([]output.Streamed, lOutputs)
-
-	_, isThreaded := map[string]struct{}{
-		"round_robin": {},
-		"greedy":      {},
-	}[conf.Broker.Pattern]
 
 	_, isRetryWrapped := map[string]struct{}{
 		"fan_out":            {},
@@ -139,12 +129,8 @@ func newBroker(conf ooutput.Config, mgr bundle.NewManagement, pipelines ...proce
 	var err error
 	for j := 0; j < conf.Broker.Copies; j++ {
 		for i, oConf := range outputConfs {
-			var pipes []processor.PipelineConstructorFunc
-			if isThreaded {
-				pipes = pipelines
-			}
 			oMgr := mgr.IntoPath("broker", "outputs", strconv.Itoa(i))
-			tmpOut, err := ooutput.New(oConf, oMgr, oMgr.Logger(), oMgr.Metrics(), pipes...)
+			tmpOut, err := oMgr.NewOutput(oConf)
 			if err != nil {
 				return nil, err
 			}
@@ -170,16 +156,13 @@ func newBroker(conf ooutput.Config, mgr bundle.NewManagement, pipelines ...proce
 	default:
 		return nil, fmt.Errorf("broker pattern was not recognised: %v", conf.Broker.Pattern)
 	}
-	if err == nil && !isThreaded {
-		b, err = ooutput.WrapWithPipelines(b, pipelines...)
-	}
 
 	if !conf.Broker.Batching.IsNoop() {
 		policy, err := policy.New(conf.Broker.Batching, mgr.IntoPath("broker", "batching"))
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct batch policy: %v", err)
 		}
-		b = ooutput.NewBatcher(policy, b, mgr.Logger(), mgr.Metrics())
+		b = batcher.New(policy, b, mgr)
 	}
 	return b, err
 }

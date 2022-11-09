@@ -1,14 +1,15 @@
 .PHONY: all serverless deps docker docker-cgo clean docs test test-race test-integration fmt lint install deploy-docs
 
-TAGS =
+TAGS ?=
 
-INSTALL_DIR        = $(GOPATH)/bin
-WEBSITE_DIR        = ./website
-DEST_DIR           = ./target
+INSTALL_DIR        ?= $(GOPATH)/bin
+WEBSITE_DIR        ?= ./website
+DEST_DIR           ?= ./target
 PATHINSTBIN        = $(DEST_DIR)/bin
 PATHINSTTOOLS      = $(DEST_DIR)/tools
 PATHINSTSERVERLESS = $(DEST_DIR)/serverless
 PATHINSTDOCKER     = $(DEST_DIR)/docker
+DOCKER_IMAGE       ?= jeffail/benthos
 
 VERSION   := $(shell git describe --tags || echo "v0.0.0")
 VER_CUT   := $(shell echo $(VERSION) | cut -c2-)
@@ -21,14 +22,15 @@ DATE      := $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 VER_FLAGS = -X github.com/benthosdev/benthos/v4/internal/cli.Version=$(VERSION) \
 	-X github.com/benthosdev/benthos/v4/internal/cli.DateBuilt=$(DATE)
 
-LD_FLAGS   = -w -s
-GO_FLAGS   =
-DOCS_FLAGS =
+LD_FLAGS   ?= -w -s
+GO_FLAGS   ?=
+DOCS_FLAGS ?=
 
 APPS = benthos
 all: $(APPS)
 
 install: $(APPS)
+	@install -d $(INSTALL_DIR)
 	@rm -f $(INSTALL_DIR)/benthos
 	@cp $(PATHINSTBIN)/* $(INSTALL_DIR)/
 
@@ -71,12 +73,12 @@ docker-cgo-tags:
 	@echo "latest-cgo,$(VER_CUT)-cgo,$(VER_MAJOR).$(VER_MINOR)-cgo,$(VER_MAJOR)-cgo" > .tags
 
 docker:
-	@docker build -f ./resources/docker/Dockerfile . -t jeffail/benthos:$(VER_CUT)
-	@docker tag jeffail/benthos:$(VER_CUT) jeffail/benthos:latest
+	@docker build -f ./resources/docker/Dockerfile . -t $(DOCKER_IMAGE):$(VER_CUT)
+	@docker tag $(DOCKER_IMAGE):$(VER_CUT) $(DOCKER_IMAGE):latest
 
 docker-cgo:
-	@docker build -f ./resources/docker/Dockerfile.cgo . -t jeffail/benthos:$(VER_CUT)-cgo
-	@docker tag jeffail/benthos:$(VER_CUT)-cgo jeffail/benthos:latest-cgo
+	@docker build -f ./resources/docker/Dockerfile.cgo . -t $(DOCKER_IMAGE):$(VER_CUT)-cgo
+	@docker tag $(DOCKER_IMAGE):$(VER_CUT)-cgo $(DOCKER_IMAGE):latest-cgo
 
 fmt:
 	@go list -f {{.Dir}} ./... | xargs -I{} gofmt -w -s {}
@@ -91,7 +93,6 @@ test: $(APPS)
 	@go test $(GO_FLAGS) -ldflags "$(LD_FLAGS)" -timeout 3m ./...
 	@$(PATHINSTBIN)/benthos template lint ./template/...
 	@$(PATHINSTBIN)/benthos test ./config/test/...
-	@./resources/cue/test/test.sh $(PATHINSTBIN)/benthos
 
 test-race: $(APPS)
 	@go test $(GO_FLAGS) -ldflags "$(LD_FLAGS)" -timeout 3m -race ./...

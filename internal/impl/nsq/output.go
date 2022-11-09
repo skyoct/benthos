@@ -7,28 +7,22 @@ import (
 	"io"
 	llog "log"
 	"sync"
-	"time"
 
 	nsq "github.com/nsqio/go-nsq"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newNSQOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newNSQOutput), docs.ComponentSpec{
 		Name:        "nsq",
 		Summary:     `Publish to an NSQ topic.`,
 		Description: output.Description(true, false, `The `+"`topic`"+` field can be dynamically set using function interpolations described [here](/docs/configuration/interpolation#bloblang-queries). When sending batched messages these interpolations are performed per message part.`),
@@ -38,7 +32,7 @@ func init() {
 			docs.FieldString("user_agent", "A user agent string to connect with."),
 			btls.FieldSpec(),
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewNSQConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewNSQConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -48,12 +42,12 @@ func init() {
 	}
 }
 
-func newNSQOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	w, err := newNSQWriter(conf.NSQ, mgr, log)
+func newNSQOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	w, err := newNSQWriter(conf.NSQ, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.NewAsyncWriter("nsq", conf.NSQ.MaxInFlight, w, log, stats)
+	return output.NewAsyncWriter("nsq", conf.NSQ.MaxInFlight, w, mgr)
 }
 
 type nsqWriter struct {
@@ -65,12 +59,12 @@ type nsqWriter struct {
 	connMut  sync.RWMutex
 	producer *nsq.Producer
 
-	conf ooutput.NSQConfig
+	conf output.NSQConfig
 }
 
-func newNSQWriter(conf ooutput.NSQConfig, mgr interop.Manager, log log.Modular) (*nsqWriter, error) {
+func newNSQWriter(conf output.NSQConfig, mgr bundle.NewManagement) (*nsqWriter, error) {
 	n := nsqWriter{
-		log:  log,
+		log:  mgr.Logger(),
 		conf: conf,
 	}
 	var err error
@@ -78,14 +72,14 @@ func newNSQWriter(conf ooutput.NSQConfig, mgr interop.Manager, log log.Modular) 
 		return nil, fmt.Errorf("failed to parse topic expression: %v", err)
 	}
 	if conf.TLS.Enabled {
-		if n.tlsConf, err = conf.TLS.Get(); err != nil {
+		if n.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
 	return &n, nil
 }
 
-func (n *nsqWriter) ConnectWithContext(ctx context.Context) error {
+func (n *nsqWriter) Connect(ctx context.Context) error {
 	n.connMut.Lock()
 	defer n.connMut.Unlock()
 
@@ -111,7 +105,7 @@ func (n *nsqWriter) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (n *nsqWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (n *nsqWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	n.connMut.RLock()
 	prod := n.producer
 	n.connMut.RUnlock()
@@ -120,22 +114,18 @@ func (n *nsqWriter) WriteWithContext(ctx context.Context, msg *message.Batch) er
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
-		return prod.Publish(n.topicStr.String(i, msg), p.Get())
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+		return prod.Publish(n.topicStr.String(i, msg), p.AsBytes())
 	})
 }
 
-func (n *nsqWriter) CloseAsync() {
-	go func() {
-		n.connMut.Lock()
-		if n.producer != nil {
-			n.producer.Stop()
-			n.producer = nil
-		}
-		n.connMut.Unlock()
-	}()
-}
+func (n *nsqWriter) Close(context.Context) error {
+	n.connMut.Lock()
+	defer n.connMut.Unlock()
 
-func (n *nsqWriter) WaitForClose(timeout time.Duration) error {
+	if n.producer != nil {
+		n.producer.Stop()
+		n.producer = nil
+	}
 	return nil
 }

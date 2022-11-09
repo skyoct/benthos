@@ -11,14 +11,13 @@ import (
 
 	"github.com/olivere/elastic/v7"
 	"github.com/ory/dockertest/v3"
+	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/impl/elasticsearch"
 	"github.com/benthosdev/benthos/v4/internal/integration"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func TestIntegrationWriter(t *testing.T) {
@@ -85,7 +84,6 @@ func TestIntegrationWriter(t *testing.T) {
 					Body(index).
 					Do(context.Background())
 			}
-
 		}
 		return cerr
 	}); err != nil {
@@ -140,20 +138,19 @@ func testElasticNoIndex(urls []string, client *elastic.Client, t *testing.T) {
 	conf.Backoff.MaxElapsedTime = "1s"
 	conf.Sniff = false
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Error(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	if err = m.Write(message.QuickBatch([][]byte{[]byte(`{"message":"hello world","user":"1"}`)})); err != nil {
@@ -169,7 +166,7 @@ func testElasticNoIndex(urls []string, client *elastic.Client, t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("foo-%v", i+1)
-		// nolint:staticcheck // Ignore SA1019 Type is deprecated warning for .Index()
+
 		get, err := client.Get().
 			Index("does_not_exist").
 			Id(id).
@@ -192,20 +189,19 @@ func testElasticParallelWrites(urls []string, client *elastic.Client, t *testing
 	conf.Backoff.MaxElapsedTime = "1s"
 	conf.Sniff = false
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Error(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	N := 10
@@ -262,20 +258,19 @@ func testElasticErrorHandling(urls []string, client *elastic.Client, t *testing.
 	conf.Backoff.MaxInterval = "1s"
 	conf.Sniff = false
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	if err = m.Write(message.QuickBatch([][]byte{[]byte(`{"message":true}`)})); err == nil {
@@ -295,20 +290,19 @@ func testElasticConnect(urls []string, client *elastic.Client, t *testing.T) {
 	conf.Type = "_doc"
 	conf.Sniff = false
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	N := 10
@@ -357,20 +351,19 @@ func testElasticIndexInterpolation(urls []string, client *elastic.Client, t *tes
 	conf.Type = "_doc"
 	conf.Sniff = false
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	N := 10
@@ -383,7 +376,7 @@ func testElasticIndexInterpolation(urls []string, client *elastic.Client, t *tes
 	}
 	for i := 0; i < N; i++ {
 		msg := message.QuickBatch(testMsgs[i])
-		msg.Get(0).MetaSet("index", "test_conn_index")
+		msg.Get(0).MetaSetMut("index", "test_conn_index")
 		if err = m.Write(msg); err != nil {
 			t.Fatal(err)
 		}
@@ -421,20 +414,19 @@ func testElasticBatch(urls []string, client *elastic.Client, t *testing.T) {
 	conf.Sniff = false
 	conf.Type = "_doc"
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	N := 10
@@ -447,7 +439,7 @@ func testElasticBatch(urls []string, client *elastic.Client, t *testing.T) {
 	}
 	msg := message.QuickBatch(testMsg)
 	for i := 0; i < N; i++ {
-		msg.Get(i).MetaSet("index", "test_conn_index")
+		msg.Get(i).MetaSetMut("index", "test_conn_index")
 	}
 	if err = m.Write(msg); err != nil {
 		t.Fatal(err)
@@ -486,20 +478,19 @@ func testElasticBatchDelete(urls []string, client *elastic.Client, t *testing.T)
 	conf.Sniff = false
 	conf.Type = "_doc"
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	N := 10
@@ -512,8 +503,8 @@ func testElasticBatchDelete(urls []string, client *elastic.Client, t *testing.T)
 	}
 	msg := message.QuickBatch(testMsg)
 	for i := 0; i < N; i++ {
-		msg.Get(i).MetaSet("index", "test_conn_index")
-		msg.Get(i).MetaSet("elastic_action", "index")
+		msg.Get(i).MetaSetMut("index", "test_conn_index")
+		msg.Get(i).MetaSetMut("elastic_action", "index")
 	}
 	if err = m.Write(msg); err != nil {
 		t.Fatal(err)
@@ -544,7 +535,7 @@ func testElasticBatchDelete(urls []string, client *elastic.Client, t *testing.T)
 
 	// Set elastic_action to deleted for some message parts
 	for i := N / 2; i < N; i++ {
-		msg.Get(i).MetaSet("elastic_action", "delete")
+		msg.Get(i).MetaSetMut("elastic_action", "delete")
 	}
 
 	if err = m.Write(msg); err != nil {
@@ -562,7 +553,7 @@ func testElasticBatchDelete(urls []string, client *elastic.Client, t *testing.T)
 		if err != nil {
 			t.Fatalf("Failed to get doc '%v': %v", id, err)
 		}
-		partAction := msg.Get(i).MetaGet("elastic_action")
+		partAction := msg.Get(i).MetaGetStr("elastic_action")
 		if partAction == "deleted" && get.Found {
 			t.Errorf("document %v found when it should have been deleted", i)
 		} else if partAction != "deleted" && !get.Found {
@@ -579,20 +570,19 @@ func testElasticBatchIDCollision(urls []string, client *elastic.Client, t *testi
 	conf.Sniff = false
 	conf.Type = "_doc"
 
-	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err := elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	N := 2
@@ -605,8 +595,8 @@ func testElasticBatchIDCollision(urls []string, client *elastic.Client, t *testi
 	}
 
 	msg := message.QuickBatch(testMsg)
-	msg.Get(0).MetaSet("index", "test_conn_index")
-	msg.Get(1).MetaSet("index", "test_conn_index_2")
+	msg.Get(0).MetaSetMut("index", "test_conn_index")
+	msg.Get(1).MetaSetMut("index", "test_conn_index_2")
 
 	if err = m.Write(msg); err != nil {
 		t.Fatal(err)
@@ -614,7 +604,7 @@ func testElasticBatchIDCollision(urls []string, client *elastic.Client, t *testi
 	for i := 0; i < N; i++ {
 		// nolint:staticcheck // Ignore SA1019 Type is deprecated warning for .Index()
 		get, err := client.Get().
-			Index(msg.Get(i).MetaGet("index")).
+			Index(msg.Get(i).MetaGetStr("index")).
 			Type("_doc").
 			Id(conf.ID).
 			Do(context.Background())
@@ -639,20 +629,19 @@ func testElasticBatchIDCollision(urls []string, client *elastic.Client, t *testi
 	conf.Index = "test_conn_index"
 	conf.ID = "bar-id"
 
-	m, err = elasticsearch.NewElasticsearchV2(conf, mock.NewManager(), log.Noop(), metrics.Noop())
+	m, err = elasticsearch.NewElasticsearchV2(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = m.Connect(); err != nil {
+	if err = m.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		m.CloseAsync()
-		if cErr := m.WaitForClose(time.Second); cErr != nil {
-			t.Error(cErr)
-		}
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		require.NoError(t, m.Close(ctx))
+		done()
 	}()
 
 	testMsg = [][]byte{
@@ -670,7 +659,6 @@ func testElasticBatchIDCollision(urls []string, client *elastic.Client, t *testi
 		Type("_doc").
 		Id(conf.ID).
 		Do(context.Background())
-
 	if err != nil {
 		t.Fatalf("Failed to get doc '%v': %v", conf.ID, err)
 	}

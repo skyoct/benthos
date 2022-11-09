@@ -13,22 +13,21 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	ioutput "github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/metadata"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c output.Config, nm bundle.NewManagement) (ioutput.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		return newGCPPubSubOutput(c, nm, nm.Logger(), nm.Metrics())
 	}), docs.ComponentSpec{
 		Name:    "gcp_pubsub",
 		Summary: `Sends messages to a GCP Cloud Pub/Sub topic. [Metadata](/docs/configuration/metadata) from messages are sent as attributes.`,
-		Description: ioutput.Description(true, false, `
+		Description: output.Description(true, false, `
 For information on how to set up credentials check out [this guide](https://cloud.google.com/docs/authentication/production).
 
 ### Troubleshooting
@@ -40,7 +39,7 @@ If you are blocked by this issue then a work around is to delete either the spec
 `+"```yaml"+`
 pipeline:
   processors:
-    - bloblang: |
+    - mapping: |
         meta kafka_key = deleted()
 `+"```"+`
 
@@ -49,7 +48,7 @@ Or delete all keys with:
 `+"```yaml"+`
 pipeline:
   processors:
-    - bloblang: meta = deleted()
+    - mapping: meta = deleted()
 `+"```"+``),
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldString("project", "The project ID of the topic to publish to."),
@@ -69,12 +68,12 @@ pipeline:
 	}
 }
 
-func newGCPPubSubOutput(conf output.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (ioutput.Streamed, error) {
+func newGCPPubSubOutput(conf output.Config, mgr bundle.NewManagement, log log.Modular, stats metrics.Type) (output.Streamed, error) {
 	a, err := newGCPPubSubWriter(conf.GCPPubSub, mgr, log)
 	if err != nil {
 		return nil, err
 	}
-	w, err := output.NewAsyncWriter("gcp_pubsub", conf.GCPPubSub.MaxInFlight, a, log, stats)
+	w, err := output.NewAsyncWriter("gcp_pubsub", conf.GCPPubSub.MaxInFlight, a, mgr)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +97,7 @@ type gcpPubSubWriter struct {
 	log log.Modular
 }
 
-func newGCPPubSubWriter(conf output.GCPPubSubConfig, mgr interop.Manager, log log.Modular) (*gcpPubSubWriter, error) {
+func newGCPPubSubWriter(conf output.GCPPubSubConfig, mgr bundle.NewManagement, log log.Modular) (*gcpPubSubWriter, error) {
 	client, err := pubsub.NewClient(context.Background(), conf.ProjectID)
 	if err != nil {
 		return nil, err
@@ -131,7 +130,7 @@ func newGCPPubSubWriter(conf output.GCPPubSubConfig, mgr interop.Manager, log lo
 	}, nil
 }
 
-func (c *gcpPubSubWriter) ConnectWithContext(ctx context.Context) error {
+func (c *gcpPubSubWriter) Connect(ctx context.Context) error {
 	c.topicMut.Lock()
 	defer c.topicMut.Unlock()
 	if c.topics != nil {
@@ -167,7 +166,7 @@ func (c *gcpPubSubWriter) getTopic(ctx context.Context, t string) (*pubsub.Topic
 	return topic, nil
 }
 
-func (c *gcpPubSubWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (c *gcpPubSubWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	topics := make([]*pubsub.Topic, msg.Len())
 	if err := msg.Iter(func(i int, _ *message.Part) error {
 		var tErr error
@@ -181,12 +180,12 @@ func (c *gcpPubSubWriter) WriteWithContext(ctx context.Context, msg *message.Bat
 	_ = msg.Iter(func(i int, part *message.Part) error {
 		topic := topics[i]
 		attr := map[string]string{}
-		_ = c.metaFilter.Iter(part, func(k, v string) error {
+		_ = c.metaFilter.IterStr(part, func(k, v string) error {
 			attr[k] = v
 			return nil
 		})
 		gmsg := &pubsub.Message{
-			Data: part.Get(),
+			Data: part.AsBytes(),
 		}
 		if c.orderingEnabled {
 			gmsg.OrderingKey = c.orderingKey.String(i, msg)
@@ -213,19 +212,14 @@ func (c *gcpPubSubWriter) WriteWithContext(ctx context.Context, msg *message.Bat
 	return nil
 }
 
-func (c *gcpPubSubWriter) CloseAsync() {
-	go func() {
-		c.topicMut.Lock()
-		defer c.topicMut.Unlock()
-		if c.topics != nil {
-			for _, t := range c.topics {
-				t.Stop()
-			}
-			c.topics = nil
+func (c *gcpPubSubWriter) Close(context.Context) error {
+	c.topicMut.Lock()
+	defer c.topicMut.Unlock()
+	if c.topics != nil {
+		for _, t := range c.topics {
+			t.Stop()
 		}
-	}()
-}
-
-func (c *gcpPubSubWriter) WaitForClose(time.Duration) error {
+		c.topics = nil
+	}
 	return nil
 }

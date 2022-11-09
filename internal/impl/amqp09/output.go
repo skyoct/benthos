@@ -17,28 +17,25 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/metadata"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		a, err := newAMQP09Writer(nm, c.AMQP09, nm.Logger())
 		if err != nil {
 			return nil, err
 		}
-		w, err := ooutput.NewAsyncWriter("amqp_0_9", c.AMQP09.MaxInFlight, a, nm.Logger(), nm.Metrics())
+		w, err := output.NewAsyncWriter("amqp_0_9", c.AMQP09.MaxInFlight, a, nm)
 		if err != nil {
 			return nil, err
 		}
-		return ooutput.OnlySinglePayloads(w), nil
-
+		return output.OnlySinglePayloads(w), nil
 	}), docs.ComponentSpec{
 		Name: "amqp_0_9",
 		Summary: `
@@ -62,7 +59,7 @@ The fields 'key' and 'type' can be dynamically set using function interpolations
 				[]string{"amqp://guest:guest@127.0.0.1:5672/"},
 				[]string{"amqp://127.0.0.1:5672/,amqp://127.0.0.2:5672/"},
 				[]string{"amqp://127.0.0.1:5672/", "amqp://127.0.0.2:5672/"},
-			).Array().AtVersion("3.58.0").HasDefault([]interface{}{}),
+			).Array().AtVersion("3.58.0").HasDefault([]any{}),
 			docs.FieldString("exchange", "An AMQP exchange to publish to.").HasDefault(""),
 			docs.FieldObject("exchange_declare", "Optionally declare the target exchange (passive).").WithChildren(
 				docs.FieldBool("enabled", "Whether to declare the exchange.").HasDefault(false),
@@ -70,17 +67,18 @@ The fields 'key' and 'type' can be dynamically set using function interpolations
 					"direct", "fanout", "topic", "x-custom",
 				).HasDefault("direct"),
 				docs.FieldBool("durable", "Whether the exchange should be durable.").HasDefault(true),
-			).Advanced().HasDefault(map[string]interface{}{}),
+			).Advanced(),
 			docs.FieldString("key", "The binding key to set for each message.").IsInterpolated().HasDefault(""),
 			docs.FieldString("type", "The type property to set for each message.").IsInterpolated().HasDefault(""),
 			docs.FieldString("content_type", "The content type attribute to set for each message.").IsInterpolated().Advanced().HasDefault("application/octet-stream"),
 			docs.FieldString("content_encoding", "The content encoding attribute to set for each message.").IsInterpolated().Advanced().HasDefault(""),
-			docs.FieldObject("metadata", "Specify criteria for which metadata values are attached to messages as headers.").WithChildren(metadata.ExcludeFilterFields()...).HasDefault(map[string]interface{}{}),
+			docs.FieldObject("metadata", "Specify criteria for which metadata values are attached to messages as headers.").WithChildren(metadata.ExcludeFilterFields()...),
 			docs.FieldString("priority", "Set the priority of each message with a dynamic interpolated expression.", "0", `${! meta("amqp_priority") }`, `${! json("doc.priority") }`).IsInterpolated().Advanced().HasDefault(""),
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput.").HasDefault(64),
 			docs.FieldBool("persistent", "Whether message delivery should be persistent (transient by default).").Advanced().HasDefault(false),
 			docs.FieldBool("mandatory", "Whether to set the mandatory flag on published messages. When set if a published message is routed to zero queues it is returned.").Advanced().HasDefault(false),
 			docs.FieldBool("immediate", "Whether to set the immediate flag on published messages. When set if there are no ready consumers of a queue then the message is dropped instead of waiting.").Advanced().HasDefault(false),
+			docs.FieldString("timeout", "The maximum period to wait before abandoning it and reattempting. If not set, wait indefinitely.").Advanced().HasDefault(""),
 			btls.FieldSpec(),
 		),
 		Categories: []string{
@@ -102,25 +100,33 @@ type amqp09Writer struct {
 
 	log log.Modular
 
-	conf    ooutput.AMQPConfig
+	conf    output.AMQPConfig
 	urls    []string
 	tlsConf *tls.Config
 
-	conn        *amqp.Connection
-	amqpChan    *amqp.Channel
-	confirmChan <-chan amqp.Confirmation
-	returnChan  <-chan amqp.Return
+	conn       *amqp.Connection
+	amqpChan   *amqp.Channel
+	returnChan <-chan amqp.Return
+	timeout    time.Duration
 
 	deliveryMode uint8
 
 	connLock sync.RWMutex
 }
 
-func newAMQP09Writer(mgr interop.Manager, conf ooutput.AMQPConfig, log log.Modular) (*amqp09Writer, error) {
+func newAMQP09Writer(mgr bundle.NewManagement, conf output.AMQPConfig, log log.Modular) (*amqp09Writer, error) {
+	var timeout time.Duration
+	if tout := conf.Timeout; len(tout) > 0 {
+		var err error
+		if timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout period string: %v", err)
+		}
+	}
 	a := amqp09Writer{
 		log:          log,
 		conf:         conf,
 		deliveryMode: amqp.Transient,
+		timeout:      timeout,
 	}
 	var err error
 	if a.metaFilter, err = conf.Metadata.Filter(); err != nil {
@@ -157,14 +163,14 @@ func newAMQP09Writer(mgr interop.Manager, conf ooutput.AMQPConfig, log log.Modul
 	}
 
 	if conf.TLS.Enabled {
-		if a.tlsConf, err = conf.TLS.Get(); err != nil {
+		if a.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
 	return &a, nil
 }
 
-func (a *amqp09Writer) ConnectWithContext(ctx context.Context) error {
+func (a *amqp09Writer) Connect(ctx context.Context) error {
 	a.connLock.Lock()
 	defer a.connLock.Unlock()
 
@@ -201,7 +207,6 @@ func (a *amqp09Writer) ConnectWithContext(ctx context.Context) error {
 
 	a.conn = conn
 	a.amqpChan = amqpChan
-	a.confirmChan = amqpChan.NotifyPublish(make(chan amqp.Confirmation, a.conf.MaxInFlight))
 	if a.conf.Mandatory || a.conf.Immediate {
 		a.returnChan = amqpChan.NotifyReturn(make(chan amqp.Return, 1))
 	}
@@ -227,11 +232,10 @@ func (a *amqp09Writer) disconnect() error {
 	return nil
 }
 
-func (a *amqp09Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (a *amqp09Writer) WriteBatch(wctx context.Context, msg message.Batch) error {
 	a.connLock.RLock()
 	conn := a.conn
 	amqpChan := a.amqpChan
-	confirmChan := a.confirmChan
 	returnChan := a.returnChan
 	a.connLock.RUnlock()
 
@@ -239,7 +243,18 @@ func (a *amqp09Writer) WriteWithContext(ctx context.Context, msg *message.Batch)
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+	var ctx context.Context
+	if a.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(
+			wctx, a.timeout,
+		)
+		defer cancel()
+	} else {
+		ctx = wctx
+	}
+
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
 		bindingKey := strings.ReplaceAll(a.key.String(i, msg), "/", ".")
 		msgType := strings.ReplaceAll(a.msgType.String(i, msg), "/", ".")
 		contentType := a.contentType.String(i, msg)
@@ -258,12 +273,13 @@ func (a *amqp09Writer) WriteWithContext(ctx context.Context, msg *message.Batch)
 		}
 
 		headers := amqp.Table{}
-		_ = a.metaFilter.Iter(p, func(k, v string) error {
+		_ = a.metaFilter.Iter(p, func(k string, v any) error {
 			headers[strings.ReplaceAll(k, "_", "-")] = v
 			return nil
 		})
 
-		err := amqpChan.Publish(
+		conf, err := amqpChan.PublishWithDeferredConfirmWithContext(
+			ctx,
 			a.conf.Exchange,  // publish to an exchange
 			bindingKey,       // routing to 0 or more queues
 			a.conf.Mandatory, // mandatory
@@ -272,7 +288,7 @@ func (a *amqp09Writer) WriteWithContext(ctx context.Context, msg *message.Batch)
 				Headers:         headers,
 				ContentType:     contentType,
 				ContentEncoding: contentEncoding,
-				Body:            p.Get(),
+				Body:            p.AsBytes(),
 				DeliveryMode:    a.deliveryMode, // 1=non-persistent, 2=persistent
 				Priority:        priority,       // 0-9
 				Type:            msgType,
@@ -284,35 +300,29 @@ func (a *amqp09Writer) WriteWithContext(ctx context.Context, msg *message.Batch)
 			a.log.Errorf("Failed to send message: %v\n", err)
 			return component.ErrNotConnected
 		}
-		select {
-		case confirm, open := <-confirmChan:
-			if !open {
-				a.log.Errorln("Failed to send message, ensure your target exchange exists.")
-				return component.ErrNotConnected
-			}
-			if !confirm.Ack {
-				a.log.Errorln("Failed to acknowledge message.")
-				return component.ErrNoAck
-			}
-		case _, open := <-returnChan:
-			if !open {
-				return fmt.Errorf("acknowledgement not supported, ensure server supports immediate and mandatory flags")
-			}
+		if !conf.Wait() {
+			a.log.Errorln("Failed to acknowledge message.")
 			return component.ErrNoAck
+		}
+		if returnChan != nil {
+			select {
+			case _, open := <-returnChan:
+				if !open {
+					return fmt.Errorf("acknowledgement not supported, ensure server supports immediate and mandatory flags")
+				}
+				return component.ErrNoAck
+			default:
+			}
 		}
 		return nil
 	})
 }
 
-func (a *amqp09Writer) CloseAsync() {
-	_ = a.disconnect()
+func (a *amqp09Writer) Close(context.Context) error {
+	return a.disconnect()
 }
 
-func (a *amqp09Writer) WaitForClose(timeout time.Duration) error {
-	return nil
-}
-
-// reDial connection to amqp with one or more fallback URLs
+// reDial connection to amqp with one or more fallback URLs.
 func (a *amqp09Writer) reDial(urls []string) (conn *amqp.Connection, err error) {
 	for _, u := range urls {
 		conn, err = a.dial(u)
@@ -327,7 +337,7 @@ func (a *amqp09Writer) reDial(urls []string) (conn *amqp.Connection, err error) 
 	return nil, err
 }
 
-// dial attempts to connect to amqp URL
+// dial attempts to connect to amqp URL.
 func (a *amqp09Writer) dial(amqpURL string) (conn *amqp.Connection, err error) {
 	u, err := url.Parse(amqpURL)
 	if err != nil {

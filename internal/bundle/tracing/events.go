@@ -14,7 +14,7 @@ var (
 	EventError   EventType = "ERROR"
 )
 
-// NodeEvent represents a single event that occured within the stream.
+// NodeEvent represents a single event that occurred within the stream.
 type NodeEvent struct {
 	Type    EventType
 	Content string
@@ -41,7 +41,7 @@ func NewSummary() *Summary {
 // execution of a stream pipeline.
 func (s *Summary) InputEvents() map[string][]NodeEvent {
 	m := map[string][]NodeEvent{}
-	s.inputEvents.Range(func(key, value interface{}) bool {
+	s.inputEvents.Range(func(key, value any) bool {
 		m[key.(string)] = value.(*events).Extract()
 		return true
 	})
@@ -52,7 +52,7 @@ func (s *Summary) InputEvents() map[string][]NodeEvent {
 // execution of a stream pipeline.
 func (s *Summary) ProcessorEvents() map[string][]NodeEvent {
 	m := map[string][]NodeEvent{}
-	s.processorEvents.Range(func(key, value interface{}) bool {
+	s.processorEvents.Range(func(key, value any) bool {
 		m[key.(string)] = value.(*events).Extract()
 		return true
 	})
@@ -63,7 +63,7 @@ func (s *Summary) ProcessorEvents() map[string][]NodeEvent {
 // execution of a stream pipeline.
 func (s *Summary) OutputEvents() map[string][]NodeEvent {
 	m := map[string][]NodeEvent{}
-	s.outputEvents.Range(func(key, value interface{}) bool {
+	s.outputEvents.Range(func(key, value any) bool {
 		m[key.(string)] = value.(*events).Extract()
 		return true
 	})
@@ -107,9 +107,7 @@ func (e *events) Extract() []NodeEvent {
 	defer e.mut.Unlock()
 
 	eventsCopy := make([]NodeEvent, len(e.m))
-	for i, e := range e.m {
-		eventsCopy[i] = e
-	}
+	copy(eventsCopy, e.m)
 
 	return eventsCopy
 }

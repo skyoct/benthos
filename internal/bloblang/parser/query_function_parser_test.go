@@ -16,7 +16,7 @@ import (
 func TestFunctionQueries(t *testing.T) {
 	type easyMsg struct {
 		content string
-		meta    map[string]string
+		meta    map[string]any
 		err     error
 	}
 
@@ -24,13 +24,13 @@ func TestFunctionQueries(t *testing.T) {
 		input    string
 		output   string
 		messages []easyMsg
-		value    *interface{}
+		value    *any
 		index    int
 	}{
 		"without method": {
 			input: `this.without("bar","baz")`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
 					"foo": 1.0,
 					"bar": 2.0,
 					"baz": 3.0,
@@ -41,8 +41,8 @@ func TestFunctionQueries(t *testing.T) {
 		},
 		"without method trailing comma": {
 			input: `this.without("bar","baz",)`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
 					"foo": 1.0,
 					"bar": 2.0,
 					"baz": 3.0,
@@ -125,7 +125,7 @@ func TestFunctionQueries(t *testing.T) {
 			messages: []easyMsg{
 				{
 					content: `{"foo":{"bar":"this"}}`,
-					meta: map[string]string{
+					meta: map[string]any{
 						"path": "foo.bar",
 					},
 				},
@@ -176,7 +176,7 @@ func TestFunctionQueries(t *testing.T) {
 			messages: []easyMsg{
 				{},
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -192,7 +192,7 @@ bar""")`,
 			messages: []easyMsg{
 				{},
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo\nbar": "bar",
 						"baz":      "qux",
 						"duck,1":   "quack",
@@ -207,7 +207,7 @@ bar""")`,
 			messages: []easyMsg{
 				{},
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -220,7 +220,7 @@ bar""")`,
 			output: "null",
 			messages: []easyMsg{
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -233,7 +233,7 @@ bar""")`,
 			output: `{"baz":"qux","duck,1":"quack","foo":"bar"}`,
 			messages: []easyMsg{
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -246,7 +246,7 @@ bar""")`,
 			output: "quack",
 			messages: []easyMsg{
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -261,7 +261,7 @@ bar""")`,
 			messages: []easyMsg{
 				{},
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -275,7 +275,7 @@ bar""")`,
 			index:  1,
 			messages: []easyMsg{
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -289,7 +289,7 @@ bar""")`,
 			output: `{}`,
 			messages: []easyMsg{
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -303,7 +303,7 @@ bar""")`,
 			messages: []easyMsg{
 				{},
 				{
-					meta: map[string]string{
+					meta: map[string]any{
 						"foo":    "bar",
 						"baz":    "qux",
 						"duck,1": "quack",
@@ -463,24 +463,24 @@ bar""")`,
 		"field root": {
 			input:  `this`,
 			output: `test`,
-			value: func() *interface{} {
-				var v interface{} = "test"
+			value: func() *any {
+				var v any = "test"
 				return &v
 			}(),
 		},
 		"field root null": {
 			input:  `this`,
 			output: `null`,
-			value: func() *interface{} {
-				var v interface{}
+			value: func() *any {
+				var v any
 				return &v
 			}(),
 		},
 		"field map": {
 			input:  `this.foo`,
 			output: `hello world`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
 					"foo": "hello world",
 				}
 				return &v
@@ -489,9 +489,9 @@ bar""")`,
 		"field literal": {
 			input:  `this.foo.bar`,
 			output: `hello world`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
-					"foo": map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
+					"foo": map[string]any{
 						"bar": "hello world",
 					},
 				}
@@ -529,16 +529,16 @@ bar""")`,
 		"field literal root": {
 			input:  `this`,
 			output: `test`,
-			value: func() *interface{} {
-				var v interface{} = "test"
+			value: func() *any {
+				var v any = "test"
 				return &v
 			}(),
 		},
 		"field literal root 2": {
 			input:  `this.foo`,
 			output: `test`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
 					"foo": "test",
 				}
 				return &v
@@ -547,8 +547,8 @@ bar""")`,
 		"field quoted literal": {
 			input:  `this."foo.bar"`,
 			output: `test`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
 					"foo.bar": "test",
 				}
 				return &v
@@ -557,9 +557,9 @@ bar""")`,
 		"field quoted literal extended": {
 			input:  `this."foo.bar".baz`,
 			output: `test`,
-			value: func() *interface{} {
-				var v interface{} = map[string]interface{}{
-					"foo.bar": map[string]interface{}{
+			value: func() *any {
+				var v any = map[string]any{
+					"foo.bar": map[string]any{
 						"baz": "test",
 					},
 				}
@@ -662,13 +662,13 @@ bar""")`,
 				part := message.NewPart([]byte(m.content))
 				if m.meta != nil {
 					for k, v := range m.meta {
-						part.MetaSet(k, v)
+						part.MetaSetMut(k, v)
 					}
 				}
 				if m.err != nil {
 					part.ErrorSet(m.err)
 				}
-				msg.Append(part)
+				msg = append(msg, part)
 			}
 
 			e, perr := tryParseQuery(test.input)
@@ -676,12 +676,12 @@ bar""")`,
 
 			res := query.ExecToString(e, query.FunctionContext{
 				Index: test.index, MsgBatch: msg,
-			}.WithValueFunc(func() *interface{} { return test.value }))
+			}.WithValueFunc(func() *any { return test.value }))
 
 			assert.Equal(t, test.output, res)
 			res = string(query.ExecToBytes(e, query.FunctionContext{
 				Index: test.index, MsgBatch: msg,
-			}.WithValueFunc(func() *interface{} { return test.value })))
+			}.WithValueFunc(func() *any { return test.value })))
 			assert.Equal(t, test.output, res)
 		})
 	}

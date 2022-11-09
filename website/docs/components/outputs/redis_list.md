@@ -80,8 +80,8 @@ you to create a unique key for each message.
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 This output benefits from sending messages as a batch for improved performance.
 Batches can be formed at both the input and output level. You can find out more
@@ -184,6 +184,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -243,6 +246,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -250,7 +256,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -263,6 +269,25 @@ The path of a certificate key to use.
 
 Type: `string`  
 Default: `""`  
+
+### `tls.client_certs[].password`
+
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+password: foo
+
+password: ${KEY_PASSWORD}
+```
 
 ### `key`
 
@@ -287,7 +312,7 @@ key: ${!count("msgs")}
 
 ### `max_in_flight`
 
-The maximum number of messages to have in flight at a given time. Increase this to improve throughput.
+The maximum number of parallel message batches to have in flight at any given time.
 
 
 Type: `int`  

@@ -17,12 +17,12 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
 )
 
@@ -32,16 +32,16 @@ const (
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		kin, err := newKinesisWriter(c.AWSKinesis, nm, nm.Logger())
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
+		kin, err := newKinesisWriter(c.AWSKinesis, nm)
 		if err != nil {
 			return nil, err
 		}
-		w, err := ooutput.NewAsyncWriter("aws_kinesis", c.AWSKinesis.MaxInFlight, kin, nm.Logger(), nm.Metrics())
+		w, err := output.NewAsyncWriter("aws_kinesis", c.AWSKinesis.MaxInFlight, kin, nm)
 		if err != nil {
 			return w, err
 		}
-		return ooutput.NewBatcherFromConfig(c.AWSKinesis.Batching, w, nm, nm.Logger(), nm.Metrics())
+		return batcher.NewFromConfig(c.AWSKinesis.Batching, w, nm)
 	}), docs.ComponentSpec{
 		Name:    "aws_kinesis",
 		Version: "3.36.0",
@@ -63,9 +63,9 @@ allowing you to transfer data across accounts. You can find out more
 			docs.FieldString("stream", "The stream to publish messages to."),
 			docs.FieldString("partition_key", "A required key for partitioning messages.").IsInterpolated(),
 			docs.FieldString("hash_key", "A optional hash key for partitioning messages.").IsInterpolated().Advanced(),
-			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
+			docs.FieldInt("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time."),
 			policy.FieldSpec(),
-		).WithChildren(sess.FieldSpecs()...).WithChildren(retries.FieldSpecs()...).ChildDefaultAndTypesFromStruct(ooutput.NewKinesisConfig()),
+		).WithChildren(sess.FieldSpecs()...).WithChildren(retries.FieldSpecs()...).ChildDefaultAndTypesFromStruct(output.NewKinesisConfig()),
 		Categories: []string{
 			"Services",
 			"AWS",
@@ -77,7 +77,7 @@ allowing you to transfer data across accounts. You can find out more
 }
 
 type kinesisWriter struct {
-	conf ooutput.KinesisConfig
+	conf output.KinesisConfig
 
 	session *session.Session
 	kinesis kinesisiface.KinesisAPI
@@ -90,18 +90,14 @@ type kinesisWriter struct {
 	log log.Modular
 }
 
-func newKinesisWriter(
-	conf ooutput.KinesisConfig,
-	mgr interop.Manager,
-	log log.Modular,
-) (*kinesisWriter, error) {
+func newKinesisWriter(conf output.KinesisConfig, mgr bundle.NewManagement) (*kinesisWriter, error) {
 	if conf.PartitionKey == "" {
 		return nil, errors.New("partition key must not be empty")
 	}
 
 	k := kinesisWriter{
 		conf:       conf,
-		log:        log,
+		log:        mgr.Logger(),
 		streamName: aws.String(conf.Stream),
 	}
 	var err error
@@ -122,12 +118,12 @@ func newKinesisWriter(
 // and passing each new message through the partition and hash key interpolation
 // process, allowing the user to define the partition and hash key per message
 // part.
-func (a *kinesisWriter) toRecords(msg *message.Batch) ([]*kinesis.PutRecordsRequestEntry, error) {
+func (a *kinesisWriter) toRecords(msg message.Batch) ([]*kinesis.PutRecordsRequestEntry, error) {
 	entries := make([]*kinesis.PutRecordsRequestEntry, msg.Len())
 
 	err := msg.Iter(func(i int, p *message.Part) error {
 		entry := kinesis.PutRecordsRequestEntry{
-			Data:         p.Get(),
+			Data:         p.AsBytes(),
 			PartitionKey: aws.String(a.partitionKey.String(i, msg)),
 		}
 
@@ -147,7 +143,7 @@ func (a *kinesisWriter) toRecords(msg *message.Batch) ([]*kinesis.PutRecordsRequ
 	return entries, err
 }
 
-func (a *kinesisWriter) ConnectWithContext(ctx context.Context) error {
+func (a *kinesisWriter) Connect(ctx context.Context) error {
 	if a.session != nil {
 		return nil
 	}
@@ -170,7 +166,7 @@ func (a *kinesisWriter) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (a *kinesisWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (a *kinesisWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	if a.session == nil {
 		return component.ErrNotConnected
 	}
@@ -253,9 +249,6 @@ func (a *kinesisWriter) WriteWithContext(ctx context.Context, msg *message.Batch
 	return err
 }
 
-func (a *kinesisWriter) CloseAsync() {
-}
-
-func (a *kinesisWriter) WaitForClose(time.Duration) error {
+func (a *kinesisWriter) Close(context.Context) error {
 	return nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,31 +15,32 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+	"gopkg.in/natefinch/lumberjack.v2"
 	"gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/api"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/component/tracer"
 	"github.com/benthosdev/benthos/v4/internal/config"
 	"github.com/benthosdev/benthos/v4/internal/docs"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 	strmmgr "github.com/benthosdev/benthos/v4/internal/stream/manager"
 )
 
-//------------------------------------------------------------------------------
-
 var testSuffix = "_benthos_test"
 
 type stoppable interface {
-	Stop(timeout time.Duration) error
+	Stop(ctx context.Context) error
 }
 
 //------------------------------------------------------------------------------
 
-func readConfig(path string, streamsMode bool, resourcesPaths, streamsPaths, overrides []string) *config.Reader {
+func readConfig(path string, streamsMode bool, resourcesPaths, streamsPaths, overrides []string) (mainPath string, inferred bool, conf *config.Reader) {
 	if path == "" {
 		// Iterate default config paths
 		for _, dpath := range []string{
@@ -45,8 +48,8 @@ func readConfig(path string, streamsMode bool, resourcesPaths, streamsPaths, ove
 			"/etc/benthos/config.yaml",
 			"/etc/benthos.yaml",
 		} {
-			if _, err := os.Stat(dpath); err == nil {
-				fmt.Fprintf(os.Stderr, "Config file not specified, reading from %v\n", dpath)
+			if _, err := ifs.OS().Stat(dpath); err == nil {
+				inferred = true
 				path = dpath
 				break
 			}
@@ -59,7 +62,7 @@ func readConfig(path string, streamsMode bool, resourcesPaths, streamsPaths, ove
 	if streamsMode {
 		opts = append(opts, config.OptSetStreamPaths(streamsPaths...))
 	}
-	return config.NewReader(path, resourcesPaths, opts...)
+	return path, inferred, config.NewReader(path, resourcesPaths, opts...)
 }
 
 //------------------------------------------------------------------------------
@@ -67,11 +70,10 @@ func readConfig(path string, streamsMode bool, resourcesPaths, streamsPaths, ove
 func initStreamsMode(
 	strict, watching, enableAPI bool,
 	confReader *config.Reader,
-	manager *manager.Type,
-	logger log.Modular,
-	stats *metrics.Namespaced,
+	mgr *manager.Type,
 ) stoppable {
-	streamMgr := strmmgr.New(manager, strmmgr.OptAPIEnabled(enableAPI))
+	logger := mgr.Logger()
+	streamMgr := strmmgr.New(mgr, strmmgr.OptAPIEnabled(enableAPI))
 
 	streamConfs := map[string]stream.Config{}
 	lints, err := confReader.ReadStreams(streamConfs)
@@ -79,15 +81,17 @@ func initStreamsMode(
 		fmt.Fprintf(os.Stderr, "Stream configuration file read error: %v\n", err)
 		os.Exit(1)
 	}
-	if strict && len(lints) > 0 {
-		for _, lint := range lints {
-			fmt.Fprintln(os.Stderr, lint)
-		}
-		fmt.Println("Shutting down due to stream linter errors, to prevent shutdown run Benthos with --chilled")
-		os.Exit(1)
-	}
+
 	for _, lint := range lints {
-		logger.Infoln(lint)
+		if strict {
+			logger.With("lint", lint).Errorln("Config lint error")
+		} else {
+			logger.With("lint", lint).Warnln("Config lint error")
+		}
+	}
+	if strict && len(lints) > 0 {
+		logger.Errorln("Shutting down due to stream linter errors, to prevent shutdown run Benthos with --chilled")
+		os.Exit(1)
 	}
 
 	for id, conf := range streamConfs {
@@ -96,17 +100,20 @@ func initStreamsMode(
 			os.Exit(1)
 		}
 	}
-	logger.Infoln("Launching benthos in streams mode, use CTRL+C to close.")
+	logger.Infoln("Launching benthos in streams mode, use CTRL+C to close")
 
 	if err := confReader.SubscribeStreamChanges(func(id string, newStreamConf stream.Config) bool {
-		if err = streamMgr.Update(id, newStreamConf, time.Second*30); err != nil && errors.Is(err, strmmgr.ErrStreamDoesNotExist) {
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		defer done()
+
+		if err = streamMgr.Update(ctx, id, newStreamConf); err != nil && errors.Is(err, strmmgr.ErrStreamDoesNotExist) {
 			err = streamMgr.Create(id, newStreamConf)
 		}
 		if err != nil {
 			logger.Errorf("Failed to update stream %v: %v", id, err)
 			return false
 		}
-		logger.Infof("Updated stream %v config from file.", id)
+		logger.Infof("Updated stream %v config from file", id)
 		return true
 	}); err != nil {
 		logger.Errorf("Failed to create stream config watcher: %v", err)
@@ -114,7 +121,7 @@ func initStreamsMode(
 	}
 
 	if watching {
-		if err := confReader.BeginFileWatching(manager, strict); err != nil {
+		if err := confReader.BeginFileWatching(mgr, strict); err != nil {
 			logger.Errorf("Failed to create stream config watcher: %v", err)
 			os.Exit(1)
 		}
@@ -128,7 +135,7 @@ type swappableStopper struct {
 	mut     sync.Mutex
 }
 
-func (s *swappableStopper) Stop(timeout time.Duration) error {
+func (s *swappableStopper) Stop(ctx context.Context) error {
 	s.mut.Lock()
 	defer s.mut.Unlock()
 
@@ -137,7 +144,7 @@ func (s *swappableStopper) Stop(timeout time.Duration) error {
 	}
 
 	s.stopped = true
-	return s.current.Stop(timeout)
+	return s.current.Stop(ctx)
 }
 
 func (s *swappableStopper) Replace(fn func() (stoppable, error)) error {
@@ -145,11 +152,14 @@ func (s *swappableStopper) Replace(fn func() (stoppable, error)) error {
 	defer s.mut.Unlock()
 
 	if s.stopped {
-		// If the outter stream has been stopped then do not create a new one.
+		// If the outer stream has been stopped then do not create a new one.
 		return nil
 	}
 
-	if err := s.current.Stop(time.Second * 30); err != nil {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	if err := s.current.Stop(ctx); err != nil {
 		return fmt.Errorf("failed to stop active stream: %w", err)
 	}
 
@@ -166,21 +176,17 @@ func initNormalMode(
 	conf config.Type,
 	strict, watching bool,
 	confReader *config.Reader,
-	manager *manager.Type,
-	logger log.Modular,
-	stats *metrics.Namespaced,
+	mgr *manager.Type,
 ) (newStream stoppable, stoppedChan chan struct{}) {
-	stoppedChan = make(chan struct{})
+	logger := mgr.Logger()
 
+	stoppedChan = make(chan struct{})
 	streamInit := func() (stoppable, error) {
-		return stream.New(
-			conf.Config, manager,
-			stream.OptOnClose(func() {
-				if !watching {
-					close(stoppedChan)
-				}
-			}),
-		)
+		return stream.New(conf.Config, mgr, stream.OptOnClose(func() {
+			if !watching {
+				close(stoppedChan)
+			}
+		}))
 	}
 
 	var stoppableStream swappableStopper
@@ -190,7 +196,7 @@ func initNormalMode(
 		logger.Errorf("Service closing due to: %v\n", err)
 		os.Exit(1)
 	}
-	logger.Infoln("Launching a benthos instance, use CTRL+C to close.")
+	logger.Infoln("Launching a benthos instance, use CTRL+C to close")
 
 	if err := confReader.SubscribeConfigChanges(func(newStreamConf stream.Config) bool {
 		if err := stoppableStream.Replace(func() (stoppable, error) {
@@ -201,7 +207,7 @@ func initNormalMode(
 			return false
 		}
 
-		logger.Infoln("Updated main config from file.")
+		logger.Infoln("Updated main config from file")
 		return true
 	}); err != nil {
 		logger.Errorf("Failed to create config file watcher: %v", err)
@@ -209,7 +215,7 @@ func initNormalMode(
 	}
 
 	if watching {
-		if err := confReader.BeginFileWatching(manager, strict); err != nil {
+		if err := confReader.BeginFileWatching(mgr, strict); err != nil {
 			logger.Errorf("Failed to create config file watcher: %v", err)
 			os.Exit(1)
 		}
@@ -224,23 +230,16 @@ func cmdService(
 	resourcesPaths []string,
 	confOverrides []string,
 	overrideLogLevel string,
-	strict, watching, enableStreamsAPI bool,
+	strict, watching, enableStreamsAPI, namespaceStreamEndpoints bool,
 	streamsMode bool,
 	streamsPaths []string,
 ) int {
-	confReader := readConfig(confPath, streamsMode, resourcesPaths, streamsPaths, confOverrides)
+	mainPath, inferredMainPath, confReader := readConfig(confPath, streamsMode, resourcesPaths, streamsPaths, confOverrides)
 	conf := config.New()
 
 	lints, err := confReader.Read(&conf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Configuration file read error: %v\n", err)
-		return 1
-	}
-	if strict && len(lints) > 0 {
-		for _, lint := range lints {
-			fmt.Fprintln(os.Stderr, lint)
-		}
-		fmt.Println("Shutting down due to linter errors, to prevent shutdown run Benthos with --chilled")
 		return 1
 	}
 
@@ -251,25 +250,72 @@ func cmdService(
 	// Logging and stats aggregation.
 	var logger log.Modular
 
-	// Note: Only log to Stderr if our output is stdout, brokers aren't counted
-	// here as this is only a special circumstance for very basic use cases.
-	if !streamsMode && conf.Output.Type == "stdout" {
-		logger, err = log.NewV2(os.Stderr, conf.Logger)
+	if conf.Logger.File.Path != "" {
+		var writer io.Writer
+		if conf.Logger.File.Rotate {
+			writer = &lumberjack.Logger{
+				Filename:   conf.Logger.File.Path,
+				MaxSize:    10,
+				MaxAge:     conf.Logger.File.RotateMaxAge,
+				MaxBackups: 1,
+				Compress:   true,
+			}
+		} else {
+			var fw fs.File
+			if fw, err = ifs.OS().OpenFile(conf.Logger.File.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
+				var isw bool
+				if writer, isw = fw.(io.Writer); !isw {
+					err = errors.New("failed to open a writable file")
+				}
+			}
+		}
+		if err == nil {
+			logger, err = log.NewV2(writer, conf.Logger)
+		}
 	} else {
-		logger, err = log.NewV2(os.Stdout, conf.Logger)
+		// Note: Only log to Stderr if our output is stdout, brokers aren't counted
+		// here as this is only a special circumstance for very basic use cases.
+		if !streamsMode && conf.Output.Type == "stdout" {
+			logger, err = log.NewV2(os.Stderr, conf.Logger)
+		} else {
+			logger, err = log.NewV2(os.Stdout, conf.Logger)
+		}
 	}
 	if err != nil {
 		fmt.Printf("Failed to create logger: %v\n", err)
 		return 1
 	}
 
-	for _, lint := range lints {
-		logger.Infoln(lint)
+	if mainPath == "" {
+		logger.Infof("Running without a main config file")
+	} else if inferredMainPath {
+		logger.With("path", mainPath).Infof("Running main config from file found in a default path")
+	} else {
+		logger.With("path", mainPath).Infof("Running main config from specified file")
 	}
+
+	for _, lint := range lints {
+		if strict {
+			logger.With("lint", lint).Errorln("Config lint error")
+		} else {
+			logger.With("lint", lint).Warnln("Config lint error")
+		}
+	}
+	if strict && len(lints) > 0 {
+		logger.Errorln("Shutting down due to linter errors, to prevent shutdown run Benthos with --chilled")
+		return 1
+	}
+
+	// We use a temporary manager with just the logger initialised for metrics
+	// instantiation. Doing this means that metrics plugins will use a global
+	// environment for child plugins and bloblang mappings, which we might want
+	// to revise in future.
+	tmpMgr := mock.NewManager()
+	tmpMgr.L = logger
 
 	// Create our metrics type.
 	var stats *metrics.Namespaced
-	stats, err = bundle.AllMetrics.Init(conf.Metrics, logger)
+	stats, err = bundle.AllMetrics.Init(conf.Metrics, tmpMgr)
 	for err != nil {
 		logger.Errorf("Failed to connect to metrics aggregator: %v\n", err)
 		return 1
@@ -281,12 +327,18 @@ func cmdService(
 	}()
 
 	// Create our tracer type.
-	var trac tracer.Type
-	if trac, err = bundle.AllTracers.Init(conf.Tracer); err != nil {
+	var trac trace.TracerProvider
+	if trac, err = bundle.AllTracers.Init(conf.Tracer, tmpMgr); err != nil {
 		logger.Errorf("Failed to initialise tracer: %v\n", err)
 		return 1
 	}
-	defer trac.Close()
+	defer func() {
+		if shutter, ok := trac.(interface {
+			Shutdown(context.Context) error
+		}); ok {
+			_ = shutter.Shutdown(context.Background())
+		}
+	}()
 
 	// Create HTTP API with a sanitised service config.
 	var sanitNode yaml.Node
@@ -306,7 +358,15 @@ func cmdService(
 	}
 
 	// Create resource manager.
-	manager, err := manager.NewV2(conf.ResourceConfig, httpServer, logger, stats)
+	manager, err := manager.New(
+		conf.ResourceConfig,
+		manager.OptSetAPIReg(httpServer),
+		manager.OptSetStreamHTTPNamespacing(namespaceStreamEndpoints),
+		manager.OptSetLogger(logger),
+		manager.OptSetMetrics(stats),
+		manager.OptSetTracer(trac),
+		manager.OptSetStreamsMode(streamsMode),
+	)
 	if err != nil {
 		logger.Errorf("Failed to create resource: %v\n", err)
 		return 1
@@ -317,9 +377,9 @@ func cmdService(
 
 	// Create data streams.
 	if streamsMode {
-		stoppableStream = initStreamsMode(strict, watching, enableStreamsAPI, confReader, manager, logger, stats)
+		stoppableStream = initStreamsMode(strict, watching, enableStreamsAPI, confReader, manager)
 	} else {
-		stoppableStream, dataStreamClosedChan = initNormalMode(conf, strict, watching, confReader, manager, logger, stats)
+		stoppableStream, dataStreamClosedChan = initNormalMode(conf, strict, watching, confReader, manager)
 	}
 
 	// Start HTTP server.
@@ -332,6 +392,15 @@ func cmdService(
 		close(httpServerClosedChan)
 	}()
 
+	var exitDelay time.Duration
+	if td := conf.SystemCloseDelay; len(td) > 0 {
+		var err error
+		if exitDelay, err = time.ParseDuration(td); err != nil {
+			logger.Errorf("Failed to parse shutdown delay period string: %v\n", err)
+			return 1
+		}
+	}
+
 	var exitTimeout time.Duration
 	if tout := conf.SystemCloseTimeout; len(tout) > 0 {
 		var err error
@@ -343,12 +412,19 @@ func cmdService(
 
 	// Defer clean up.
 	defer func() {
+		if exitDelay > 0 {
+			logger.Infof("Shutdown delay is in effect for %s\n", exitDelay)
+			if err := delayShutdown(context.Background(), exitDelay); err != nil {
+				logger.Errorf("Shutdown delay failed: %s", err)
+			}
+		}
+
 		go func() {
 			_ = httpServer.Shutdown(context.Background())
 			select {
 			case <-httpServerClosedChan:
 			case <-time.After(exitTimeout / 2):
-				logger.Warnln("Service failed to close HTTP server gracefully in time.")
+				logger.Warnln("Service failed to close HTTP server gracefully in time")
 			}
 		}()
 
@@ -356,7 +432,7 @@ func cmdService(
 			<-time.After(exitTimeout + time.Second)
 			logger.Warnln(
 				"Service failed to close cleanly within allocated time." +
-					" Exiting forcefully and dumping stack trace to stderr.",
+					" Exiting forcefully and dumping stack trace to stderr",
 			)
 			_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 1)
 			os.Exit(1)
@@ -367,19 +443,21 @@ func cmdService(
 			os.Exit(1)
 		}
 
-		timesOut := time.Now().Add(exitTimeout)
-		if err := stoppableStream.Stop(exitTimeout); err != nil {
+		ctx, done := context.WithTimeout(context.Background(), exitTimeout)
+		if err := stoppableStream.Stop(ctx); err != nil {
 			os.Exit(1)
 		}
-		manager.CloseAsync()
-		if err := manager.WaitForClose(time.Until(timesOut)); err != nil {
+
+		manager.TriggerStopConsuming()
+		if err := manager.WaitForClose(ctx); err != nil {
 			logger.Warnf(
 				"Service failed to close cleanly within allocated time: %v."+
-					" Exiting forcefully and dumping stack trace to stderr.\n", err,
+					" Exiting forcefully and dumping stack trace to stderr\n", err,
 			)
 			_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 1)
 			os.Exit(1)
 		}
+		done()
 	}()
 
 	sigChan := make(chan os.Signal, 1)
@@ -387,16 +465,43 @@ func cmdService(
 
 	// Wait for termination signal
 	select {
-	case <-sigChan:
-		logger.Infoln("Received SIGTERM, the service is closing.")
+	case sig := <-sigChan:
+		var sigName string
+		switch sig {
+		case os.Interrupt:
+			sigName = "SIGINT"
+		case syscall.SIGTERM:
+			sigName = "SIGTERM"
+		default:
+			sigName = sig.String()
+		}
+		logger.Infof("Received %s, the service is closing", sigName)
 	case <-dataStreamClosedChan:
-		logger.Infoln("Pipeline has terminated. Shutting down the service.")
+		logger.Infoln("Pipeline has terminated. Shutting down the service")
 	case <-httpServerClosedChan:
-		logger.Infoln("HTTP Server has terminated. Shutting down the service.")
+		logger.Infoln("HTTP Server has terminated. Shutting down the service")
 	case <-optContext.Done():
-		logger.Infoln("Run context was cancelled. Shutting down the service.")
+		logger.Infoln("Run context was cancelled. Shutting down the service")
 	}
 	return 0
 }
 
-//------------------------------------------------------------------------------
+func delayShutdown(ctx context.Context, duration time.Duration) error {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	delayCtx, cancel := context.WithTimeout(ctx, duration)
+	defer cancel()
+
+	select {
+	case <-delayCtx.Done():
+		err := delayCtx.Err()
+		if err != nil && err != context.DeadlineExceeded {
+			return err
+		}
+	case sig := <-sigChan:
+		return fmt.Errorf("shutdown delay interrupted by signal: %s", sig)
+	}
+
+	return nil
+}

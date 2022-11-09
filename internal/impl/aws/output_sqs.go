@@ -17,16 +17,17 @@ import (
 
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
+	"github.com/benthosdev/benthos/v4/internal/bloblang/query"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/metadata"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
 )
 
@@ -35,7 +36,7 @@ const (
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		return newSQSWriterFromConfig(c.AWSSQS, nm)
 	}), docs.ComponentSpec{
 		Name:    "aws_sqs",
@@ -63,10 +64,10 @@ allowing you to transfer data across accounts. You can find out more
 			docs.FieldString("url", "The URL of the target SQS queue."),
 			docs.FieldString("message_group_id", "An optional group ID to set for messages.").IsInterpolated(),
 			docs.FieldString("message_deduplication_id", "An optional deduplication ID to set for messages.").IsInterpolated(),
-			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
+			docs.FieldInt("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time."),
 			docs.FieldObject("metadata", "Specify criteria for which metadata values are sent as headers.").WithChildren(metadata.ExcludeFilterFields()...),
 			policy.FieldSpec(),
-		).WithChildren(sess.FieldSpecs()...).WithChildren(retries.FieldSpecs()...).ChildDefaultAndTypesFromStruct(ooutput.NewAmazonSQSConfig()),
+		).WithChildren(sess.FieldSpecs()...).WithChildren(retries.FieldSpecs()...).ChildDefaultAndTypesFromStruct(output.NewAmazonSQSConfig()),
 		Categories: []string{
 			"Services",
 			"AWS",
@@ -77,20 +78,20 @@ allowing you to transfer data across accounts. You can find out more
 	}
 }
 
-func newSQSWriterFromConfig(conf ooutput.AmazonSQSConfig, mgr interop.Manager) (output.Streamed, error) {
+func newSQSWriterFromConfig(conf output.AmazonSQSConfig, mgr bundle.NewManagement) (output.Streamed, error) {
 	s, err := newSQSWriter(conf, mgr)
 	if err != nil {
 		return nil, err
 	}
-	w, err := ooutput.NewAsyncWriter("aws_sqs", conf.MaxInFlight, s, mgr.Logger(), mgr.Metrics())
+	w, err := output.NewAsyncWriter("aws_sqs", conf.MaxInFlight, s, mgr)
 	if err != nil {
 		return w, err
 	}
-	return ooutput.NewBatcherFromConfig(conf.Batching, w, mgr, mgr.Logger(), mgr.Metrics())
+	return batcher.NewFromConfig(conf.Batching, w, mgr)
 }
 
 type sqsWriter struct {
-	conf ooutput.AmazonSQSConfig
+	conf output.AmazonSQSConfig
 	sqs  sqsiface.SQSAPI
 
 	backoffCtor func() backoff.BackOff
@@ -105,7 +106,7 @@ type sqsWriter struct {
 	log log.Modular
 }
 
-func newSQSWriter(conf ooutput.AmazonSQSConfig, mgr interop.Manager) (*sqsWriter, error) {
+func newSQSWriter(conf output.AmazonSQSConfig, mgr bundle.NewManagement) (*sqsWriter, error) {
 	s := &sqsWriter{
 		conf:      conf,
 		log:       mgr.Logger(),
@@ -133,7 +134,7 @@ func newSQSWriter(conf ooutput.AmazonSQSConfig, mgr interop.Manager) (*sqsWriter
 	return s, nil
 }
 
-func (a *sqsWriter) ConnectWithContext(ctx context.Context) error {
+func (a *sqsWriter) Connect(ctx context.Context) error {
 	if a.sqs != nil {
 		return nil
 	}
@@ -161,11 +162,11 @@ func isValidSQSAttribute(k, v string) bool {
 	return len(sqsAttributeKeyInvalidCharRegexp.FindStringIndex(strings.ToLower(k))) == 0
 }
 
-func (a *sqsWriter) getSQSAttributes(msg *message.Batch, i int) sqsAttributes {
+func (a *sqsWriter) getSQSAttributes(msg message.Batch, i int) sqsAttributes {
 	p := msg.Get(i)
 	keys := []string{}
-	_ = a.metaFilter.Iter(p, func(k, v string) error {
-		if isValidSQSAttribute(k, v) {
+	_ = a.metaFilter.Iter(p, func(k string, v any) error {
+		if isValidSQSAttribute(k, query.IToString(v)) {
 			keys = append(keys, k)
 		} else {
 			a.log.Debugf("Rejecting metadata key '%v' due to invalid characters\n", k)
@@ -180,7 +181,7 @@ func (a *sqsWriter) getSQSAttributes(msg *message.Batch, i int) sqsAttributes {
 		for i, k := range keys {
 			values[k] = &sqs.MessageAttributeValue{
 				DataType:    aws.String("String"),
-				StringValue: aws.String(p.MetaGet(k)),
+				StringValue: aws.String(p.MetaGetStr(k)),
 			}
 			if i == 9 {
 				break
@@ -200,11 +201,11 @@ func (a *sqsWriter) getSQSAttributes(msg *message.Batch, i int) sqsAttributes {
 		attrMap:  values,
 		groupID:  groupID,
 		dedupeID: dedupeID,
-		content:  aws.String(string(p.Get())),
+		content:  aws.String(string(p.AsBytes())),
 	}
 }
 
-func (a *sqsWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (a *sqsWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	if a.sqs == nil {
 		return component.ErrNotConnected
 	}
@@ -310,12 +311,9 @@ func (a *sqsWriter) WriteWithContext(ctx context.Context, msg *message.Batch) er
 	return err
 }
 
-func (a *sqsWriter) CloseAsync() {
+func (a *sqsWriter) Close(context.Context) error {
 	a.closer.Do(func() {
 		close(a.closeChan)
 	})
-}
-
-func (a *sqsWriter) WaitForClose(time.Duration) error {
 	return nil
 }

@@ -7,17 +7,17 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	ioutput "github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
-	"github.com/benthosdev/benthos/v4/internal/component/tracer"
 	"github.com/benthosdev/benthos/v4/internal/config"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/pipeline"
 	"github.com/benthosdev/benthos/v4/internal/transaction"
 )
@@ -41,11 +41,10 @@ func (h *Handler) Close(tout time.Duration) error {
 
 // Handle is a request/response func that injects a payload into the underlying
 // Benthos pipeline and returns a result.
-func (h *Handler) Handle(ctx context.Context, obj interface{}) (interface{}, error) {
-	msg := message.QuickBatch(nil)
+func (h *Handler) Handle(ctx context.Context, obj any) (any, error) {
 	part := message.NewPart(nil)
-	part.SetJSON(obj)
-	msg.Append(part)
+	part.SetStructuredMut(obj)
+	msg := message.Batch{part}
 
 	store := transaction.NewResultStore()
 	transaction.AddResultStore(msg, store)
@@ -69,15 +68,15 @@ func (h *Handler) Handle(ctx context.Context, obj interface{}) (interface{}, err
 
 	resultBatches := store.Get()
 	if len(resultBatches) == 0 {
-		return map[string]interface{}{"message": "request successful"}, nil
+		return map[string]any{"message": "request successful"}, nil
 	}
 
-	lambdaResults := make([][]interface{}, len(resultBatches))
+	lambdaResults := make([][]any, len(resultBatches))
 	for i, batch := range resultBatches {
-		batchResults := make([]interface{}, batch.Len())
+		batchResults := make([]any, batch.Len())
 		if err := batch.Iter(func(j int, p *message.Part) error {
 			var merr error
-			if batchResults[j], merr = p.JSON(); merr != nil {
+			if batchResults[j], merr = p.AsStructured(); merr != nil {
 				return fmt.Errorf("failed to marshal json response: %v", merr)
 			}
 			return nil
@@ -94,7 +93,7 @@ func (h *Handler) Handle(ctx context.Context, obj interface{}) (interface{}, err
 		return lambdaResults[0], nil
 	}
 
-	genBatchOfBatches := make([]interface{}, len(lambdaResults))
+	genBatchOfBatches := make([]any, len(lambdaResults))
 	for i, b := range lambdaResults {
 		genBatchOfBatches[i] = b
 	}
@@ -109,22 +108,29 @@ func NewHandler(conf config.Type) (*Handler, error) {
 		return nil, fmt.Errorf("failed to create logger: %v", err)
 	}
 
+	// We use a temporary manager with just the logger initialised for metrics
+	// instantiation. Doing this means that metrics plugins will use a global
+	// environment for child plugins and bloblang mappings, which we might want
+	// to revise in future.
+	tmpMgr := mock.NewManager()
+	tmpMgr.L = logger
+
 	// Create our metrics type.
 	var stats *metrics.Namespaced
-	if stats, err = bundle.AllMetrics.Init(conf.Metrics, logger); err != nil {
+	if stats, err = bundle.AllMetrics.Init(conf.Metrics, tmpMgr); err != nil {
 		logger.Errorf("Failed to connect metrics aggregator: %v\n", err)
 		stats = metrics.NewNamespaced(metrics.Noop())
 	}
 
 	// Create our tracer type.
-	trac, err := bundle.AllTracers.Init(conf.Tracer)
+	trac, err := bundle.AllTracers.Init(conf.Tracer, tmpMgr)
 	if err != nil {
 		logger.Errorf("Failed to initialise tracer: %v\n", err)
-		trac = tracer.Noop{}
+		trac = trace.NewNoopTracerProvider()
 	}
 
 	// Create resource manager.
-	manager, err := manager.NewV2(conf.ResourceConfig, mock.NewManager(), logger, stats)
+	manager, err := manager.New(conf.ResourceConfig, manager.OptSetLogger(logger), manager.OptSetMetrics(stats), manager.OptSetTracer(trac))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %v", err)
 	}
@@ -135,13 +141,13 @@ func NewHandler(conf config.Type) (*Handler, error) {
 
 	transactionChan := make(chan message.Transaction, 1)
 
-	pMgr := manager.IntoPath("pipeline").(bundle.NewManagement)
+	pMgr := manager.IntoPath("pipeline")
 	if pipelineLayer, err = pipeline.New(conf.Pipeline, pMgr); err != nil {
 		return nil, fmt.Errorf("failed to create resource pipeline: %w", err)
 	}
 
 	oMgr := manager.IntoPath("output")
-	if outputLayer, err = output.New(conf.Output, oMgr, oMgr.Logger(), oMgr.Metrics()); err != nil {
+	if outputLayer, err = oMgr.NewOutput(conf.Output); err != nil {
 		return nil, fmt.Errorf("failed to create resource output: %w", err)
 	}
 
@@ -156,23 +162,31 @@ func NewHandler(conf config.Type) (*Handler, error) {
 	return &Handler{
 		transactionChan: transactionChan,
 		done: func(exitTimeout time.Duration) error {
-			timesOut := time.Now().Add(exitTimeout)
-			pipelineLayer.CloseAsync()
-			outputLayer.CloseAsync()
+			close(transactionChan)
 
-			if err = outputLayer.WaitForClose(exitTimeout); err != nil {
+			ctx, done := context.WithTimeout(context.Background(), exitTimeout)
+			defer done()
+
+			outputLayer.TriggerCloseNow()
+			if err = outputLayer.WaitForClose(ctx); err != nil {
 				return fmt.Errorf("failed to cleanly close output layer: %v", err)
 			}
-			if err = pipelineLayer.WaitForClose(time.Until(timesOut)); err != nil {
+			if err = pipelineLayer.WaitForClose(ctx); err != nil {
 				return fmt.Errorf("failed to cleanly close pipeline layer: %v", err)
 			}
 
-			manager.CloseAsync()
-			if err = manager.WaitForClose(time.Until(timesOut)); err != nil {
+			manager.TriggerStopConsuming()
+			if err = manager.WaitForClose(ctx); err != nil {
 				return fmt.Errorf("failed to cleanly close resources: %v", err)
 			}
 
-			trac.Close()
+			defer func() {
+				if shutter, ok := trac.(interface {
+					Shutdown(context.Context) error
+				}); ok {
+					_ = shutter.Shutdown(context.Background())
+				}
+			}()
 
 			if sCloseErr := stats.Close(); sCloseErr != nil {
 				logger.Errorf("Failed to cleanly close metrics aggregator: %v\n", sCloseErr)

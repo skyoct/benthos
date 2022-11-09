@@ -5,34 +5,32 @@ import (
 	"crypto/tls"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/Azure/go-amqp"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/amqp1/shared"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/metadata"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 	itls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		a, err := newAMQP1Writer(c.AMQP1, nm.Logger())
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
+		a, err := newAMQP1Writer(c.AMQP1, nm)
 		if err != nil {
 			return nil, err
 		}
-		w, err := ooutput.NewAsyncWriter("amqp_1", c.AMQP1.MaxInFlight, a, nm.Logger(), nm.Metrics())
+		w, err := output.NewAsyncWriter("amqp_1", c.AMQP1.MaxInFlight, a, nm)
 		if err != nil {
 			return nil, err
 		}
-		return ooutput.OnlySinglePayloads(w), nil
+		return output.OnlySinglePayloads(w), nil
 	}), docs.ComponentSpec{
 		Name:    "amqp_1",
 		Status:  docs.StatusBeta,
@@ -52,8 +50,7 @@ Message metadata is added to each AMQP message as string annotations. In order t
 			itls.FieldSpec(),
 			shared.SASLFieldSpec(),
 			docs.FieldObject("metadata", "Specify criteria for which metadata values are attached to messages as headers.").
-				WithChildren(metadata.ExcludeFilterFields()...).
-				HasDefault(map[string]interface{}{}),
+				WithChildren(metadata.ExcludeFilterFields()...),
 		),
 		Categories: []string{
 			"Services",
@@ -73,20 +70,20 @@ type amqp1Writer struct {
 
 	log log.Modular
 
-	conf    ooutput.AMQP1Config
+	conf    output.AMQP1Config
 	tlsConf *tls.Config
 
 	connLock sync.RWMutex
 }
 
-func newAMQP1Writer(conf ooutput.AMQP1Config, log log.Modular) (*amqp1Writer, error) {
+func newAMQP1Writer(conf output.AMQP1Config, mgr bundle.NewManagement) (*amqp1Writer, error) {
 	a := amqp1Writer{
-		log:  log,
+		log:  mgr.Logger(),
 		conf: conf,
 	}
 	var err error
 	if conf.TLS.Enabled {
-		if a.tlsConf, err = conf.TLS.Get(); err != nil {
+		if a.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -96,11 +93,7 @@ func newAMQP1Writer(conf ooutput.AMQP1Config, log log.Modular) (*amqp1Writer, er
 	return &a, nil
 }
 
-func (a *amqp1Writer) Connect() error {
-	return a.ConnectWithContext(context.Background())
-}
-
-func (a *amqp1Writer) ConnectWithContext(ctx context.Context) error {
+func (a *amqp1Writer) Connect(ctx context.Context) error {
 	a.connLock.Lock()
 	defer a.connLock.Unlock()
 
@@ -115,7 +108,7 @@ func (a *amqp1Writer) ConnectWithContext(ctx context.Context) error {
 		err     error
 	)
 
-	opts, err := a.conf.SASL.ToOptFns()
+	opts, err := saslToOptFns(a.conf.SASL)
 	if err != nil {
 		return err
 	}
@@ -177,7 +170,7 @@ func (a *amqp1Writer) disconnect(ctx context.Context) error {
 
 //------------------------------------------------------------------------------
 
-func (a *amqp1Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (a *amqp1Writer) WriteBatch(ctx context.Context, msg message.Batch) error {
 	var s *amqp.Sender
 	a.connLock.RLock()
 	if a.sender != nil {
@@ -189,9 +182,9 @@ func (a *amqp1Writer) WriteWithContext(ctx context.Context, msg *message.Batch) 
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
-		m := amqp.NewMessage(p.Get())
-		_ = a.metaFilter.Iter(p, func(k, v string) error {
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+		m := amqp.NewMessage(p.AsBytes())
+		_ = a.metaFilter.Iter(p, func(k string, v any) error {
 			if m.Annotations == nil {
 				m.Annotations = amqp.Annotations{}
 			}
@@ -200,7 +193,7 @@ func (a *amqp1Writer) WriteWithContext(ctx context.Context, msg *message.Batch) 
 		})
 		err := s.Send(ctx, m)
 		if err != nil {
-			if err == amqp.ErrTimeout {
+			if err == amqp.ErrTimeout || ctx.Err() != nil {
 				err = component.ErrTimeout
 			} else {
 				if dErr, isDetachError := err.(*amqp.DetachError); isDetachError && dErr.RemoteError != nil {
@@ -216,10 +209,6 @@ func (a *amqp1Writer) WriteWithContext(ctx context.Context, msg *message.Batch) 
 	})
 }
 
-func (a *amqp1Writer) CloseAsync() {
-	_ = a.disconnect(context.Background())
-}
-
-func (a *amqp1Writer) WaitForClose(timeout time.Duration) error {
-	return nil
+func (a *amqp1Writer) Close(ctx context.Context) error {
+	return a.disconnect(ctx)
 }

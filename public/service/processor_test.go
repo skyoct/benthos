@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
 )
 
@@ -28,20 +28,21 @@ func (p *fnProcessor) Close(ctx context.Context) error {
 }
 
 func TestProcessorAirGapShutdown(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	rp := &fnProcessor{}
-	agrp := newAirGapProcessor("foo", rp, metrics.Noop())
+	agrp := newAirGapProcessor("foo", rp, mock.NewManager())
 
-	err := agrp.WaitForClose(time.Millisecond * 5)
-	assert.EqualError(t, err, "action timed out")
-	assert.False(t, rp.closed)
-
-	agrp.CloseAsync()
-	err = agrp.WaitForClose(time.Millisecond * 5)
+	err := agrp.Close(tCtx)
 	assert.NoError(t, err)
 	assert.True(t, rp.closed)
 }
 
 func TestProcessorAirGapOneToOne(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	agrp := newAirGapProcessor("foo", &fnProcessor{
 		fn: func(c context.Context, m *Message) (MessageBatch, error) {
 			if b, err := m.AsBytes(); err != nil || string(b) != "unchanged" {
@@ -50,36 +51,42 @@ func TestProcessorAirGapOneToOne(t *testing.T) {
 			m.SetBytes([]byte("changed"))
 			return MessageBatch{m}, nil
 		},
-	}, metrics.Noop())
+	}, mock.NewManager())
 
 	msg := message.QuickBatch([][]byte{[]byte("unchanged")})
-	msgs, res := agrp.ProcessMessage(msg)
+	msgs, res := agrp.ProcessBatch(tCtx, msg.ShallowCopy())
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, 1, msgs[0].Len())
-	assert.Equal(t, "changed", string(msgs[0].Get(0).Get()))
-	assert.Equal(t, "unchanged", string(msg.Get(0).Get()))
+	assert.Equal(t, "changed", string(msgs[0].Get(0).AsBytes()))
+	assert.Equal(t, "unchanged", string(msg.Get(0).AsBytes()))
 }
 
 func TestProcessorAirGapOneToError(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	agrp := newAirGapProcessor("foo", &fnProcessor{
 		fn: func(c context.Context, m *Message) (MessageBatch, error) {
 			_, err := m.AsStructured()
 			return nil, err
 		},
-	}, metrics.Noop())
+	}, mock.NewManager())
 
 	msg := message.QuickBatch([][]byte{[]byte("not a structured doc")})
-	msgs, res := agrp.ProcessMessage(msg)
+	msgs, res := agrp.ProcessBatch(tCtx, msg)
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, 1, msgs[0].Len())
-	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).Get()))
-	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).Get()))
+	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).AsBytes()))
+	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).AsBytes()))
 	assert.EqualError(t, msgs[0].Get(0).ErrorGet(), "invalid character 'o' in literal null (expecting 'u')")
 }
 
 func TestProcessorAirGapOneToMany(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	agrp := newAirGapProcessor("foo", &fnProcessor{
 		fn: func(c context.Context, m *Message) (MessageBatch, error) {
 			if b, err := m.AsBytes(); err != nil || string(b) != "unchanged" {
@@ -92,17 +99,17 @@ func TestProcessorAirGapOneToMany(t *testing.T) {
 			third.SetBytes([]byte("changed 3"))
 			return MessageBatch{m, second, third}, nil
 		},
-	}, metrics.Noop())
+	}, mock.NewManager())
 
 	msg := message.QuickBatch([][]byte{[]byte("unchanged")})
-	msgs, res := agrp.ProcessMessage(msg)
+	msgs, res := agrp.ProcessBatch(tCtx, msg.ShallowCopy())
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, 3, msgs[0].Len())
-	assert.Equal(t, "changed 1", string(msgs[0].Get(0).Get()))
-	assert.Equal(t, "changed 2", string(msgs[0].Get(1).Get()))
-	assert.Equal(t, "changed 3", string(msgs[0].Get(2).Get()))
-	assert.Equal(t, "unchanged", string(msg.Get(0).Get()))
+	assert.Equal(t, "changed 1", string(msgs[0].Get(0).AsBytes()))
+	assert.Equal(t, "changed 2", string(msgs[0].Get(1).AsBytes()))
+	assert.Equal(t, "changed 3", string(msgs[0].Get(2).AsBytes()))
+	assert.Equal(t, "unchanged", string(msg.Get(0).AsBytes()))
 }
 
 //------------------------------------------------------------------------------
@@ -122,20 +129,21 @@ func (p *fnBatchProcessor) Close(ctx context.Context) error {
 }
 
 func TestBatchProcessorAirGapShutdown(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	rp := &fnBatchProcessor{}
-	agrp := newAirGapBatchProcessor("foo", rp, metrics.Noop())
+	agrp := newAirGapBatchProcessor("foo", rp, mock.NewManager())
 
-	err := agrp.WaitForClose(time.Millisecond * 5)
-	assert.EqualError(t, err, "action timed out")
-	assert.False(t, rp.closed)
-
-	agrp.CloseAsync()
-	err = agrp.WaitForClose(time.Millisecond * 5)
+	err := agrp.Close(tCtx)
 	assert.NoError(t, err)
 	assert.True(t, rp.closed)
 }
 
 func TestBatchProcessorAirGapOneToOne(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	agrp := newAirGapBatchProcessor("foo", &fnBatchProcessor{
 		fn: func(c context.Context, msgs MessageBatch) ([]MessageBatch, error) {
 			if b, err := msgs[0].AsBytes(); err != nil || string(b) != "unchanged" {
@@ -144,36 +152,42 @@ func TestBatchProcessorAirGapOneToOne(t *testing.T) {
 			msgs[0].SetBytes([]byte("changed"))
 			return []MessageBatch{{msgs[0]}}, nil
 		},
-	}, metrics.Noop())
+	}, mock.NewManager())
 
 	msg := message.QuickBatch([][]byte{[]byte("unchanged")})
-	msgs, res := agrp.ProcessMessage(msg)
+	msgs, res := agrp.ProcessBatch(tCtx, msg.ShallowCopy())
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, 1, msgs[0].Len())
-	assert.Equal(t, "changed", string(msgs[0].Get(0).Get()))
-	assert.Equal(t, "unchanged", string(msg.Get(0).Get()))
+	assert.Equal(t, "changed", string(msgs[0].Get(0).AsBytes()))
+	assert.Equal(t, "unchanged", string(msg.Get(0).AsBytes()))
 }
 
 func TestBatchProcessorAirGapOneToError(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	agrp := newAirGapBatchProcessor("foo", &fnBatchProcessor{
 		fn: func(c context.Context, msgs MessageBatch) ([]MessageBatch, error) {
 			_, err := msgs[0].AsStructured()
 			return nil, err
 		},
-	}, metrics.Noop())
+	}, mock.NewManager())
 
 	msg := message.QuickBatch([][]byte{[]byte("not a structured doc")})
-	msgs, res := agrp.ProcessMessage(msg)
+	msgs, res := agrp.ProcessBatch(tCtx, msg)
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, 1, msgs[0].Len())
-	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).Get()))
-	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).Get()))
+	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).AsBytes()))
+	assert.Equal(t, "not a structured doc", string(msgs[0].Get(0).AsBytes()))
 	assert.EqualError(t, msgs[0].Get(0).ErrorGet(), "invalid character 'o' in literal null (expecting 'u')")
 }
 
 func TestBatchProcessorAirGapOneToMany(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+
 	agrp := newAirGapBatchProcessor("foo", &fnBatchProcessor{
 		fn: func(c context.Context, msgs MessageBatch) ([]MessageBatch, error) {
 			if b, err := msgs[0].AsBytes(); err != nil || string(b) != "unchanged" {
@@ -186,18 +200,18 @@ func TestBatchProcessorAirGapOneToMany(t *testing.T) {
 			third.SetBytes([]byte("changed 3"))
 			return []MessageBatch{{msgs[0], second}, {third}}, nil
 		},
-	}, metrics.Noop())
+	}, mock.NewManager())
 
 	msg := message.QuickBatch([][]byte{[]byte("unchanged")})
-	msgs, res := agrp.ProcessMessage(msg)
+	msgs, res := agrp.ProcessBatch(tCtx, msg.ShallowCopy())
 	require.Nil(t, res)
 	require.Len(t, msgs, 2)
-	assert.Equal(t, "unchanged", string(msg.Get(0).Get()))
+	assert.Equal(t, "unchanged", string(msg.Get(0).AsBytes()))
 
 	assert.Equal(t, 2, msgs[0].Len())
-	assert.Equal(t, "changed 1", string(msgs[0].Get(0).Get()))
-	assert.Equal(t, "changed 2", string(msgs[0].Get(1).Get()))
+	assert.Equal(t, "changed 1", string(msgs[0].Get(0).AsBytes()))
+	assert.Equal(t, "changed 2", string(msgs[0].Get(1).AsBytes()))
 
 	assert.Equal(t, 1, msgs[1].Len())
-	assert.Equal(t, "changed 3", string(msgs[1].Get(0).Get()))
+	assert.Equal(t, "changed 3", string(msgs[1].Get(0).AsBytes()))
 }

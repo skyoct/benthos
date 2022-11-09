@@ -10,16 +10,12 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/api"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
-	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(func(conf oinput.Config, mgr bundle.NewManagement, pipelines ...iprocessor.PipelineConstructorFunc) (input.Streamed, error) {
-		pipelines = oinput.AppendProcessorsFromConfig(conf, mgr, pipelines...)
-		return newDynamicInput(conf, mgr, pipelines...)
-	}, docs.ComponentSpec{
+	err := bundle.AllInputs.Add(processors.WrapConstructor(newDynamicInput), docs.ComponentSpec{
 		Name: "dynamic",
 		Summary: `
 A special broker type where the inputs are identified by unique labels and can
@@ -36,7 +32,7 @@ already exists it will be changed.`,
 			"Utility",
 		},
 		Config: docs.FieldComponent().WithChildren(
-			docs.FieldInput("inputs", "A map of inputs to statically create.").Map().HasDefault(map[string]interface{}{}),
+			docs.FieldInput("inputs", "A map of inputs to statically create.").Map().HasDefault(map[string]any{}),
 			docs.FieldString("prefix", "A path prefix for HTTP endpoints that are registered.").HasDefault(""),
 		),
 	})
@@ -45,13 +41,13 @@ already exists it will be changed.`,
 	}
 }
 
-func newDynamicInput(conf oinput.Config, mgr bundle.NewManagement, pipelines ...iprocessor.PipelineConstructorFunc) (input.Streamed, error) {
+func newDynamicInput(conf input.Config, mgr bundle.NewManagement) (input.Streamed, error) {
 	dynAPI := api.NewDynamic()
 
 	inputs := map[string]input.Streamed{}
 	for k, v := range conf.Dynamic.Inputs {
-		iMgr := mgr.IntoPath("dynamic", "inputs", k).(bundle.NewManagement)
-		newInput, err := iMgr.NewInput(v, pipelines...)
+		iMgr := mgr.IntoPath("dynamic", "inputs", k)
+		newInput, err := iMgr.NewInput(v)
 		if err != nil {
 			return nil, err
 		}
@@ -94,12 +90,12 @@ func newDynamicInput(conf oinput.Config, mgr bundle.NewManagement, pipelines ...
 	}
 
 	dynAPI.OnUpdate(func(ctx context.Context, id string, c []byte) error {
-		newConf := oinput.NewConfig()
+		newConf := input.NewConfig()
 		if err := yaml.Unmarshal(c, &newConf); err != nil {
 			return err
 		}
-		iMgr := mgr.IntoPath("dynamic", "inputs", id).(bundle.NewManagement)
-		newInput, err := iMgr.NewInput(newConf, pipelines...)
+		iMgr := mgr.IntoPath("dynamic", "inputs", id)
+		newInput, err := iMgr.NewInput(newConf)
 		if err != nil {
 			return err
 		}

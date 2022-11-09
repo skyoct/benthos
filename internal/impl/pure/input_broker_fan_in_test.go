@@ -19,7 +19,7 @@ import (
 var _ input.Streamed = &fanInInputBroker{}
 
 func TestBasicFanIn(t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
 	defer done()
 
 	nInputs, nMsgs := 10, 1000
@@ -55,13 +55,13 @@ func TestBasicFanIn(t *testing.T) {
 				var ts message.Transaction
 				select {
 				case ts = <-fanIn.TransactionChan():
-					if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-						t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+					if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+						t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 					}
 				case <-time.After(time.Second * 5):
 					t.Errorf("Timed out waiting for broker propagate: %v, %v", i, j)
 				}
-				require.NoError(t, ts.Ack(tCtx, nil))
+				require.NoError(t, ts.Ack(ctx, nil))
 			}()
 			select {
 			case <-resChan:
@@ -72,9 +72,9 @@ func TestBasicFanIn(t *testing.T) {
 		}
 	}
 
-	fanIn.CloseAsync()
+	fanIn.TriggerStopConsuming()
 
-	if err := fanIn.WaitForClose(time.Second * 10); err != nil {
+	if err := fanIn.WaitForClose(ctx); err != nil {
 		t.Error(err)
 	}
 }
@@ -119,7 +119,7 @@ func TestFanInShutdown(t *testing.T) {
 }
 
 func TestFanInAsync(t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
 	defer done()
 
 	nInputs, nMsgs := 10, 1000
@@ -176,14 +176,14 @@ func TestFanInAsync(t *testing.T) {
 			t.Errorf("Timed out waiting for broker propagate: %v", i)
 			return
 		}
-		require.NoError(t, ts.Ack(tCtx, errors.New(string(ts.Payload.Get(0).Get()))))
+		require.NoError(t, ts.Ack(ctx, errors.New(string(ts.Payload.Get(0).AsBytes()))))
 	}
 
 	wg.Wait()
 }
 
 func BenchmarkBasicFanIn(b *testing.B) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
 	defer done()
 
 	nInputs := 10
@@ -206,8 +206,8 @@ func BenchmarkBasicFanIn(b *testing.B) {
 	}
 
 	defer func() {
-		fanIn.CloseAsync()
-		fanIn.WaitForClose(time.Second)
+		fanIn.TriggerStopConsuming()
+		fanIn.WaitForClose(ctx)
 	}()
 
 	b.ResetTimer()
@@ -224,14 +224,14 @@ func BenchmarkBasicFanIn(b *testing.B) {
 			var ts message.Transaction
 			select {
 			case ts = <-fanIn.TransactionChan():
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					b.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					b.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 			case <-time.After(time.Second * 5):
 				b.Errorf("Timed out waiting for broker propagate: %v, %v", i, j)
 				return
 			}
-			require.NoError(b, ts.Ack(tCtx, nil))
+			require.NoError(b, ts.Ack(ctx, nil))
 			select {
 			case <-resChan:
 			case <-time.After(time.Second * 5):

@@ -1,26 +1,25 @@
 package jaeger
 
 import (
-	"context"
 	"fmt"
-	"net/url"
+	"net"
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/jaeger"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.7.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
+	"github.com/benthosdev/benthos/v4/internal/cli"
 	"github.com/benthosdev/benthos/v4/internal/component/tracer"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 )
 
-//------------------------------------------------------------------------------
+var exporterInitFn = func(epOpt jaeger.EndpointOption) (tracesdk.SpanExporter, error) { return jaeger.New(epOpt) }
 
 func init() {
 	_ = bundle.AllTracers.Add(NewJaeger, docs.ComponentSpec{
@@ -39,7 +38,7 @@ func init() {
 				// "remote", "The sampler consults Jaeger agent for the appropriate sampling strategy to use in the current service.",
 			).HasDefault("const"),
 			docs.FieldFloat("sampler_param", "A parameter to use for sampling. This field is unused for some sampling types.").Advanced().HasDefault(1.0),
-			docs.FieldString("tags", "A map of tags to add to tracing spans.").Map().Advanced().HasDefault(map[string]interface{}{}),
+			docs.FieldString("tags", "A map of tags to add to tracing spans.").Map().Advanced().HasDefault(map[string]any{}),
 			docs.FieldString("flush_interval", "The period of time between each flush of tracing spans.").HasDefault(""),
 		),
 	})
@@ -47,15 +46,8 @@ func init() {
 
 //------------------------------------------------------------------------------
 
-// Jaeger is a tracer with the capability to push spans to a Jaeger instance.
-type Jaeger struct {
-	prov *tracesdk.TracerProvider
-}
-
 // NewJaeger creates and returns a new Jaeger object.
-func NewJaeger(config tracer.Config) (tracer.Type, error) {
-	j := &Jaeger{}
-
+func NewJaeger(config tracer.Config, _ bundle.NewManagement) (trace.TracerProvider, error) {
 	var sampler tracesdk.Sampler
 	if sType := config.Jaeger.SamplerType; len(sType) > 0 {
 		// TODO: https://github.com/open-telemetry/opentelemetry-go-contrib/pull/936
@@ -78,29 +70,30 @@ func NewJaeger(config tracer.Config) (tracer.Type, error) {
 	if config.Jaeger.CollectorURL != "" {
 		epOpt = jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(config.Jaeger.CollectorURL))
 	} else {
-		agentURL, err := url.Parse(config.Jaeger.AgentAddress)
+		agentOpts, err := getAgentOpts(config.Jaeger.AgentAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse jaeger agent address: %w", err)
+			return nil, err
 		}
-		agentOpts := []jaeger.AgentEndpointOption{
-			jaeger.WithAgentHost(agentURL.Host),
-		}
-		if p := agentURL.Port(); p != "" {
-			agentOpts = append(agentOpts, jaeger.WithAgentPort(agentURL.Port()))
-		}
+
 		epOpt = jaeger.WithAgentEndpoint(agentOpts...)
 	}
 
-	exp, err := jaeger.New(epOpt)
+	exp, err := exporterInitFn(epOpt)
 	if err != nil {
 		return nil, err
 	}
 
 	var attrs []attribute.KeyValue
-	if tags := config.Jaeger.Tags; len(tags) > 0 {
-		for k, v := range config.Jaeger.Tags {
-			attrs = append(attrs, attribute.String(k, v))
-		}
+	for k, v := range config.Jaeger.Tags {
+		attrs = append(attrs, attribute.String(k, v))
+	}
+
+	if _, ok := config.Jaeger.Tags[string(semconv.ServiceNameKey)]; !ok {
+		attrs = append(attrs, semconv.ServiceNameKey.String("benthos"))
+	}
+
+	if _, ok := config.Jaeger.Tags[string(semconv.ServiceVersionKey)]; !ok {
+		attrs = append(attrs, semconv.ServiceVersionKey.String(cli.Version))
 	}
 
 	var batchOpts []tracesdk.BatchSpanProcessorOption
@@ -112,28 +105,24 @@ func NewJaeger(config tracer.Config) (tracer.Type, error) {
 		batchOpts = append(batchOpts, tracesdk.WithBatchTimeout(flushInterval))
 	}
 
-	tp := tracesdk.NewTracerProvider(
+	return tracesdk.NewTracerProvider(
 		tracesdk.WithBatcher(exp, batchOpts...),
 		tracesdk.WithResource(resource.NewWithAttributes(semconv.SchemaURL, attrs...)),
 		tracesdk.WithSampler(sampler),
-	)
-
-	otel.SetTracerProvider(tp)
-
-	// TODO: I'm so confused, these APIs are a nightmare.
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-
-	j.prov = tp
-	return j, nil
+	), nil
 }
 
-//------------------------------------------------------------------------------
-
-// Close stops the tracer.
-func (j *Jaeger) Close() error {
-	if j.prov != nil {
-		_ = j.prov.Shutdown(context.Background())
-		j.prov = nil
+func getAgentOpts(agentAddress string) ([]jaeger.AgentEndpointOption, error) {
+	var agentOpts []jaeger.AgentEndpointOption
+	if strings.Contains(agentAddress, ":") {
+		agentHost, agentPort, err := net.SplitHostPort(agentAddress)
+		if err != nil {
+			return agentOpts, err
+		}
+		agentOpts = append(agentOpts, jaeger.WithAgentHost(agentHost), jaeger.WithAgentPort(agentPort))
+	} else {
+		agentOpts = append(agentOpts, jaeger.WithAgentHost(agentAddress))
 	}
-	return nil
+
+	return agentOpts, nil
 }

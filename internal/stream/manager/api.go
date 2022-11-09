@@ -9,19 +9,18 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gorilla/mux"
 	"gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/component/buffer"
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/component/ratelimit"
 	"github.com/benthosdev/benthos/v4/internal/config"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/pipeline"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 )
@@ -86,7 +85,7 @@ func (c ConfigSet) UnmarshalYAML(value *yaml.Node) error {
 
 func lintStreamConfigNode(node *yaml.Node) (lints []string) {
 	for _, dLint := range stream.Spec().LintYAML(docs.NewLintContext(), node) {
-		lints = append(lints, fmt.Sprintf("line %v: %v", dLint.Line, dLint.What))
+		lints = append(lints, dLint.Error())
 	}
 	return
 }
@@ -205,12 +204,9 @@ func (m *Type) HandleStreamsCRUD(w http.ResponseWriter, r *http.Request) {
 	errUpdate := make([]error, len(toUpdate))
 	errCreate := make([]error, len(toCreate))
 
-	// TODO: Replace with context
-	tmpTimeout := time.Second * 5
-
 	for i, id := range toDelete {
 		go func(sid string, j int) {
-			errDelete[j] = m.Delete(sid, tmpTimeout)
+			errDelete[j] = m.Delete(r.Context(), sid)
 			wg.Done()
 		}(id, i)
 	}
@@ -218,7 +214,7 @@ func (m *Type) HandleStreamsCRUD(w http.ResponseWriter, r *http.Request) {
 	for id, conf := range toUpdate {
 		newConf := conf
 		go func(sid string, sconf *stream.Config, j int) {
-			errUpdate[j] = m.Update(sid, *sconf, tmpTimeout)
+			errUpdate[j] = m.Update(r.Context(), sid, *sconf)
 			wg.Done()
 		}(id, &newConf, i)
 		i++
@@ -339,9 +335,6 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Replace with context
-	tmpTimeout := time.Second * 5
-
 	var conf stream.Config
 	var lints []string
 	switch r.Method {
@@ -367,10 +360,10 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 
 			var bodyBytes []byte
 			if bodyBytes, serverErr = json.Marshal(struct {
-				Active    bool        `json:"active"`
-				Uptime    float64     `json:"uptime"`
-				UptimeStr string      `json:"uptime_str"`
-				Config    interface{} `json:"config"`
+				Active    bool    `json:"active"`
+				Uptime    float64 `json:"uptime"`
+				UptimeStr string  `json:"uptime_str"`
+				Config    any     `json:"config"`
 			}{
 				Active:    info.IsRunning(),
 				Uptime:    info.Uptime().Seconds(),
@@ -397,16 +390,16 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(errBytes)
 			return
 		}
-		serverErr = m.Update(id, conf, tmpTimeout)
+		serverErr = m.Update(r.Context(), id, conf)
 	case "DELETE":
-		serverErr = m.Delete(id, tmpTimeout)
+		serverErr = m.Delete(r.Context(), id)
 	case "PATCH":
 		var info *StreamStatus
 		if info, serverErr = m.Read(id); serverErr == nil {
 			if conf, requestErr = patchConfig(info.Config()); requestErr != nil {
 				return
 			}
-			serverErr = m.Update(id, conf, tmpTimeout)
+			serverErr = m.Update(r.Context(), id, conf)
 		}
 	default:
 		requestErr = fmt.Errorf("verb not supported: %v", r.Method)
@@ -523,7 +516,7 @@ func (m *Type) HandleResourceCRUD(w http.ResponseWriter, r *http.Request) {
 
 		if r.URL.Query().Get("chilled") != "true" {
 			for _, l := range docs.LintYAML(docs.NewLintContext(), docType, &node) {
-				lints = append(lints, fmt.Sprintf("line %v: %v", l.Line, l.What))
+				lints = append(lints, l.Error())
 				m.manager.Logger().Infof("Resource '%v' config: %v\n", id, l)
 			}
 		}
@@ -571,7 +564,7 @@ func (m *Type) HandleStreamStats(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		var info *StreamStatus
 		if info, serverErr = m.Read(id); serverErr == nil {
-			values := map[string]interface{}{}
+			values := map[string]any{}
 			for k, v := range info.metrics.GetCounters() {
 				values[k] = v
 			}
@@ -615,7 +608,7 @@ func (m *Type) HandleStreamReady(w http.ResponseWriter, r *http.Request) {
 
 	m.lock.Lock()
 	for k, v := range m.streams {
-		if !v.IsReady() {
+		if !v.IsReady() && v.IsRunning() {
 			notReady = append(notReady, k)
 		}
 	}

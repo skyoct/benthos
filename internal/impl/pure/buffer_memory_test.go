@@ -9,13 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Jeffail/gabs/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/public/service"
-
-	_ "github.com/benthosdev/benthos/v4/internal/interop/legacy"
 )
 
 func msgEqual(t testing.TB, expected string, m *service.Message) {
@@ -66,6 +65,49 @@ limit: 100000
 		msgEqual(t, fmt.Sprintf("test%v", i), m[3])
 		require.NoError(t, ackFunc(ctx, nil))
 	}
+}
+
+func TestMemoryOwnership(t *testing.T) {
+	ctx := context.Background()
+	block := memBufFromConf(t, `
+limit: 100000
+`)
+	defer block.Close(ctx)
+
+	inMsg := service.NewMessage(nil)
+	inMsg.SetStructuredMut(map[string]any{
+		"hello": "world",
+	})
+
+	require.NoError(t, block.WriteBatch(ctx, service.MessageBatch{inMsg}, func(ctx context.Context, _ error) error {
+		inStruct, err := inMsg.AsStructuredMut()
+		require.NoError(t, err)
+		_, err = gabs.Wrap(inStruct).Set("quack", "moo")
+		require.NoError(t, err)
+		return nil
+	}))
+
+	outBatch, ackFunc, err := block.ReadBatch(ctx)
+	require.NoError(t, err)
+	require.Len(t, outBatch, 1)
+
+	outStruct, err := outBatch[0].AsStructuredMut()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"hello": "world",
+	}, outStruct)
+
+	require.NoError(t, ackFunc(ctx, nil))
+
+	_, err = gabs.Wrap(outStruct).Set("woof", "meow")
+	require.NoError(t, err)
+
+	inStruct, err := inMsg.AsStructured()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"hello": "world",
+		"moo":   "quack",
+	}, inStruct)
 }
 
 func TestMemoryNearLimit(t *testing.T) {

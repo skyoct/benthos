@@ -9,12 +9,13 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/mitchellh/mapstructure"
 
+	"github.com/benthosdev/benthos/v4/internal/impl/aws/config"
 	"github.com/benthosdev/benthos/v4/public/bloblang"
 	"github.com/benthosdev/benthos/v4/public/service"
 )
 
 func init() {
-	config := service.NewConfigSpec().
+	conf := service.NewConfigSpec().
 		Summary("Executes a PartiQL expression against a DynamoDB table for each message.").
 		Description("Both writes or reads are supported, when the query is a read the contents of the message will be replaced with the result. This processor is more efficient when messages are pre-batched as the whole batch will be executed in a single call.").
 		Categories("Integration").
@@ -40,14 +41,14 @@ pipeline:
 `,
 		)
 
-	for _, f := range sessionFields() {
-		config = config.Field(f)
+	for _, f := range config.SessionFields() {
+		conf = conf.Field(f)
 	}
 
 	err := service.RegisterBatchProcessor(
-		"aws_dynamodb_partiql", config,
+		"aws_dynamodb_partiql", conf,
 		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchProcessor, error) {
-			sess, err := getSession(conf)
+			sess, err := GetSession(conf)
 			if err != nil {
 				return nil, err
 			}
@@ -103,9 +104,9 @@ func newDynamoDBPartiQL(
 	}
 }
 
-func cleanNulls(v interface{}) {
+func cleanNulls(v any) {
 	switch t := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, v := range t {
 			if v == nil {
 				delete(t, k)
@@ -113,7 +114,7 @@ func cleanNulls(v interface{}) {
 				cleanNulls(v)
 			}
 		}
-	case []interface{}:
+	case []any:
 		for _, v := range t {
 			cleanNulls(v)
 		}
@@ -121,8 +122,6 @@ func cleanNulls(v interface{}) {
 }
 
 func (d *dynamoDBPartiQL) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
-	outBatch := batch.Copy()
-
 	stmts := []*dynamodb.BatchStatementRequest{}
 	for i := range batch {
 		req := &dynamodb.BatchStatementRequest{}
@@ -162,26 +161,26 @@ func (d *dynamoDBPartiQL) ProcessBatch(ctx context.Context, batch service.Messag
 			if res.Error.Code != nil {
 				code = fmt.Sprintf(" (%v)", *res.Error.Code)
 			}
-			outBatch[i].SetError(fmt.Errorf("failed to process statement%v: %v", code, *res.Error.Message))
+			batch[i].SetError(fmt.Errorf("failed to process statement%v: %v", code, *res.Error.Message))
 			continue
 		}
 		if res.Item != nil {
 			itemBytes, err := json.Marshal(res.Item)
 			if err != nil {
-				outBatch[i].SetError(fmt.Errorf("failed to encode PartiQL result: %v", err))
+				batch[i].SetError(fmt.Errorf("failed to encode PartiQL result: %v", err))
 				continue
 			}
-			var resMap interface{}
+			var resMap any
 			if err := json.Unmarshal(itemBytes, &resMap); err != nil {
-				outBatch[i].SetError(fmt.Errorf("failed to decode PartiQL result: %v", err))
+				batch[i].SetError(fmt.Errorf("failed to decode PartiQL result: %v", err))
 				continue
 			}
 			cleanNulls(resMap)
-			outBatch[i].SetStructured(resMap)
+			batch[i].SetStructuredMut(resMap)
 		}
 	}
 
-	return []service.MessageBatch{outBatch}, nil
+	return []service.MessageBatch{batch}, nil
 }
 
 func (d *dynamoDBPartiQL) Close(ctx context.Context) error {

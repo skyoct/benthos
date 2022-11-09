@@ -17,6 +17,7 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/config"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/filepath"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/template"
 )
 
@@ -181,9 +182,14 @@ Either run Benthos as a stream processor or choose a command:
 		Flags: flags,
 		Before: func(c *cli.Context) error {
 			if dotEnvFile := c.String("env-file"); dotEnvFile != "" {
-				vars, err := parser.ParseDotEnvFile(dotEnvFile)
+				dotEnvBytes, err := ifs.ReadFile(ifs.OS(), dotEnvFile)
 				if err != nil {
 					fmt.Printf("Failed to read dotenv file: %v\n", err)
+					os.Exit(1)
+				}
+				vars, err := parser.ParseDotEnvFile(dotEnvBytes)
+				if err != nil {
+					fmt.Printf("Failed to parse dotenv file: %v\n", err)
 					os.Exit(1)
 				}
 				for k, v := range vars {
@@ -194,7 +200,7 @@ Either run Benthos as a stream processor or choose a command:
 				}
 			}
 
-			templatesPaths, err := filepath.Globs(c.StringSlice("templates"))
+			templatesPaths, err := filepath.Globs(ifs.OS(), c.StringSlice("templates"))
 			if err != nil {
 				fmt.Printf("Failed to resolve template glob pattern: %v\n", err)
 				os.Exit(1)
@@ -222,7 +228,8 @@ Either run Benthos as a stream processor or choose a command:
 				_ = cli.ShowAppHelp(c)
 				os.Exit(1)
 			}
-			os.Exit(cmdService(
+
+			if code := cmdService(
 				c.String("config"),
 				c.StringSlice("resources"),
 				c.StringSlice("set"),
@@ -231,8 +238,11 @@ Either run Benthos as a stream processor or choose a command:
 				c.Bool("watcher"),
 				false,
 				false,
+				false,
 				nil,
-			))
+			); code != 0 {
+				os.Exit(code)
+			}
 			return nil
 		},
 		Commands: []*cli.Command{
@@ -246,7 +256,7 @@ variables have been resolved:
 
   benthos -c ./config.yaml echo | less`[1:],
 				Action: func(c *cli.Context) error {
-					confReader := readConfig(c.String("config"), false, c.StringSlice("resources"), nil, c.StringSlice("set"))
+					_, _, confReader := readConfig(c.String("config"), false, c.StringSlice("resources"), nil, c.StringSlice("set"))
 					conf := config.New()
 					if _, err := confReader.Read(&conf); err != nil {
 						fmt.Fprintf(os.Stderr, "Configuration file read error: %v\n", err)
@@ -298,6 +308,11 @@ https://benthos.dev/docs/guides/streams_mode/about`[1:],
 						Value: false,
 						Usage: "Disable the HTTP API for streams mode",
 					},
+					&cli.BoolFlag{
+						Name:  "prefix-stream-endpoints",
+						Value: true,
+						Usage: "Whether HTTP endpoints registered by stream configs should be prefixed with the stream ID",
+					},
 				},
 				Action: func(c *cli.Context) error {
 					os.Exit(cmdService(
@@ -308,6 +323,7 @@ https://benthos.dev/docs/guides/streams_mode/about`[1:],
 						!c.Bool("chilled"),
 						c.Bool("watcher"),
 						!c.Bool("no-api"),
+						c.Bool("prefix-stream-endpoints"),
 						true,
 						c.Args().Slice(),
 					))

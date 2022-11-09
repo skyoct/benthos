@@ -3,6 +3,7 @@ package awk
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +18,8 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 var varInvalidRegexp *regexp.Regexp
@@ -28,12 +27,12 @@ var varInvalidRegexp *regexp.Regexp
 func init() {
 	varInvalidRegexp = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newAWKProc(conf.AWK, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("awk", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("awk", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "awk",
 		Categories: []string{
@@ -295,12 +294,25 @@ Signature: ` + "`print_log(message, level)`" + `
 Prints a Benthos log message at a particular log level. The log level is
 optional, and if omitted the level ` + "`INFO`" + ` will be used.
 
+` + "### `base64_encode`" + `
+
+Signature: ` + "`base64_encode(data)`" + `
+
+Encodes the input data to a base64 string.
+
+` + "### `base64_encode`" + `
+
+Signature: ` + "`base64_decode(data)`" + `
+
+Attempts to base64-decode the input data and returns the decoded string if
+successful. It will emit an error otherwise.
+
 [goawk]: https://github.com/benhoyt/goawk
 [goawk.differences]: https://github.com/benhoyt/goawk#differences-from-awk`,
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldString("codec", "A [codec](#codecs) defines how messages should be inserted into the AWK program as variables. The codec does not change which [custom Benthos functions](#awk-functions) are available. The `text` codec is the closest to a typical AWK use case.").HasOptions("none", "text", "json"),
 			docs.FieldString("program", "An AWK program to execute"),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewAWKConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewAWKConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title: "JSON Mapping and Arithmetic",
@@ -400,10 +412,10 @@ type awkProc struct {
 	codec     string
 	program   *parser.Program
 	log       log.Modular
-	functions map[string]interface{}
+	functions map[string]any
 }
 
-func newAWKProc(conf oprocessor.AWKConfig, mgr interop.Manager) (processor.V2, error) {
+func newAWKProc(conf processor.AWKConfig, mgr bundle.NewManagement) (processor.V2, error) {
 	program, err := parser.ParseProgram([]byte(conf.Program), &parser.ParserConfig{
 		Funcs: awkFunctionsMap,
 	})
@@ -417,7 +429,7 @@ func newAWKProc(conf oprocessor.AWKConfig, mgr interop.Manager) (processor.V2, e
 	default:
 		return nil, fmt.Errorf("unrecognised codec: %v", conf.Codec)
 	}
-	functionOverrides := make(map[string]interface{}, len(awkFunctionsMap))
+	functionOverrides := make(map[string]any, len(awkFunctionsMap))
 	for k, v := range awkFunctionsMap {
 		functionOverrides[k] = v
 	}
@@ -483,15 +495,15 @@ func getTime(dateStr, format string) (time.Time, error) {
 	return time.Parse(format, dateStr)
 }
 
-var awkFunctionsMap = map[string]interface{}{
-	"timestamp_unix": func(dateStr string, format string) (int64, error) {
+var awkFunctionsMap = map[string]any{
+	"timestamp_unix": func(dateStr, format string) (int64, error) {
 		ts, err := getTime(dateStr, format)
 		if err != nil {
 			return 0, err
 		}
 		return ts.Unix(), nil
 	},
-	"timestamp_unix_nano": func(dateStr string, format string) (int64, error) {
+	"timestamp_unix_nano": func(dateStr, format string) (int64, error) {
 		ts, err := getTime(dateStr, format)
 		if err != nil {
 			return 0, err
@@ -592,15 +604,22 @@ var awkFunctionsMap = map[string]interface{}{
 	"print_log": func(value, level string) {
 		// Do nothing, this is a placeholder for compilation.
 	},
+	"base64_encode": func(data string) string {
+		return base64.StdEncoding.EncodeToString([]byte(data))
+	},
+	"base64_decode": func(data string) (string, error) {
+		output, err := base64.StdEncoding.DecodeString(data)
+		return string(output), err
+	},
 }
 
 //------------------------------------------------------------------------------
 
-func flattenForAWK(path string, data interface{}) map[string]string {
+func flattenForAWK(path string, data any) map[string]string {
 	m := map[string]string{}
 
 	switch t := data.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, v := range t {
 			newPath := k
 			if len(path) > 0 {
@@ -610,7 +629,7 @@ func flattenForAWK(path string, data interface{}) map[string]string {
 				m[k2] = v2
 			}
 		}
-	case []interface{}:
+	case []any:
 		for _, ele := range t {
 			for k, v := range flattenForAWK(path, ele) {
 				m[k] = v
@@ -628,10 +647,9 @@ func flattenForAWK(path string, data interface{}) map[string]string {
 // ProcessMessage applies the processor to a message, either creating >0
 // resulting messages or a response to be sent back to the message source.
 func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	part := msg.Copy()
-	var mutableJSONPart interface{}
+	var mutableJSONPart any
 
-	customFuncs := make(map[string]interface{}, len(a.functions))
+	customFuncs := make(map[string]any, len(a.functions))
 	for k, v := range a.functions {
 		customFuncs[k] = v
 	}
@@ -640,13 +658,13 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 
 	// Function overrides
 	customFuncs["metadata_get"] = func(k string) string {
-		return part.MetaGet(k)
+		return msg.MetaGetStr(k)
 	}
 	customFuncs["metadata_set"] = func(k, v string) {
-		part.MetaSet(k, v)
+		msg.MetaSetMut(k, v)
 	}
 	customFuncs["json_get"] = func(path string) (string, error) {
-		jsonPart, err := part.JSON()
+		jsonPart, err := msg.AsStructured()
 		if err != nil {
 			return "", fmt.Errorf("failed to parse message into json: %v", err)
 		}
@@ -664,10 +682,7 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 		var err error
 		jsonPart := mutableJSONPart
 		if jsonPart == nil {
-			if jsonPart, err = part.JSON(); err == nil {
-				jsonPart, err = message.CopyJSON(jsonPart)
-			}
-			if err == nil {
+			if jsonPart, err = msg.AsStructuredMut(); err == nil {
 				mutableJSONPart = jsonPart
 			}
 		}
@@ -677,13 +692,13 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 		gPart := gabs.Wrap(jsonPart)
 		return gPart, nil
 	}
-	setJSON := func(path string, v interface{}) (int, error) {
+	setJSON := func(path string, v any) (int, error) {
 		gPart, err := getJSON()
 		if err != nil {
 			return 0, err
 		}
 		_, _ = gPart.SetP(v, path)
-		part.SetJSON(gPart.Data())
+		msg.SetStructuredMut(gPart.Data())
 		return 0, nil
 	}
 	customFuncs["json_set"] = func(path, v string) (int, error) {
@@ -698,13 +713,13 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 	customFuncs["json_set_bool"] = func(path string, v bool) (int, error) {
 		return setJSON(path, v)
 	}
-	arrayAppendJSON := func(path string, v interface{}) (int, error) {
+	arrayAppendJSON := func(path string, v any) (int, error) {
 		gPart, err := getJSON()
 		if err != nil {
 			return 0, err
 		}
 		_ = gPart.ArrayAppendP(v, path)
-		part.SetJSON(gPart.Data())
+		msg.SetStructuredMut(gPart.Data())
 		return 0, nil
 	}
 	customFuncs["json_append"] = func(path, v string) (int, error) {
@@ -725,7 +740,7 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 			return 0, err
 		}
 		_ = gObj.DeleteP(path)
-		part.SetJSON(gObj.Data())
+		msg.SetStructuredMut(gObj.Data())
 		return 0, nil
 	}
 	customFuncs["json_length"] = func(path string) (int, error) {
@@ -736,7 +751,7 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 		switch t := gObj.Path(path).Data().(type) {
 		case string:
 			return len(t), nil
-		case []interface{}:
+		case []any:
 			return len(t), nil
 		}
 		return 0, nil
@@ -760,9 +775,9 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 			return "string", nil
 		case bool:
 			return "bool", nil
-		case []interface{}:
+		case []any:
 			return "array", nil
-		case map[string]interface{}:
+		case map[string]any:
 			return "object", nil
 		case nil:
 			return "null", nil
@@ -778,7 +793,7 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 	}
 
 	if a.codec == "json" {
-		jsonPart, err := part.JSON()
+		jsonPart, err := msg.AsStructured()
 		if err != nil {
 			a.log.Errorf("Failed to parse part into json: %v\n", err)
 			return nil, err
@@ -789,13 +804,13 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 		}
 		config.Stdin = bytes.NewReader([]byte(" "))
 	} else if a.codec == "text" {
-		config.Stdin = bytes.NewReader(part.Get())
+		config.Stdin = bytes.NewReader(msg.AsBytes())
 	} else {
 		config.Stdin = bytes.NewReader([]byte(" "))
 	}
 
 	if a.codec != "none" {
-		_ = part.MetaIter(func(k, v string) error {
+		_ = msg.MetaIterStr(func(k, v string) error {
 			config.Vars = append(config.Vars, varInvalidRegexp.ReplaceAllString(k, "_"), v)
 			return nil
 		})
@@ -829,10 +844,10 @@ func (a *awkProc) Process(ctx context.Context, msg *message.Part) ([]*message.Pa
 		if resMsgBytes[len(resMsgBytes)-1] == '\n' {
 			resMsgBytes = resMsgBytes[:len(resMsgBytes)-1]
 		}
-		part.Set(resMsgBytes)
+		msg.SetBytes(resMsgBytes)
 	}
 
-	return []*message.Part{part}, nil
+	return []*message.Part{msg}, nil
 }
 
 func (a *awkProc) Close(context.Context) error {

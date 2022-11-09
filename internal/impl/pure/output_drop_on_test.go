@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,13 +14,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	bmock "github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func TestDropOnNothing(t *testing.T) {
@@ -30,21 +29,23 @@ func TestDropOnNothing(t *testing.T) {
 		ts.Close()
 	})
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	childConf.Type = "http_client"
 	childConf.HTTPClient.URL = ts.URL
 	childConf.HTTPClient.DropOn = []int{http.StatusForbidden}
 
-	dropConf := ooutput.NewConfig()
+	dropConf := output.NewConfig()
 	dropConf.Type = "drop_on"
 	dropConf.DropOn.Error = false
 	dropConf.DropOn.Output = &childConf
 
-	d, err := ooutput.New(dropConf, bmock.NewManager(), log.Noop(), metrics.Noop())
+	d, err := bmock.NewManager().NewOutput(dropConf)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		d.CloseAsync()
-		assert.NoError(t, d.WaitForClose(time.Second*5))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		d.TriggerCloseNow()
+		assert.NoError(t, d.WaitForClose(ctx))
+		done()
 	})
 
 	tChan := make(chan message.Transaction)
@@ -76,21 +77,23 @@ func TestDropOnError(t *testing.T) {
 		ts.Close()
 	})
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	childConf.Type = "http_client"
 	childConf.HTTPClient.URL = ts.URL
 	childConf.HTTPClient.DropOn = []int{http.StatusForbidden}
 
-	dropConf := ooutput.NewConfig()
+	dropConf := output.NewConfig()
 	dropConf.Type = "drop_on"
 	dropConf.DropOn.Error = true
 	dropConf.DropOn.Output = &childConf
 
-	d, err := ooutput.New(dropConf, bmock.NewManager(), log.Noop(), metrics.Noop())
+	d, err := bmock.NewManager().NewOutput(dropConf)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		d.CloseAsync()
-		assert.NoError(t, d.WaitForClose(time.Second*5))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		d.TriggerCloseNow()
+		assert.NoError(t, d.WaitForClose(ctx))
+		done()
 	})
 
 	tChan := make(chan message.Transaction)
@@ -152,20 +155,22 @@ func TestDropOnBackpressureWithErrors(t *testing.T) {
 		ts.Close()
 	})
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	childConf.Type = "websocket"
 	childConf.Websocket.URL = "ws://" + strings.TrimPrefix(ts.URL, "http://")
 
-	dropConf := ooutput.NewConfig()
+	dropConf := output.NewConfig()
 	dropConf.Type = "drop_on"
 	dropConf.DropOn.BackPressure = "100ms"
 	dropConf.DropOn.Output = &childConf
 
-	d, err := ooutput.New(dropConf, bmock.NewManager(), log.Noop(), metrics.Noop())
+	d, err := bmock.NewManager().NewOutput(dropConf)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		d.CloseAsync()
-		assert.NoError(t, d.WaitForClose(time.Second*5))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		d.TriggerCloseNow()
+		assert.NoError(t, d.WaitForClose(ctx))
+		done()
 	})
 
 	tChan := make(chan message.Transaction)
@@ -173,7 +178,7 @@ func TestDropOnBackpressureWithErrors(t *testing.T) {
 
 	require.NoError(t, d.Consume(tChan))
 
-	sendAndGet := func(msg string, expErr string) {
+	sendAndGet := func(msg, expErr string) {
 		t.Helper()
 
 		select {
@@ -239,21 +244,23 @@ func TestDropOnDisconnectBackpressureNoErrors(t *testing.T) {
 		ts.Close()
 	})
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	childConf.Type = "websocket"
 	childConf.Websocket.URL = "ws://" + strings.TrimPrefix(ts.URL, "http://")
 
-	dropConf := ooutput.NewConfig()
+	dropConf := output.NewConfig()
 	dropConf.Type = "drop_on"
 	dropConf.DropOn.Error = true
 	dropConf.DropOn.BackPressure = "100ms"
 	dropConf.DropOn.Output = &childConf
 
-	d, err := ooutput.New(dropConf, bmock.NewManager(), log.Noop(), metrics.Noop())
+	d, err := bmock.NewManager().NewOutput(dropConf)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		d.CloseAsync()
-		assert.NoError(t, d.WaitForClose(time.Second*5))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		d.TriggerCloseNow()
+		assert.NoError(t, d.WaitForClose(ctx))
+		done()
 	})
 
 	tChan := make(chan message.Transaction)
@@ -261,7 +268,7 @@ func TestDropOnDisconnectBackpressureNoErrors(t *testing.T) {
 
 	require.NoError(t, d.Consume(tChan))
 
-	sendAndGet := func(msg string, expErr string) {
+	sendAndGet := func(msg, expErr string) {
 		t.Helper()
 
 		select {

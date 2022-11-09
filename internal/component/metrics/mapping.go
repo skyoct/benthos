@@ -14,8 +14,9 @@ import (
 
 // Mapping is a compiled Bloblang mapping used to rewrite metrics.
 type Mapping struct {
-	m      *mapping.Executor
-	logger log.Modular
+	m          *mapping.Executor
+	logger     log.Modular
+	staticVars map[string]any
 }
 
 // NewMapping parses a Bloblang mapping and returns a metrics mapping.
@@ -23,14 +24,31 @@ func NewMapping(mapping string, logger log.Modular) (*Mapping, error) {
 	if mapping == "" {
 		return &Mapping{m: nil, logger: logger}, nil
 	}
-	m, err := bloblang.GlobalEnvironment().OnlyPure().NewMapping(mapping)
+	m, err := bloblang.GlobalEnvironment().NewMapping(mapping)
 	if err != nil {
 		if perr, ok := err.(*parser.Error); ok {
 			return nil, fmt.Errorf("%v", perr.ErrorAtPosition([]rune(mapping)))
 		}
 		return nil, err
 	}
-	return &Mapping{m, logger}, nil
+	return &Mapping{m: m, logger: logger, staticVars: map[string]any{}}, nil
+}
+
+// WithStaticVars adds a map of key/value pairs to the static variables of the
+// metrics mapping. These are variables that will be made available to each
+// invocation of the metrics mapping.
+func (m *Mapping) WithStaticVars(kvs map[string]any) *Mapping {
+	newM := *m
+
+	newM.staticVars = map[string]any{}
+	for k, v := range m.staticVars {
+		newM.staticVars[k] = v
+	}
+	for k, v := range kvs {
+		newM.staticVars[k] = v
+	}
+
+	return &newM
 }
 
 func (m *Mapping) mapPath(path string, labelNames, labelValues []string) (outPath string, outLabelNames, outLabelValues []string) {
@@ -39,19 +57,21 @@ func (m *Mapping) mapPath(path string, labelNames, labelValues []string) (outPat
 	}
 
 	part := message.NewPart(nil)
-	part.SetJSON(path)
+	part.SetStructuredMut(path)
 	for i, v := range labelNames {
-		part.MetaSet(v, labelValues[i])
+		part.MetaSetMut(v, labelValues[i])
 	}
-	msg := message.QuickBatch(nil)
-	msg.Append(part)
+	msg := message.Batch{part}
 
-	outPart := part.Copy()
+	outPart := part.DeepCopy()
 
-	var input interface{} = path
-	vars := map[string]interface{}{}
+	var input any = path
+	vars := map[string]any{}
+	for k, v := range m.staticVars {
+		vars[k] = v
+	}
 
-	var v interface{} = query.Nothing(nil)
+	var v any = query.Nothing(nil)
 	if err := m.m.ExecOnto(query.FunctionContext{
 		Maps:     m.m.Maps(),
 		Vars:     vars,
@@ -67,14 +87,14 @@ func (m *Mapping) mapPath(path string, labelNames, labelValues []string) (outPat
 		return path, nil, nil
 	}
 
-	_ = outPart.MetaIter(func(k, v string) error {
+	_ = outPart.MetaIterStr(func(k, v string) error {
 		outLabelNames = append(outLabelNames, k)
 		return nil
 	})
 	if len(outLabelNames) > 0 {
 		sort.Strings(outLabelNames)
 		for _, k := range outLabelNames {
-			v := outPart.MetaGet(k)
+			v := outPart.MetaGetStr(k)
 			m.logger.Tracef("Metrics label '%v' created with static value '%v'.\n", k, v)
 			outLabelValues = append(outLabelValues, v)
 		}

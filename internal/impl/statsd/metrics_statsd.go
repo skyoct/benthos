@@ -40,7 +40,7 @@ type wrappedDatadogLogger struct {
 	log log.Modular
 }
 
-func (s wrappedDatadogLogger) Printf(msg string, args ...interface{}) {
+func (s wrappedDatadogLogger) Printf(msg string, args ...any) {
 	s.log.Warnf(fmt.Sprintf(msg, args...))
 }
 
@@ -85,7 +85,7 @@ type statsdMetrics struct {
 	log    log.Modular
 }
 
-func newStatsd(config metrics.Config, log log.Modular) (metrics.Type, error) {
+func newStatsd(config metrics.Config, nm bundle.NewManagement) (metrics.Type, error) {
 	flushPeriod, err := time.ParseDuration(config.Statsd.FlushPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse flush period: %s", err)
@@ -93,7 +93,7 @@ func newStatsd(config metrics.Config, log log.Modular) (metrics.Type, error) {
 
 	s := &statsdMetrics{
 		config: config,
-		log:    log,
+		log:    nm.Logger(),
 	}
 
 	statsdOpts := []statsd.Option{

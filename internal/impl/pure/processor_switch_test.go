@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -8,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	"github.com/benthosdev/benthos/v4/internal/impl/pure"
 )
@@ -53,8 +54,9 @@ func TestSwitchCases(t *testing.T) {
 	require.NoError(t, err)
 
 	defer func() {
-		c.CloseAsync()
-		assert.NoError(t, c.WaitForClose(time.Second))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		defer done()
+		assert.NoError(t, c.Close(ctx))
 	}()
 
 	type testCase struct {
@@ -117,9 +119,9 @@ func TestSwitchCases(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			msg := message.QuickBatch(nil)
 			for _, s := range test.input {
-				msg.Append(message.NewPart([]byte(s)))
+				msg = append(msg, message.NewPart([]byte(s)))
 			}
-			msgs, res := c.ProcessMessage(msg)
+			msgs, res := c.ProcessBatch(context.Background(), msg)
 			require.Nil(t, res)
 
 			resStrs := []string{}
@@ -159,16 +161,18 @@ func TestSwitchError(t *testing.T) {
 	require.NoError(t, err)
 
 	defer func() {
-		c.CloseAsync()
-		assert.NoError(t, c.WaitForClose(time.Second))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		defer done()
+		assert.NoError(t, c.Close(ctx))
 	}()
 
-	msg := message.QuickBatch(nil)
-	msg.Append(message.NewPart([]byte(`{"id":"foo","content":"just a foo"}`)))
-	msg.Append(message.NewPart([]byte(`{"content":"bar but doesnt have an id!"}`)))
-	msg.Append(message.NewPart([]byte(`{"id":"buz","content":"a real foobar"}`)))
+	msg := message.Batch{
+		message.NewPart([]byte(`{"id":"foo","content":"just a foo"}`)),
+		message.NewPart([]byte(`{"content":"bar but doesnt have an id!"}`)),
+		message.NewPart([]byte(`{"id":"buz","content":"a real foobar"}`)),
+	}
 
-	msgs, res := c.ProcessMessage(msg)
+	msgs, res := c.ProcessBatch(context.Background(), msg)
 	require.Nil(t, res)
 
 	assert.Len(t, msgs, 1)
@@ -227,8 +231,9 @@ func BenchmarkSwitch10(b *testing.B) {
 	c, err := mock.NewManager().NewProcessor(conf)
 	require.NoError(b, err)
 	defer func() {
-		c.CloseAsync()
-		assert.NoError(b, c.WaitForClose(time.Second))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		defer done()
+		assert.NoError(b, c.Close(ctx))
 	}()
 
 	msg := message.QuickBatch([][]byte{
@@ -260,7 +265,7 @@ func BenchmarkSwitch10(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		msgs, res := c.ProcessMessage(msg)
+		msgs, res := c.ProcessBatch(context.Background(), msg)
 		require.Nil(b, res)
 		assert.Equal(b, exp, message.GetAllBytes(msgs[0]))
 	}
@@ -303,11 +308,12 @@ func BenchmarkSwitch1(b *testing.B) {
 	c, err := mock.NewManager().NewProcessor(conf)
 	require.NoError(b, err)
 	defer func() {
-		c.CloseAsync()
-		assert.NoError(b, c.WaitForClose(time.Second))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		defer done()
+		assert.NoError(b, c.Close(ctx))
 	}()
 
-	msgs := []*message.Batch{
+	msgs := []message.Batch{
 		message.QuickBatch([][]byte{[]byte("A")}),
 		message.QuickBatch([][]byte{[]byte("B")}),
 		message.QuickBatch([][]byte{[]byte("C")}),
@@ -336,7 +342,7 @@ func BenchmarkSwitch1(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		resMsgs, res := c.ProcessMessage(msgs[i%len(msgs)])
+		resMsgs, res := c.ProcessBatch(context.Background(), msgs[i%len(msgs)])
 		require.Nil(b, res)
 		assert.Equal(b, [][]byte{exp[i%len(exp)]}, message.GetAllBytes(resMsgs[0]))
 	}

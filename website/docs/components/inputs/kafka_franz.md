@@ -54,6 +54,8 @@ input:
     regexp_topics: false
     consumer_group: ""
     checkpoint_limit: 1024
+    commit_period: 5s
+    start_from_oldest: true
     tls:
       enabled: false
       skip_cert_verify: false
@@ -62,6 +64,7 @@ input:
       root_cas_file: ""
       client_certs: []
     sasl: []
+    multi_header: false
 ```
 
 </TabItem>
@@ -129,7 +132,7 @@ Default: `false`
 
 ### `consumer_group`
 
-A consumer group to consume as. Partitions are automatically distributed across consumers sharing a consumer group, and partition offsets are automatically commited and resumed under this name.
+A consumer group to consume as. Partitions are automatically distributed across consumers sharing a consumer group, and partition offsets are automatically committed and resumed under this name.
 
 
 Type: `string`  
@@ -141,6 +144,22 @@ Determines how many messages of the same partition can be processed in parallel 
 
 Type: `int`  
 Default: `1024`  
+
+### `commit_period`
+
+The period of time between each commit of the current partition offsets. Offsets are always committed during shutdown.
+
+
+Type: `string`  
+Default: `"5s"`  
+
+### `start_from_oldest`
+
+If an offset is not found for a topic partition, determines whether to consume from the oldest available offset, otherwise messages are consumed from the latest offset.
+
+
+Type: `bool`  
+Default: `true`  
 
 ### `tls`
 
@@ -177,6 +196,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -235,6 +257,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -242,7 +267,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -255,6 +280,25 @@ The path of a certificate key to use.
 
 Type: `string`  
 Default: `""`  
+
+### `tls.client_certs[].password`
+
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+password: foo
+
+password: ${KEY_PASSWORD}
+```
 
 ### `sasl`
 
@@ -281,10 +325,12 @@ Type: `string`
 
 | Option | Summary |
 |---|---|
+| `AWS_MSK_IAM` | AWS IAM based authentication as specified by the 'aws-msk-iam-auth' java library. |
 | `OAUTHBEARER` | OAuth Bearer based authentication. |
 | `PLAIN` | Plain text authentication. |
 | `SCRAM-SHA-256` | SCRAM based authentication as specified in RFC5802. |
 | `SCRAM-SHA-512` | SCRAM based authentication as specified in RFC5802. |
+| `none` | Disable sasl authentication |
 
 
 ### `sasl[].username`
@@ -298,6 +344,9 @@ Default: `""`
 ### `sasl[].password`
 
 A password to provide for PLAIN or SCRAM-* authentication.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -317,5 +366,103 @@ Key/value pairs to add to OAUTHBEARER authentication requests.
 
 
 Type: `object`  
+
+### `sasl[].aws`
+
+Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.
+
+
+Type: `object`  
+
+### `sasl[].aws.region`
+
+The AWS region to target.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.endpoint`
+
+Allows you to specify a custom endpoint for the AWS API.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials`
+
+Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/cloud/aws).
+
+
+Type: `object`  
+
+### `sasl[].aws.credentials.profile`
+
+A profile from `~/.aws/credentials` to use.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.id`
+
+The ID of credentials to use.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.secret`
+
+The secret for the credentials being used.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.token`
+
+The token for the credentials being used, required when using short term credentials.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
+
+### `sasl[].aws.credentials.role`
+
+A role ARN to assume.
+
+
+Type: `string`  
+Default: `""`  
+
+### `sasl[].aws.credentials.role_external_id`
+
+An external ID to provide when assuming a role.
+
+
+Type: `string`  
+Default: `""`  
+
+### `multi_header`
+
+Decode headers into lists to allow handling of multiple values with the same key
+
+
+Type: `bool`  
+Default: `false`  
 
 

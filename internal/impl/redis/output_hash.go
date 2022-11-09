@@ -5,28 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/redis/old"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newRedisHashOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newRedisHashOutput), docs.ComponentSpec{
 		Name:    "redis_hash",
 		Summary: `Sets Redis hash objects using the HMSET command.`,
 		Description: output.Description(true, false, `
@@ -72,7 +66,7 @@ Where latter stages will overwrite matching field names of a former stage.`),
 			docs.FieldBool("walk_json_object", "Whether to walk each message as a JSON object and add each key/value pair to the list of hash fields to set."),
 			docs.FieldString("fields", "A map of key/value pairs to set as hash fields.").IsInterpolated().Map(),
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewRedisHashConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewRedisHashConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -82,22 +76,23 @@ Where latter stages will overwrite matching field names of a former stage.`),
 	}
 }
 
-func newRedisHashOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	rhash, err := newRedisHashWriter(conf.RedisHash, mgr, log)
+func newRedisHashOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	rhash, err := newRedisHashWriter(conf.RedisHash, mgr)
 	if err != nil {
 		return nil, err
 	}
-	a, err := ooutput.NewAsyncWriter("redis_hash", conf.RedisHash.MaxInFlight, rhash, log, stats)
+	a, err := output.NewAsyncWriter("redis_hash", conf.RedisHash.MaxInFlight, rhash, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.OnlySinglePayloads(a), nil
+	return output.OnlySinglePayloads(a), nil
 }
 
 type redisHashWriter struct {
+	mgr bundle.NewManagement
 	log log.Modular
 
-	conf ooutput.RedisHashConfig
+	conf output.RedisHashConfig
 
 	keyStr *field.Expression
 	fields map[string]*field.Expression
@@ -106,9 +101,10 @@ type redisHashWriter struct {
 	connMut sync.RWMutex
 }
 
-func newRedisHashWriter(conf ooutput.RedisHashConfig, mgr interop.Manager, log log.Modular) (*redisHashWriter, error) {
+func newRedisHashWriter(conf output.RedisHashConfig, mgr bundle.NewManagement) (*redisHashWriter, error) {
 	r := &redisHashWriter{
-		log:    log,
+		mgr:    mgr,
+		log:    mgr.Logger(),
 		conf:   conf,
 		fields: map[string]*field.Expression{},
 	}
@@ -128,22 +124,22 @@ func newRedisHashWriter(conf ooutput.RedisHashConfig, mgr interop.Manager, log l
 		return nil, errors.New("at least one mechanism for setting fields must be enabled")
 	}
 
-	if _, err := clientFromConfig(conf.Config); err != nil {
+	if _, err := clientFromConfig(mgr.FS(), conf.Config); err != nil {
 		return nil, err
 	}
 
 	return r, nil
 }
 
-func (r *redisHashWriter) ConnectWithContext(ctx context.Context) error {
+func (r *redisHashWriter) Connect(ctx context.Context) error {
 	r.connMut.Lock()
 	defer r.connMut.Unlock()
 
-	client, err := clientFromConfig(r.conf.Config)
+	client, err := clientFromConfig(r.mgr.FS(), r.conf.Config)
 	if err != nil {
 		return err
 	}
-	if _, err = client.Ping().Result(); err != nil {
+	if _, err = client.Ping(ctx).Result(); err != nil {
 		return err
 	}
 
@@ -156,13 +152,13 @@ func (r *redisHashWriter) ConnectWithContext(ctx context.Context) error {
 //------------------------------------------------------------------------------
 
 func walkForHashFields(
-	msg *message.Batch, index int, fields map[string]interface{},
+	msg message.Batch, index int, fields map[string]any,
 ) error {
-	jVal, err := msg.Get(index).JSON()
+	jVal, err := msg.Get(index).AsStructured()
 	if err != nil {
 		return err
 	}
-	jObj, ok := jVal.(map[string]interface{})
+	jObj, ok := jVal.(map[string]any)
 	if !ok {
 		return fmt.Errorf("expected JSON object, found '%T'", jVal)
 	}
@@ -172,7 +168,7 @@ func walkForHashFields(
 	return nil
 }
 
-func (r *redisHashWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (r *redisHashWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	r.connMut.RLock()
 	client := r.client
 	r.connMut.RUnlock()
@@ -181,11 +177,11 @@ func (r *redisHashWriter) WriteWithContext(ctx context.Context, msg *message.Bat
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
 		key := r.keyStr.String(i, msg)
-		fields := map[string]interface{}{}
+		fields := map[string]any{}
 		if r.conf.WalkMetadata {
-			_ = p.MetaIter(func(k, v string) error {
+			_ = p.MetaIterMut(func(k string, v any) error {
 				fields[k] = v
 				return nil
 			})
@@ -200,7 +196,7 @@ func (r *redisHashWriter) WriteWithContext(ctx context.Context, msg *message.Bat
 		for k, v := range r.fields {
 			fields[k] = v.String(i, msg)
 		}
-		if err := client.HMSet(key, fields).Err(); err != nil {
+		if err := client.HMSet(ctx, key, fields).Err(); err != nil {
 			_ = r.disconnect()
 			r.log.Errorf("Error from redis: %v\n", err)
 			return component.ErrNotConnected
@@ -220,10 +216,6 @@ func (r *redisHashWriter) disconnect() error {
 	return nil
 }
 
-func (r *redisHashWriter) CloseAsync() {
-	_ = r.disconnect()
-}
-
-func (r *redisHashWriter) WaitForClose(timeout time.Duration) error {
-	return nil
+func (r *redisHashWriter) Close(context.Context) error {
+	return r.disconnect()
 }

@@ -67,7 +67,7 @@ func (d ParamDefinition) Optional() ParamDefinition {
 
 // Default adds a default value to a parameter, also making it implicitly
 // optional.
-func (d ParamDefinition) Default(v interface{}) ParamDefinition {
+func (d ParamDefinition) Default(v any) ParamDefinition {
 	d.def = d.def.Default(v)
 	return d
 }
@@ -82,11 +82,14 @@ func (d ParamDefinition) Default(v interface{}) ParamDefinition {
 // following the order in which the parameters are added, or named style
 // (c: baz, a: foo).
 type PluginSpec struct {
+	status      query.Status
 	category    string
 	description string
 	impure      bool
+	static      bool
 	params      query.Params
 	examples    []pluginExample
+	version     string
 }
 
 type pluginExample struct {
@@ -103,6 +106,25 @@ func NewPluginSpec() *PluginSpec {
 	}
 }
 
+// Experimental flags the plugin as an experimental component.
+func (p *PluginSpec) Experimental() *PluginSpec {
+	p.status = query.StatusExperimental
+	return p
+}
+
+// Beta flags the plugin as a beta component.
+func (p *PluginSpec) Beta() *PluginSpec {
+	p.status = query.StatusBeta
+	return p
+}
+
+// Deprecated flags the plugin as a deprecated component, it will still be valid
+// in mappings but won't appear prominently in documentation.
+func (p *PluginSpec) Deprecated() *PluginSpec {
+	p.status = query.StatusDeprecated
+	return p
+}
+
 // Category adds an optional category string to the plugin spec, this is used
 // when generating documentation for the plugin.
 func (p *PluginSpec) Category(str string) *PluginSpec {
@@ -117,6 +139,12 @@ func (p *PluginSpec) Description(str string) *PluginSpec {
 	return p
 }
 
+// Version specifies that this plugin was introduced in a given version.
+func (p *PluginSpec) Version(v string) *PluginSpec {
+	p.version = v
+	return p
+}
+
 // Example adds an optional example to the plugin spec, this is used when
 // generating documentation for the plugin. An example consists of a short
 // summary, a mapping demonstrating the plugin, and one or more input/output
@@ -127,6 +155,17 @@ func (p *PluginSpec) Example(summary, mapping string, inputOutputs ...[2]string)
 		mapping:      mapping,
 		inputOutputs: inputOutputs,
 	})
+	return p
+}
+
+// Variadic marks this plugin as having variadic parameters, which means any
+// number of arguments can be provided and they are unnamed. It is invalid to
+// combine variadic with named parameters.
+//
+// A variadic method is able to extract arguments from a *ParsedParams object
+// via the AsSlice method.
+func (p *PluginSpec) Variadic() *PluginSpec {
+	p.params.Variadic = true
 	return p
 }
 
@@ -144,6 +183,18 @@ func (p *PluginSpec) Param(def ParamDefinition) *PluginSpec {
 // are excluded from some bloblang environments.
 func (p *PluginSpec) Impure() *PluginSpec {
 	p.impure = true
+	return p
+}
+
+// Static marks the plugin as a statically evaluated function or method. This is
+// a guarantee that given the name parameters this plugin will always yield the
+// same value.
+//
+// Marking a function or method as static has the advantage that it can
+// sometimes be optimistically evaluated at mapping parse time when given static
+// arguments.
+func (p *PluginSpec) Static() *PluginSpec {
+	p.static = true
 	return p
 }
 
@@ -174,9 +225,14 @@ type ParsedParams struct {
 	par *query.ParsedParams
 }
 
+// AsSlice returns a slice of raw argument values.
+func (p *ParsedParams) AsSlice() []any {
+	return p.par.Raw()
+}
+
 // Get an argument value with a given name and return it boxed within an empty
 // interface.
-func (p *ParsedParams) Get(name string) (interface{}, error) {
+func (p *ParsedParams) Get(name string) (any, error) {
 	return p.par.Field(name)
 }
 

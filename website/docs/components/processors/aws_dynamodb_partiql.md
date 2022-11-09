@@ -55,6 +55,7 @@ aws_dynamodb_partiql:
     id: ""
     secret: ""
     token: ""
+    from_ec2_role: false
     role: ""
     role_external_id: ""
 ```
@@ -157,6 +158,9 @@ Default: `""`
 ### `credentials.secret`
 
 The secret for the credentials being used.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -169,6 +173,15 @@ The token for the credentials being used, required when using short term credent
 
 Type: `string`  
 Default: `""`  
+
+### `credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
 
 ### `credentials.role`
 

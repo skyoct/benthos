@@ -43,8 +43,8 @@ In order to have a different path for each object you should use function interp
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 ## Fields
 
@@ -108,6 +108,9 @@ Default: `""`
 ### `credentials.password`
 
 The password for the username to connect to the SFTP server.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -124,6 +127,9 @@ Default: `""`
 ### `credentials.private_key_pass`
 
 Optional passphrase for private key.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  

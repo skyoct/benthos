@@ -6,8 +6,6 @@ package shared
 import (
 	"fmt"
 
-	"github.com/Azure/go-amqp"
-
 	"github.com/benthosdev/benthos/v4/internal/docs"
 )
 
@@ -41,19 +39,6 @@ func SASLFieldSpec() docs.FieldSpec {
 			"plain", "Plain text SASL authentication.",
 		).HasDefault("none"),
 		docs.FieldString("user", "A SASL plain text username. It is recommended that you use environment variables to populate this field.", "${USER}").HasDefault(""),
-		docs.FieldString("password", "A SASL plain text password. It is recommended that you use environment variables to populate this field.", "${PASSWORD}").HasDefault(""),
-	).Advanced().HasDefault(map[string]interface{}{})
-}
-
-// ToOptFns renders the sasl.Config options into amqp.ConnOption fns.
-func (s SASLConfig) ToOptFns() ([]amqp.ConnOption, error) {
-	switch s.Mechanism {
-	case "plain":
-		return []amqp.ConnOption{
-			amqp.ConnSASLPlain(s.User, s.Password),
-		}, nil
-	case "none":
-		return nil, nil
-	}
-	return nil, ErrSASLMechanismNotSupported(s.Mechanism)
+		docs.FieldString("password", "A SASL plain text password. It is recommended that you use environment variables to populate this field.", "${PASSWORD}").HasDefault("").Secret(),
+	).Advanced()
 }

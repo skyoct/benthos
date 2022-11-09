@@ -6,28 +6,22 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/nats/auth"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		return newNATSInput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllInputs.Add(processors.WrapConstructor(newNATSInput), docs.ComponentSpec{
 		Name:    "nats",
 		Summary: `Subscribe to a NATS subject.`,
 		Description: `
@@ -55,7 +49,7 @@ You can access these metadata fields using [function interpolation](/docs/config
 			docs.FieldInt("prefetch_count", "The maximum number of messages to pull at a time.").Advanced(),
 			btls.FieldSpec(),
 			auth.FieldSpec(),
-		).ChildDefaultAndTypesFromStruct(oinput.NewNATSConfig()),
+		).ChildDefaultAndTypesFromStruct(input.NewNATSConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -65,17 +59,17 @@ You can access these metadata fields using [function interpolation](/docs/config
 	}
 }
 
-func newNATSInput(conf oinput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (input.Streamed, error) {
-	n, err := newNATSReader(conf.NATS, log)
+func newNATSInput(conf input.Config, mgr bundle.NewManagement) (input.Streamed, error) {
+	n, err := newNATSReader(conf.NATS, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return oinput.NewAsyncReader("nats", true, reader.NewAsyncPreserver(n), log, stats)
+	return input.NewAsyncReader("nats", true, input.NewAsyncPreserver(n), mgr)
 }
 
 type natsReader struct {
 	urls string
-	conf oinput.NATSConfig
+	conf input.NATSConfig
 	log  log.Modular
 
 	cMut sync.Mutex
@@ -84,13 +78,14 @@ type natsReader struct {
 	natsSub       *nats.Subscription
 	natsChan      chan *nats.Msg
 	interruptChan chan struct{}
+	interruptOnce sync.Once
 	tlsConf       *tls.Config
 }
 
-func newNATSReader(conf oinput.NATSConfig, log log.Modular) (*natsReader, error) {
+func newNATSReader(conf input.NATSConfig, mgr bundle.NewManagement) (*natsReader, error) {
 	n := natsReader{
 		conf:          conf,
-		log:           log,
+		log:           mgr.Logger(),
 		interruptChan: make(chan struct{}),
 	}
 	n.urls = strings.Join(conf.URLs, ",")
@@ -99,7 +94,7 @@ func newNATSReader(conf oinput.NATSConfig, log log.Modular) (*natsReader, error)
 	}
 	var err error
 	if conf.TLS.Enabled {
-		if n.tlsConf, err = conf.TLS.Get(); err != nil {
+		if n.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -107,7 +102,7 @@ func newNATSReader(conf oinput.NATSConfig, log log.Modular) (*natsReader, error)
 	return &n, nil
 }
 
-func (n *natsReader) ConnectWithContext(ctx context.Context) error {
+func (n *natsReader) Connect(ctx context.Context) error {
 	n.cMut.Lock()
 	defer n.cMut.Unlock()
 
@@ -124,7 +119,7 @@ func (n *natsReader) ConnectWithContext(ctx context.Context) error {
 		opts = append(opts, nats.Secure(n.tlsConf))
 	}
 
-	opts = append(opts, auth.GetOptions(n.conf.Auth)...)
+	opts = append(opts, authConfToOptions(n.conf.Auth)...)
 
 	if natsConn, err = nats.Connect(n.urls, opts...); err != nil {
 		return err
@@ -164,7 +159,7 @@ func (n *natsReader) disconnect() {
 	n.natsChan = nil
 }
 
-func (n *natsReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (n *natsReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	n.cMut.Lock()
 	natsChan := n.natsChan
 	natsConn := n.natsConn
@@ -185,12 +180,12 @@ func (n *natsReader) ReadWithContext(ctx context.Context) (*message.Batch, reade
 
 	bmsg := message.QuickBatch([][]byte{msg.Data})
 	part := bmsg.Get(0)
-	part.MetaSet("nats_subject", msg.Subject)
+	part.MetaSetMut("nats_subject", msg.Subject)
 	// process message headers if server supports the feature
 	if natsConn.HeadersSupported() {
 		for key := range msg.Header {
 			value := msg.Header.Get(key)
-			part.MetaSet(key, value)
+			part.MetaSetMut(key, value)
 		}
 	}
 
@@ -208,10 +203,9 @@ func (n *natsReader) ReadWithContext(ctx context.Context) (*message.Batch, reade
 	}, nil
 }
 
-func (n *natsReader) CloseAsync() {
-	close(n.interruptChan)
-}
-
-func (n *natsReader) WaitForClose(timeout time.Duration) error {
-	return nil
+func (n *natsReader) Close(ctx context.Context) (err error) {
+	n.interruptOnce.Do(func() {
+		close(n.interruptChan)
+	})
+	return
 }

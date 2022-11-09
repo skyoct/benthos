@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,21 +18,20 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/codec"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(conf oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(conf input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		r, err := newAzureBlobStorage(conf.AzureBlobStorage, nm.Logger(), nm.Metrics())
 		if err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader("azure_blob_storage", true, reader.NewAsyncPreserver(r), nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("azure_blob_storage", true, input.NewAsyncPreserver(r), nm)
 	}), docs.ComponentSpec{
 		Name:    "azure_blob_storage",
 		Status:  docs.StatusBeta,
@@ -86,7 +84,7 @@ You can access these metadata fields using [function interpolation](/docs/config
 			docs.FieldString("prefix", "An optional path prefix, if set only objects with the prefix are consumed."),
 			codec.ReaderDocs,
 			docs.FieldBool("delete_objects", "Whether to delete downloaded objects from the blob once they are processed.").Advanced(),
-		).ChildDefaultAndTypesFromStruct(oinput.NewAzureBlobStorageConfig()),
+		).ChildDefaultAndTypesFromStruct(input.NewAzureBlobStorageConfig()),
 		Categories: []string{
 			"Services",
 			"Azure",
@@ -148,13 +146,13 @@ type azurePendingObject struct {
 type azureTargetReader struct {
 	pending    []*azureObjectTarget
 	container  *storage.Container
-	conf       oinput.AzureBlobStorageConfig
+	conf       input.AzureBlobStorageConfig
 	startAfter string
 }
 
 func newAzureTargetReader(
 	ctx context.Context,
-	conf oinput.AzureBlobStorageConfig,
+	conf input.AzureBlobStorageConfig,
 	log log.Modular,
 	container *storage.Container,
 ) (*azureTargetReader, error) {
@@ -223,7 +221,7 @@ func (s azureTargetReader) Close(context.Context) error {
 // AzureBlobStorage is a benthos reader.Type implementation that reads messages
 // from an Azure Blob Storage container.
 type azureBlobStorage struct {
-	conf oinput.AzureBlobStorageConfig
+	conf input.AzureBlobStorageConfig
 
 	objectScannerCtor codec.ReaderConstructor
 	keyReader         *azureTargetReader
@@ -238,7 +236,7 @@ type azureBlobStorage struct {
 }
 
 // newAzureBlobStorage creates a new Azure Blob Storage input type.
-func newAzureBlobStorage(conf oinput.AzureBlobStorageConfig, log log.Modular, stats metrics.Type) (*azureBlobStorage, error) {
+func newAzureBlobStorage(conf input.AzureBlobStorageConfig, log log.Modular, stats metrics.Type) (*azureBlobStorage, error) {
 	if conf.StorageAccount == "" && conf.StorageConnectionString == "" {
 		return nil, errors.New("invalid azure storage account credentials")
 	}
@@ -283,9 +281,9 @@ func newAzureBlobStorage(conf oinput.AzureBlobStorageConfig, log log.Modular, st
 	return a, nil
 }
 
-// ConnectWithContext attempts to establish a connection to the target Azure
+// Connect attempts to establish a connection to the target Azure
 // Blob Storage container.
-func (a *azureBlobStorage) ConnectWithContext(ctx context.Context) error {
+func (a *azureBlobStorage) Connect(ctx context.Context) error {
 	var err error
 	a.keyReader, err = newAzureTargetReader(ctx, a.conf, a.log, a.container)
 	return err
@@ -332,31 +330,29 @@ func (a *azureBlobStorage) getObjectTarget(ctx context.Context) (*azurePendingOb
 	return object, nil
 }
 
-func blobStorageMsgFromParts(p *azurePendingObject, parts []*message.Part) *message.Batch {
-	msg := message.QuickBatch(nil)
-	msg.Append(parts...)
+func blobStorageMsgFromParts(p *azurePendingObject, parts []*message.Part) message.Batch {
+	msg := message.Batch(parts)
 	_ = msg.Iter(func(_ int, part *message.Part) error {
-		part.MetaSet("blob_storage_key", p.target.key)
+		part.MetaSetMut("blob_storage_key", p.target.key)
 		if p.obj.Container != nil {
-			part.MetaSet("blob_storage_container", p.obj.Container.Name)
+			part.MetaSetMut("blob_storage_container", p.obj.Container.Name)
 		}
-		part.MetaSet("blob_storage_last_modified", time.Time(p.obj.Properties.LastModified).Format(time.RFC3339))
-		part.MetaSet("blob_storage_last_modified_unix", strconv.FormatInt(time.Time(p.obj.Properties.LastModified).Unix(), 10))
-		part.MetaSet("blob_storage_content_type", p.obj.Properties.ContentType)
-		part.MetaSet("blob_storage_content_encoding", p.obj.Properties.ContentEncoding)
+		part.MetaSetMut("blob_storage_last_modified", time.Time(p.obj.Properties.LastModified).Format(time.RFC3339))
+		part.MetaSetMut("blob_storage_last_modified_unix", time.Time(p.obj.Properties.LastModified).Unix())
+		part.MetaSetMut("blob_storage_content_type", p.obj.Properties.ContentType)
+		part.MetaSetMut("blob_storage_content_encoding", p.obj.Properties.ContentEncoding)
 
 		for k, v := range p.obj.Metadata {
-			part.MetaSet(k, v)
+			part.MetaSetMut(k, v)
 		}
 		return nil
 	})
-
 	return msg
 }
 
-// ReadWithContext attempts to read a new message from the target Azure Blob
+// ReadBatch attempts to read a new message from the target Azure Blob
 // Storage container.
-func (a *azureBlobStorage) ReadWithContext(ctx context.Context) (msg *message.Batch, ackFn reader.AsyncAckFn, err error) {
+func (a *azureBlobStorage) ReadBatch(ctx context.Context) (msg message.Batch, ackFn input.AsyncAckFn, err error) {
 	a.objectMut.Lock()
 	defer a.objectMut.Unlock()
 
@@ -406,22 +402,13 @@ func (a *azureBlobStorage) ReadWithContext(ctx context.Context) (msg *message.Ba
 	}, nil
 }
 
-// CloseAsync begins cleaning up resources used by this reader asynchronously.
-func (a *azureBlobStorage) CloseAsync() {
-	go func() {
-		a.objectMut.Lock()
-		if a.object != nil {
-			a.object.scanner.Close(context.Background())
-			a.object = nil
-		}
-		a.objectMut.Unlock()
-	}()
-}
+func (a *azureBlobStorage) Close(ctx context.Context) (err error) {
+	a.objectMut.Lock()
+	defer a.objectMut.Unlock()
 
-// WaitForClose will block until either the reader is closed or a specified
-// timeout occurs.
-func (a *azureBlobStorage) WaitForClose(time.Duration) error {
-	return nil
+	if a.object != nil {
+		err = a.object.scanner.Close(ctx)
+		a.object = nil
+	}
+	return
 }
-
-//------------------------------------------------------------------------------

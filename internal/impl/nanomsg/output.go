@@ -14,23 +14,18 @@ import (
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 
-	// Import all transport types
+	// Import all transport types.
 	_ "go.nanomsg.org/mangos/v3/transport/all"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newNanomsgOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newNanomsgOutput), docs.ComponentSpec{
 		Name:        "nanomsg",
 		Summary:     `Send messages over a Nanomsg socket.`,
 		Description: output.Description(true, false, `Currently only PUSH and PUB sockets are supported.`),
@@ -40,7 +35,7 @@ func init() {
 			docs.FieldString("socket_type", "The socket type to send with.").HasOptions("PUSH", "PUB"),
 			docs.FieldString("poll_timeout", "The maximum period of time to wait for a message to send before the request is abandoned and reattempted."),
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewNanomsgConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewNanomsgConfig()),
 		Categories: []string{
 			"Network",
 		},
@@ -50,23 +45,23 @@ func init() {
 	}
 }
 
-func newNanomsgOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	s, err := newNanomsgWriter(conf.Nanomsg, log)
+func newNanomsgOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	s, err := newNanomsgWriter(conf.Nanomsg, mgr.Logger())
 	if err != nil {
 		return nil, err
 	}
-	a, err := ooutput.NewAsyncWriter("nanomsg", conf.Nanomsg.MaxInFlight, s, log, stats)
+	a, err := output.NewAsyncWriter("nanomsg", conf.Nanomsg.MaxInFlight, s, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.OnlySinglePayloads(a), nil
+	return output.OnlySinglePayloads(a), nil
 }
 
 type nanomsgWriter struct {
 	log log.Modular
 
 	urls []string
-	conf ooutput.NanomsgConfig
+	conf output.NanomsgConfig
 
 	timeout time.Duration
 
@@ -74,7 +69,7 @@ type nanomsgWriter struct {
 	sockMut sync.RWMutex
 }
 
-func newNanomsgWriter(conf ooutput.NanomsgConfig, log log.Modular) (*nanomsgWriter, error) {
+func newNanomsgWriter(conf output.NanomsgConfig, log log.Modular) (*nanomsgWriter, error) {
 	s := nanomsgWriter{
 		log:  log,
 		conf: conf,
@@ -112,7 +107,7 @@ func getOutputSocketFromType(t string) (mangos.Socket, error) {
 	return nil, errors.New("invalid Scalability Protocols socket type")
 }
 
-func (s *nanomsgWriter) ConnectWithContext(ctx context.Context) error {
+func (s *nanomsgWriter) Connect(ctx context.Context) error {
 	s.sockMut.Lock()
 	defer s.sockMut.Unlock()
 
@@ -166,7 +161,7 @@ func (s *nanomsgWriter) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (s *nanomsgWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (s *nanomsgWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	s.sockMut.RLock()
 	socket := s.socket
 	s.sockMut.RUnlock()
@@ -175,22 +170,18 @@ func (s *nanomsgWriter) WriteWithContext(ctx context.Context, msg *message.Batch
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
-		return socket.Send(p.Get())
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+		return socket.Send(p.AsBytes())
 	})
 }
 
-func (s *nanomsgWriter) CloseAsync() {
-	go func() {
-		s.sockMut.Lock()
-		if s.socket != nil {
-			s.socket.Close()
-			s.socket = nil
-		}
-		s.sockMut.Unlock()
-	}()
-}
+func (s *nanomsgWriter) Close(context.Context) (err error) {
+	s.sockMut.Lock()
+	defer s.sockMut.Unlock()
 
-func (s *nanomsgWriter) WaitForClose(timeout time.Duration) error {
-	return nil
+	if s.socket != nil {
+		err = s.socket.Close()
+		s.socket = nil
+	}
+	return
 }

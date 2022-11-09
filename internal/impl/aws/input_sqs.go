@@ -15,22 +15,21 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(conf oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(conf input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		r, err := newAWSSQSReader(conf.AWSSQS, nm.Logger())
 		if err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader("aws_sqs", false, r, nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("aws_sqs", false, r, nm)
 	}), docs.ComponentSpec{
 		Name:   "aws_sqs",
 		Status: docs.StatusStable,
@@ -62,7 +61,8 @@ You can access these metadata fields using
 			docs.FieldBool("delete_message", "Whether to delete the consumed message once it is acked. Disabling allows you to handle the deletion using a different mechanism.").Advanced(),
 			docs.FieldBool("reset_visibility", "Whether to set the visibility timeout of the consumed message to zero once it is nacked. Disabling honors the preset visibility timeout specified for the queue.").AtVersion("3.58.0").Advanced(),
 			docs.FieldInt("max_number_of_messages", "The maximum number of messages to return on one poll. Valid values: 1 to 10.").Advanced(),
-		).WithChildren(sess.FieldSpecs()...).ChildDefaultAndTypesFromStruct(oinput.NewAWSSQSConfig()),
+			docs.FieldInt("wait_time_seconds", "Whether to set the wait time. Enabling this activates long-polling. Valid values: 0 to 20.").Advanced(),
+		).WithChildren(sess.FieldSpecs()...).ChildDefaultAndTypesFromStruct(input.NewAWSSQSConfig()),
 		Categories: []string{
 			"Services",
 			"AWS",
@@ -76,7 +76,7 @@ You can access these metadata fields using
 //------------------------------------------------------------------------------
 
 type awsSQSReader struct {
-	conf oinput.AWSSQSConfig
+	conf input.AWSSQSConfig
 
 	session *session.Session
 	sqs     *sqs.SQS
@@ -89,7 +89,7 @@ type awsSQSReader struct {
 	log log.Modular
 }
 
-func newAWSSQSReader(conf oinput.AWSSQSConfig, log log.Modular) (*awsSQSReader, error) {
+func newAWSSQSReader(conf input.AWSSQSConfig, log log.Modular) (*awsSQSReader, error) {
 	return &awsSQSReader{
 		conf:             conf,
 		log:              log,
@@ -100,9 +100,9 @@ func newAWSSQSReader(conf oinput.AWSSQSConfig, log log.Modular) (*awsSQSReader, 
 	}, nil
 }
 
-// ConnectWithContext attempts to establish a connection to the target SQS
+// Connect attempts to establish a connection to the target SQS
 // queue.
-func (a *awsSQSReader) ConnectWithContext(ctx context.Context) error {
+func (a *awsSQSReader) Connect(ctx context.Context) error {
 	if a.session != nil {
 		return nil
 	}
@@ -215,8 +215,9 @@ func (a *awsSQSReader) readLoop(wg *sync.WaitGroup) {
 	}()
 
 	backoff := backoff.NewExponentialBackOff()
-	backoff.InitialInterval = time.Millisecond
-	backoff.MaxInterval = time.Second
+	backoff.InitialInterval = 100 * time.Millisecond
+	backoff.MaxInterval = 5 * time.Minute
+	backoff.MaxElapsedTime = 0
 
 	getMsgs := func() {
 		ctx, done := a.closeSignal.CloseAtLeisureCtx(context.Background())
@@ -224,6 +225,7 @@ func (a *awsSQSReader) readLoop(wg *sync.WaitGroup) {
 		res, err := a.sqs.ReceiveMessageWithContext(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:              aws.String(a.conf.URL),
 			MaxNumberOfMessages:   aws.Int64(int64(a.conf.MaxNumberOfMessages)),
+			WaitTimeSeconds:       aws.Int64(int64(a.conf.WaitTimeSeconds)),
 			AttributeNames:        []*string{aws.String("All")},
 			MessageAttributeNames: []*string{aws.String("All")},
 		})
@@ -328,20 +330,20 @@ func (a *awsSQSReader) resetMessages(ctx context.Context, msgs ...sqsMessageHand
 }
 
 func addSQSMetadata(p *message.Part, sqsMsg *sqs.Message) {
-	p.MetaSet("sqs_message_id", *sqsMsg.MessageId)
-	p.MetaSet("sqs_receipt_handle", *sqsMsg.ReceiptHandle)
+	p.MetaSetMut("sqs_message_id", *sqsMsg.MessageId)
+	p.MetaSetMut("sqs_receipt_handle", *sqsMsg.ReceiptHandle)
 	if rCountStr := sqsMsg.Attributes["ApproximateReceiveCount"]; rCountStr != nil {
-		p.MetaSet("sqs_approximate_receive_count", *rCountStr)
+		p.MetaSetMut("sqs_approximate_receive_count", *rCountStr)
 	}
 	for k, v := range sqsMsg.MessageAttributes {
 		if v.StringValue != nil {
-			p.MetaSet(k, *v.StringValue)
+			p.MetaSetMut(k, *v.StringValue)
 		}
 	}
 }
 
-// ReadWithContext attempts to read a new message from the target SQS.
-func (a *awsSQSReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+// ReadBatch attempts to read a new message from the target SQS.
+func (a *awsSQSReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	if a.session == nil {
 		return nil, nil, component.ErrNotConnected
 	}
@@ -363,7 +365,7 @@ func (a *awsSQSReader) ReadWithContext(ctx context.Context) (*message.Batch, rea
 	if next.Body != nil {
 		part := message.NewPart([]byte(*next.Body))
 		addSQSMetadata(part, next)
-		msg.Append(part)
+		msg = append(msg, part)
 	}
 	if msg.Len() == 0 {
 		return nil, nil, component.ErrTimeout
@@ -405,26 +407,30 @@ func (a *awsSQSReader) ReadWithContext(ctx context.Context) (*message.Batch, rea
 	}, nil
 }
 
-// CloseAsync begins cleaning up resources used by this reader asynchronously.
-func (a *awsSQSReader) CloseAsync() {
+func (a *awsSQSReader) Close(ctx context.Context) error {
 	a.closeSignal.CloseAtLeisure()
-}
 
-// WaitForClose will block until either the reader is closed or a specified
-// timeout occurs.
-func (a *awsSQSReader) WaitForClose(tout time.Duration) error {
-	go func() {
-		closeNowAt := tout - time.Second
-		if closeNowAt < time.Second {
-			closeNowAt = time.Second
+	var closeNowAt time.Duration
+	if dline, ok := ctx.Deadline(); ok {
+		if closeNowAt = time.Until(dline) - time.Second; closeNowAt <= 0 {
+			a.closeSignal.CloseNow()
 		}
-		<-time.After(closeNowAt)
-		a.closeSignal.CloseNow()
-	}()
-	select {
-	case <-time.After(tout):
-		return component.ErrTimeout
-	case <-a.closeSignal.HasClosedChan():
-		return nil
 	}
+	if closeNowAt > 0 {
+		select {
+		case <-time.After(closeNowAt):
+			a.closeSignal.CloseNow()
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-a.closeSignal.HasClosedChan():
+			return nil
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.closeSignal.HasClosedChan():
+	}
+	return nil
 }

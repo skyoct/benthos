@@ -50,6 +50,22 @@ schema_registry_encode:
   subject: ""
   refresh_period: 10m
   avro_raw_json: false
+  oauth:
+    enabled: false
+    consumer_key: ""
+    consumer_secret: ""
+    access_token: ""
+    access_token_secret: ""
+  basic_auth:
+    enabled: false
+    username: ""
+    password: ""
+  jwt:
+    enabled: false
+    private_key_file: ""
+    signing_method: ""
+    claims: {}
+    headers: {}
   tls:
     skip_cert_verify: false
     enable_renegotiation: false
@@ -69,7 +85,7 @@ Currently only Avro schemas are supported.
 
 ### Avro JSON Format
 
-By default this processor expects documents formatted as [Avro JSON](https://avro.apache.org/docs/current/spec.html#json_encoding) when encoding Avro schemas. In this format the value of a union is encoded in JSON as follows:
+By default this processor expects documents formatted as [Avro JSON](https://avro.apache.org/docs/current/specification/_print/#json-encoding) when encoding with Avro schemas. In this format the value of a union is encoded in JSON as follows:
 
 - if its type is `null`, then it is encoded as a JSON `null`;
 - otherwise it is encoded as a JSON object with one name/value pair whose name is the type's name and whose value is the recursively encoded value. For Avro's named types (record, fixed or enum) the user-specified name is used, for other types the type name is used.
@@ -80,7 +96,12 @@ For example, the union schema `["null","string","Foo"]`, where `Foo` is a record
 - the string `"a"` as `{"string": "a"}`; and
 - a `Foo` instance as `{"Foo": {...}}`, where `{...}` indicates the JSON encoding of a `Foo` instance.
 
-However, it is possible to instead consume documents in raw JSON format (that match the schema) by setting the field [`avro_raw_json`](#avro_raw_json) to `true`.
+However, it is possible to instead consume documents in [standard/raw JSON format](https://pkg.go.dev/github.com/linkedin/goavro/v2#NewCodecForStandardJSONFull) by setting the field [`avro_raw_json`](#avro_raw_json) to `true`.
+
+### Known Issues
+
+Important! There is an outstanding issue in the [avro serializing library](https://github.com/linkedin/goavro) that benthos uses which means it [doesn't encode logical types correctly](https://github.com/linkedin/goavro/issues/252). It's still possible to encode logical types that are in-line with the spec if `avro_raw_json` is set to true, though now of course non-logical types will not be in-line with the spec.
+
 
 ## Fields
 
@@ -125,12 +146,147 @@ refresh_period: 1h
 
 ### `avro_raw_json`
 
-Whether messages encoded in Avro format should be parsed as raw JSON documents rather than [Avro JSON](https://avro.apache.org/docs/current/spec.html#json_encoding).
+Whether messages encoded in Avro format should be parsed as normal JSON ("json that meets the expectations of regular internet json") rather than [Avro JSON](https://avro.apache.org/docs/current/specification/_print/#json-encoding). If `true` the schema returned from the subject should be parsed as [standard json](https://pkg.go.dev/github.com/linkedin/goavro/v2#NewCodecForStandardJSONFull) instead of as [avro json](https://pkg.go.dev/github.com/linkedin/goavro/v2#NewCodec). There is a [comment in goavro](https://github.com/linkedin/goavro/blob/5ec5a5ee7ec82e16e6e2b438d610e1cab2588393/union.go#L224-L249), the [underlining library used for avro serialization](https://github.com/linkedin/goavro), that explains in more detail the difference between standard json and avro json.
 
 
 Type: `bool`  
 Default: `false`  
 Requires version 3.59.0 or newer  
+
+### `oauth`
+
+Allows you to specify open authentication via OAuth version 1.
+
+
+Type: `object`  
+Requires version 4.7.0 or newer  
+
+### `oauth.enabled`
+
+Whether to use OAuth version 1 in requests.
+
+
+Type: `bool`  
+Default: `false`  
+
+### `oauth.consumer_key`
+
+A value used to identify the client to the service provider.
+
+
+Type: `string`  
+Default: `""`  
+
+### `oauth.consumer_secret`
+
+A secret used to establish ownership of the consumer key.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+### `oauth.access_token`
+
+A value used to gain access to the protected resources on behalf of the user.
+
+
+Type: `string`  
+Default: `""`  
+
+### `oauth.access_token_secret`
+
+A secret provided in order to establish ownership of a given access token.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+### `basic_auth`
+
+Allows you to specify basic authentication.
+
+
+Type: `object`  
+Requires version 4.7.0 or newer  
+
+### `basic_auth.enabled`
+
+Whether to use basic authentication in requests.
+
+
+Type: `bool`  
+Default: `false`  
+
+### `basic_auth.username`
+
+A username to authenticate as.
+
+
+Type: `string`  
+Default: `""`  
+
+### `basic_auth.password`
+
+A password to authenticate with.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+### `jwt`
+
+BETA: Allows you to specify JWT authentication.
+
+
+Type: `object`  
+Requires version 4.7.0 or newer  
+
+### `jwt.enabled`
+
+Whether to use JWT authentication in requests.
+
+
+Type: `bool`  
+Default: `false`  
+
+### `jwt.private_key_file`
+
+A file with the PEM encoded via PKCS1 or PKCS8 as private key.
+
+
+Type: `string`  
+Default: `""`  
+
+### `jwt.signing_method`
+
+A method used to sign the token such as RS256, RS384 or RS512.
+
+
+Type: `string`  
+Default: `""`  
+
+### `jwt.claims`
+
+A value used to identify the claims that issued the JWT.
+
+
+Type: `object`  
+
+### `jwt.headers`
+
+Add optional key/value headers to the JWT.
+
+
+Type: `object`  
 
 ### `tls`
 
@@ -159,6 +315,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -217,6 +376,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -224,7 +386,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -237,5 +399,24 @@ The path of a certificate key to use.
 
 Type: `string`  
 Default: `""`  
+
+### `tls.client_certs[].password`
+
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+password: foo
+
+password: ${KEY_PASSWORD}
+```
 
 

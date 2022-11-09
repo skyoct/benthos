@@ -1,34 +1,35 @@
 package tracer
 
 import (
-	"fmt"
-
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	yaml "gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/docs"
 )
 
-// Type is an interface implemented by all tracer types.
-type Type interface {
-	// Close stops and cleans up the tracers resources.
-	Close() error
+func init() {
+	// TODO: I'm so confused, these APIs are a nightmare.
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 }
-
-//------------------------------------------------------------------------------
 
 // Config is the all encompassing configuration struct for all tracer types.
 type Config struct {
-	Type   string       `json:"type" yaml:"type"`
-	Jaeger JaegerConfig `json:"jaeger" yaml:"jaeger"`
-	None   struct{}     `json:"none" yaml:"none"`
+	Type       string           `json:"type" yaml:"type"`
+	Jaeger     JaegerConfig     `json:"jaeger" yaml:"jaeger"`
+	CloudTrace CloudTraceConfig `json:"gcp_cloudtrace" yaml:"gcp_cloudtrace"`
+	None       struct{}         `json:"none" yaml:"none"`
+	Plugin     any              `json:"plugin,omitempty" yaml:"plugin,omitempty"`
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
 func NewConfig() Config {
 	return Config{
-		Type:   "none",
-		Jaeger: NewJaegerConfig(),
-		None:   struct{}{},
+		Type:       "none",
+		Jaeger:     NewJaegerConfig(),
+		CloudTrace: NewCloudTraceConfig(),
+		None:       struct{}{},
+		Plugin:     nil,
 	}
 }
 
@@ -42,11 +43,22 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	err := value.Decode(&aliased)
 	if err != nil {
-		return fmt.Errorf("line %v: %v", value.Line, err)
+		return docs.NewLintError(value.Line, docs.LintFailedRead, err.Error())
 	}
 
-	if aliased.Type, _, err = docs.GetInferenceCandidateFromYAML(docs.DeprecatedProvider, docs.TypeTracer, value); err != nil {
-		return fmt.Errorf("line %v: %w", value.Line, err)
+	var spec docs.ComponentSpec
+	if aliased.Type, spec, err = docs.GetInferenceCandidateFromYAML(docs.DeprecatedProvider, docs.TypeTracer, value); err != nil {
+		return docs.NewLintError(value.Line, docs.LintComponentNotFound, err.Error())
+	}
+
+	if spec.Plugin {
+		pluginNode, err := docs.GetPluginConfigYAML(aliased.Type, value)
+		if err != nil {
+			return docs.NewLintError(value.Line, docs.LintFailedRead, err.Error())
+		}
+		aliased.Plugin = &pluginNode
+	} else {
+		aliased.Plugin = nil
 	}
 
 	*conf = Config(aliased)

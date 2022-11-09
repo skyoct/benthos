@@ -41,10 +41,14 @@ output:
         retries: 3
         retry_period: 1s
       processors:
-        - bloblang: 'root = "failed to send this message to foo: " + content()'
+        - mapping: 'root = "failed to send this message to foo: " + content()'
     - file:
         path: /usr/local/benthos/everything_failed.jsonl
 ```
+
+### Metadata
+
+When a given output fails the message routed to the following output will have a metadata value named `fallback_error` containing a string error message outlining the cause of the failure. The content of this string will depend on the particular output and can be used to enrich the message or provide information used to broker the data to an appropriate output using something like a `switch` output.
 
 ### Batching
 

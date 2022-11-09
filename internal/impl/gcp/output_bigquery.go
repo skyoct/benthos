@@ -58,6 +58,7 @@ type gcpBigQueryOutputConfig struct {
 	AutoDetect          bool
 	IgnoreUnknownValues bool
 	MaxBadRecords       int
+	JobLabels           map[string]string
 
 	// CSV options
 	CSVOptions gcpBigQueryCSVConfig
@@ -92,6 +93,9 @@ func gcpBigQueryOutputConfigFromParsed(conf *service.ParsedConfig) (gconf gcpBig
 		return
 	}
 	if gconf.AutoDetect, err = conf.FieldBool("auto_detect"); err != nil {
+		return
+	}
+	if gconf.JobLabels, err = conf.FieldStringMap("job_labels"); err != nil {
 		return
 	}
 	if gconf.CSVOptions, err = gcpBigQueryCSVConfigFromParsed(conf.Namespace("csv")); err != nil {
@@ -157,7 +161,7 @@ For the CSV format when the field `+"`csv.header`"+` is specified a header row w
 			Description("The format of each incoming message.").
 			Default(string(bigquery.JSON))).
 		Field(service.NewIntField("max_in_flight").
-			Description("The maximum number of messages to have in flight at a given time. Increase this to improve throughput.").
+			Description("The maximum number of message batches to have in flight at a given time. Increase this to improve throughput.").
 			Default(64)). // TODO: Tune this default
 		Field(service.NewStringEnumField("write_disposition",
 			string(bigquery.WriteAppend), string(bigquery.WriteEmpty), string(bigquery.WriteTruncate)).
@@ -180,10 +184,11 @@ For the CSV format when the field `+"`csv.header`"+` is specified a header row w
 			Description("Indicates if we should automatically infer the options and schema for CSV and JSON sources. If the table doesn't exist and this field is set to `false` the output may not be able to insert data and will throw insertion error. Be careful using this field since it delegates to the GCP BigQuery service the schema detection and values like `\"no\"` may be treated as booleans for the CSV format.").
 			Advanced().
 			Default(false)).
+		Field(service.NewStringMapField("job_labels").Description("A list of labels to add to the load job.").Default(map[string]string{})).
 		Field(service.NewObjectField("csv",
 			service.NewStringListField("header").
 				Description("A list of values to use as header for each batch of messages. If not specified the first line of each message will be used as header.").
-				Default([]interface{}{}),
+				Default([]any{}),
 			service.NewStringField("field_delimiter").
 				Description("The separator for fields in a CSV file, used when reading or exporting data.").
 				Default(","),
@@ -224,7 +229,6 @@ func init() {
 			output, err = newGCPBigQueryOutput(gconf, mgr.Logger())
 			return
 		})
-
 	if err != nil {
 		panic(err)
 	}
@@ -288,7 +292,7 @@ func newGCPBigQueryOutput(
 	return g, nil
 }
 
-// convertToIso converts a utf-8 byte encoding to iso-8859-1 byte encoding
+// convertToIso converts a utf-8 byte encoding to iso-8859-1 byte encoding.
 func convertToIso(value []byte) (result []byte, err error) {
 	return charmap.ISO8859_1.NewEncoder().Bytes(value)
 }
@@ -374,13 +378,11 @@ func (g *gcpBigQueryOutput) WriteBatch(ctx context.Context, batch service.Messag
 	}
 
 	status, err := job.Wait(ctx)
-	if err == nil {
-		err = status.Err()
-	}
 	if err != nil {
-		return fmt.Errorf("error inserting data in bigquery: %w", err)
+		return fmt.Errorf("error while waiting on bigquery job: %w", err)
 	}
-	return nil
+
+	return errorFromStatus(status)
 }
 
 func (g *gcpBigQueryOutput) createTableLoader(data *[]byte) *bigquery.Loader {
@@ -404,6 +406,7 @@ func (g *gcpBigQueryOutput) createTableLoader(data *[]byte) *bigquery.Loader {
 
 	loader.CreateDisposition = bigquery.TableCreateDisposition(g.conf.CreateDisposition)
 	loader.WriteDisposition = bigquery.TableWriteDisposition(g.conf.WriteDisposition)
+	loader.Labels = g.conf.JobLabels
 
 	return loader
 }

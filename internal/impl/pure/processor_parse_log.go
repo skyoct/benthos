@@ -13,19 +13,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newParseLog(conf.ParseLog, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("parse_log", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("parse_log", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "parse_log",
 		Categories: []string{
@@ -49,7 +47,7 @@ easier and often much faster than ` + "[`grok`](/docs/components/processors/grok
 				" set to an integer that value will be used. Leave this field empty to not set a default year at all.").Advanced(),
 			docs.FieldString("default_timezone", "Sets the strategy to decide the timezone for rfc3164 timestamps."+
 				" Applicable to format `syslog_rfc3164`. This value should follow the [time.LoadLocation](https://golang.org/pkg/time/#LoadLocation) format.").Advanced(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewParseLogConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewParseLogConfig()),
 		Footnotes: `
 ## Codecs
 
@@ -95,7 +93,7 @@ spec. The resulting structured document may contain any of the following fields:
 	}
 }
 
-type parserFormat func(body []byte) (map[string]interface{}, error)
+type parserFormat func(body []byte) (map[string]any, error)
 
 func parserRFC5424(bestEffort bool) parserFormat {
 	var opts []syslog.MachineOption
@@ -104,14 +102,14 @@ func parserRFC5424(bestEffort bool) parserFormat {
 	}
 	p := rfc5424.NewParser(opts...)
 
-	return func(body []byte) (map[string]interface{}, error) {
+	return func(body []byte) (map[string]any, error) {
 		resGen, err := p.Parse(body)
 		if err != nil {
 			return nil, err
 		}
 		res := resGen.(*rfc5424.SyslogMessage)
 
-		resMap := make(map[string]interface{})
+		resMap := make(map[string]any)
 		if res.Message != nil {
 			resMap["message"] = *res.Message
 		}
@@ -180,14 +178,14 @@ func parserRFC3164(bestEffort, wrfc3339 bool, year, tz string) (parserFormat, er
 
 	p := rfc3164.NewParser(opts...)
 
-	return func(body []byte) (map[string]interface{}, error) {
+	return func(body []byte) (map[string]any, error) {
 		resGen, err := p.Parse(body)
 		if err != nil {
 			return nil, err
 		}
 		res := resGen.(*rfc3164.SyslogMessage)
 
-		resMap := make(map[string]interface{})
+		resMap := make(map[string]any)
 		if res.Message != nil {
 			resMap["message"] = *res.Message
 		}
@@ -238,7 +236,7 @@ type parseLogProc struct {
 	log       log.Modular
 }
 
-func newParseLog(conf oprocessor.ParseLogConfig, mgr interop.Manager) (processor.V2, error) {
+func newParseLog(conf processor.ParseLogConfig, mgr bundle.NewManagement) (processor.V2, error) {
 	s := &parseLogProc{
 		formatStr: conf.Format,
 		log:       mgr.Logger(),
@@ -252,16 +250,14 @@ func newParseLog(conf oprocessor.ParseLogConfig, mgr interop.Manager) (processor
 }
 
 func (s *parseLogProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	newPart := msg.Copy()
-
-	dataMap, err := s.format(newPart.Get())
+	dataMap, err := s.format(msg.AsBytes())
 	if err != nil {
 		s.log.Debugf("Failed to parse message as %s: %v", s.formatStr, err)
 		return nil, err
 	}
 
-	newPart.SetJSON(dataMap)
-	return []*message.Part{newPart}, nil
+	msg.SetStructuredMut(dataMap)
+	return []*message.Part{msg}, nil
 }
 
 func (s *parseLogProc) Close(ctx context.Context) error {

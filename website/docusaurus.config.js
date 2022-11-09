@@ -30,7 +30,10 @@ module.exports = {
       defaultMode: 'light',
     },
     image: 'img/og_img.png',
-    metadata: [{name: 'twitter:card', content: 'summary'}],
+    metadata: [
+      {name: 'keywords', content: 'benthos, stream processor, data engineering, ETL, ELT, event processor, go, golang'},
+      {name: 'twitter:card', content: 'summary'},
+    ],
     navbar: {
       title: 'Benthos',
       logo: {
@@ -43,7 +46,7 @@ module.exports = {
         {to: 'blog', label: 'Blog', position: 'left'},
         {to: 'videos', label: 'Videos', position: 'left'},
         {to: 'community', label: 'Community', position: 'right'},
-        {to: 'https://v3.benthos.dev', label: 'Version 3 Docs', position: 'right'},
+        {to: 'support', label: 'Support', position: 'right'},
         {
           href: 'https://github.com/benthosdev/benthos/releases/latest',
           position: 'right',
@@ -62,15 +65,32 @@ module.exports = {
       style: 'dark',
       links: [
         {
-          title: 'Docs',
+          title: 'Help',
           items: [
             {
-              label: 'Getting started',
+              label: 'Support',
+              to: 'support',
+            },
+            {
+              label: 'Documentation',
               to: 'docs/guides/getting_started',
             },
             {
               label: 'Videos',
               to: 'videos',
+            },
+          ],
+        },
+        {
+          title: 'Swag',
+          items: [
+            {
+              label: 'Meet the Mascot',
+              to: 'blobfish',
+            },
+            {
+              label: 'Purchase Stickers',
+              href: 'https://www.redbubble.com/people/earzola/shop',
             },
           ],
         },
@@ -82,21 +102,12 @@ module.exports = {
               to: 'community',
             },
             {
-              label: 'GitHub',
+              label: 'See the Code',
               href: 'https://github.com/benthosdev/benthos',
             },
-          ],
-        },
-        {
-          title: 'Social',
-          items: [
             {
-              label: 'Get in touch',
-              to: 'community',
-            },
-            {
-              label: 'Mascot',
-              to: 'blobfish',
+              label: 'Sponsor the Developers',
+              href: 'https://github.com/sponsors/Jeffail',
             },
           ],
         },
@@ -104,8 +115,8 @@ module.exports = {
       copyright: `Copyright © ${new Date().getFullYear()} Ashley Jeffs.`,
     },
     announcementBar: {
-      id: 'v4_released',
-      content: '<strong>🎉 Version 4 of Benthos is now released 🎉 For more information <a target="_blank" rel="noopener noreferrer" href="/docs/guides/migration/v4">check out the migration guide</a></strong>',
+      id: 'star_the_dang_repo',
+      content: `<strong>Hey, 🫵 you, make sure you've <a target="_blank" rel="noopener noreferrer" href="https://github.com/benthosdev/benthos">⭐ starred the repo ⭐</a> otherwise you won't be entered into our daily prize draw for silent admiration.</strong>`,
       backgroundColor: 'var(--ifm-color-primary)',
       textColor: 'var(--ifm-background-color)',
       isCloseable: true,
@@ -139,8 +150,17 @@ module.exports = {
   ],
   plugins: [
     path.resolve(__dirname, './src/plugins/analytics'),
-    path.resolve(__dirname, './src/plugins/cookbooks'),
-    path.resolve(__dirname, './src/plugins/redirects'),
+    [
+      require.resolve("./src/plugins/cookbooks/compiled/index"),
+      {
+        path: 'cookbooks',
+        routeBasePath: 'cookbooks',
+        include: ['*.md', '*.mdx'],
+        exclude: [],
+        guideListComponent: '@theme/CookbookListPage',
+        guidePostComponent: '@theme/CookbookPage',
+      },
+    ],
   ],
 };
 

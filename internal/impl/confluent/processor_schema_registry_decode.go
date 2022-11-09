@@ -17,12 +17,13 @@ import (
 
 	"github.com/linkedin/goavro/v2"
 
+	"github.com/benthosdev/benthos/v4/internal/httpclient"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 	"github.com/benthosdev/benthos/v4/public/service"
 )
 
 func schemaRegistryDecoderConfig() *service.ConfigSpec {
-	return service.NewConfigSpec().
+	spec := service.NewConfigSpec().
 		// Stable(). TODO
 		Categories("Parsing", "Integration").
 		Summary("Automatically decodes and validates messages with schemas from a Confluent Schema Registry service.").
@@ -33,7 +34,7 @@ Currently only Avro schemas are supported.
 
 ### Avro JSON Format
 
-This processor creates documents formatted as [Avro JSON](https://avro.apache.org/docs/current/spec.html#json_encoding) when decoding Avro schemas. In this format the value of a union is encoded in JSON as follows:
+This processor creates documents formatted as [Avro JSON](https://avro.apache.org/docs/current/specification/_print/#json-encoding) when decoding with Avro schemas. In this format the value of a union is encoded in JSON as follows:
 
 - if its type is ` + "`null`, then it is encoded as a JSON `null`" + `;
 - otherwise it is encoded as a JSON object with one name/value pair whose name is the type's name and whose value is the recursively encoded value. For Avro's named types (record, fixed or enum) the user-specified name is used, for other types the type name is used.
@@ -42,21 +43,27 @@ For example, the union schema ` + "`[\"null\",\"string\",\"Foo\"]`, where `Foo`"
 
 - ` + "`null` as `null`" + `;
 - the string ` + "`\"a\"` as `{\"string\": \"a\"}`" + `; and
-- a ` + "`Foo` instance as `{\"Foo\": {...}}`, where `{...}` indicates the JSON encoding of a `Foo`" + ` instance.`).
-		// Field(service.NewBoolField("avro_raw_json").
-		// 	Description("Whether Avro messages should be decoded into raw JSON documents rather than [Avro JSON](https://avro.apache.org/docs/current/spec.html#json_encoding). Avro JSON contains namespaced objects for any typed or non-nil union values, e.g. a union `[\"null\",\"string\"]` field with a string value would be represented as `{\"string\":\"foo\"}`.").
-		// 	Advanced().Default(false)).
-		Field(service.NewStringField("url").Description("The base URL of the schema registry service.")).
-		Field(service.NewTLSField("tls"))
+- a ` + "`Foo` instance as `{\"Foo\": {...}}`, where `{...}` indicates the JSON encoding of a `Foo`" + ` instance.
+
+However, it is possible to instead create documents in [standard/raw JSON format](https://pkg.go.dev/github.com/linkedin/goavro/v2#NewCodecForStandardJSONFull) by setting the field ` + "[`avro_raw_json`](#avro_raw_json) to `true`" + `.`).
+		Field(service.NewBoolField("avro_raw_json").
+			Description("Whether Avro messages should be decoded into normal JSON (\"json that meets the expectations of regular internet json\") rather than [Avro JSON](https://avro.apache.org/docs/current/specification/_print/#json-encoding). If `true` the schema returned from the subject should be decoded as [standard json](https://pkg.go.dev/github.com/linkedin/goavro/v2#NewCodecForStandardJSONFull) instead of as [avro json](https://pkg.go.dev/github.com/linkedin/goavro/v2#NewCodec). There is a [comment in goavro](https://github.com/linkedin/goavro/blob/5ec5a5ee7ec82e16e6e2b438d610e1cab2588393/union.go#L224-L249), the [underlining library used for avro serialization](https://github.com/linkedin/goavro), that explains in more detail the difference between the standard json and avro json.").
+			Advanced().Default(false)).
+		Field(service.NewStringField("url").Description("The base URL of the schema registry service."))
+
+	for _, f := range httpclient.AuthFields() {
+		spec = spec.Field(f.Version("4.7.0"))
+	}
+
+	return spec.Field(service.NewTLSField("tls"))
 }
 
 func init() {
 	err := service.RegisterProcessor(
 		"schema_registry_decode", schemaRegistryDecoderConfig(),
 		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
-			return newSchemaRegistryDecoderFromConfig(conf, mgr.Logger())
+			return newSchemaRegistryDecoderFromConfig(conf, mgr)
 		})
-
 	if err != nil {
 		panic(err)
 	}
@@ -69,16 +76,18 @@ type schemaRegistryDecoder struct {
 	avroRawJSON bool
 
 	schemaRegistryBaseURL *url.URL
+	requestSigner         httpclient.RequestSigner
 
 	schemas    map[int]*cachedSchemaDecoder
 	cacheMut   sync.RWMutex
 	requestMut sync.Mutex
 	shutSig    *shutdown.Signaller
 
+	mgr    *service.Resources
 	logger *service.Logger
 }
 
-func newSchemaRegistryDecoderFromConfig(conf *service.ParsedConfig, logger *service.Logger) (*schemaRegistryDecoder, error) {
+func newSchemaRegistryDecoderFromConfig(conf *service.ParsedConfig, mgr *service.Resources) (*schemaRegistryDecoder, error) {
 	urlStr, err := conf.FieldString("url")
 	if err != nil {
 		return nil, err
@@ -87,10 +96,24 @@ func newSchemaRegistryDecoderFromConfig(conf *service.ParsedConfig, logger *serv
 	if err != nil {
 		return nil, err
 	}
-	return newSchemaRegistryDecoder(urlStr, tlsConf, true, logger)
+	authSigner, err := httpclient.AuthSignerFromParsed(conf)
+	if err != nil {
+		return nil, err
+	}
+	avroRawJSON, err := conf.FieldBool("avro_raw_json")
+	if err != nil {
+		return nil, err
+	}
+	return newSchemaRegistryDecoder(urlStr, authSigner, tlsConf, avroRawJSON, mgr)
 }
 
-func newSchemaRegistryDecoder(urlStr string, tlsConf *tls.Config, avroRawJSON bool, logger *service.Logger) (*schemaRegistryDecoder, error) {
+func newSchemaRegistryDecoder(
+	urlStr string,
+	reqSigner httpclient.RequestSigner,
+	tlsConf *tls.Config,
+	avroRawJSON bool,
+	mgr *service.Resources,
+) (*schemaRegistryDecoder, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse url: %w", err)
@@ -99,9 +122,11 @@ func newSchemaRegistryDecoder(urlStr string, tlsConf *tls.Config, avroRawJSON bo
 	s := &schemaRegistryDecoder{
 		avroRawJSON:           avroRawJSON,
 		schemaRegistryBaseURL: u,
+		requestSigner:         reqSigner,
 		schemas:               map[int]*cachedSchemaDecoder{},
 		shutSig:               shutdown.NewSignaller(),
-		logger:                logger,
+		logger:                mgr.Logger(),
+		mgr:                   mgr,
 	}
 
 	s.client = http.DefaultClient
@@ -147,13 +172,12 @@ func (s *schemaRegistryDecoder) Process(ctx context.Context, msg *service.Messag
 		return nil, err
 	}
 
-	newMsg := msg.Copy()
-	newMsg.SetBytes(remaining)
-	if err := decoder(newMsg); err != nil {
+	msg.SetBytes(remaining)
+	if err := decoder(msg); err != nil {
 		return nil, err
 	}
 
-	return service.MessageBatch{newMsg}, nil
+	return service.MessageBatch{msg}, nil
 }
 
 func (s *schemaRegistryDecoder) Close(ctx context.Context) error {
@@ -254,6 +278,9 @@ func (s *schemaRegistryDecoder) getDecoder(id int) (schemaDecoder, error) {
 		return nil, err
 	}
 	req.Header.Add("Accept", "application/vnd.schemaregistry.v1+json")
+	if err := s.requestSigner(s.mgr.FS(), req); err != nil {
+		return nil, err
+	}
 
 	var resBytes []byte
 	for i := 0; i < 3; i++ {
@@ -304,9 +331,16 @@ func (s *schemaRegistryDecoder) getDecoder(id int) (schemaDecoder, error) {
 	}
 
 	var codec *goavro.Codec
-	if codec, err = goavro.NewCodecForStandardJSON(resPayload.Schema); err != nil {
-		s.logger.Errorf("failed to parse response for schema '%v': %v", id, err)
-		return nil, err
+	if s.avroRawJSON {
+		if codec, err = goavro.NewCodecForStandardJSONFull(resPayload.Schema); err != nil {
+			s.logger.Errorf("failed to parse response for schema subject '%v': %v", id, err)
+			return nil, err
+		}
+	} else {
+		if codec, err = goavro.NewCodec(resPayload.Schema); err != nil {
+			s.logger.Errorf("failed to parse response for schema subject '%v': %v", id, err)
+			return nil, err
+		}
 	}
 
 	decoder := func(m *service.Message) error {
@@ -320,17 +354,12 @@ func (s *schemaRegistryDecoder) getDecoder(id int) (schemaDecoder, error) {
 			return err
 		}
 
-		if s.avroRawJSON {
-			// TODO: This still encodes with Avro JSON format, needs
-			// investigation as to whether this is possible.
-			jb, err := codec.TextualFromNative(nil, native)
-			if err != nil {
-				return err
-			}
-			m.SetBytes(jb)
-		} else {
-			m.SetStructured(native)
+		jb, err := codec.TextualFromNative(nil, native)
+		if err != nil {
+			return err
 		}
+		m.SetBytes(jb)
+
 		return nil
 	}
 

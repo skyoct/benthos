@@ -8,8 +8,9 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"gopkg.in/yaml.v3"
 
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/config"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/serverless"
 )
 
@@ -56,8 +57,8 @@ func Run() {
 	} else {
 		// Iterate default config paths
 		for _, path := range defaultPaths {
-			if _, err := os.Stat(path); err == nil {
-				if _, err = config.ReadFileLinted(path, false, &conf); err != nil {
+			if _, err := ifs.OS().Stat(path); err == nil {
+				if _, err = config.ReadFileLinted(path, config.LintOptions{}, &conf); err != nil {
 					fmt.Fprintf(os.Stderr, "Configuration file read error: %v\n", err)
 					os.Exit(1)
 				}

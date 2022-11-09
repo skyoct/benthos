@@ -3,9 +3,14 @@ package gcp
 import (
 	"context"
 	"encoding/json"
+	"testing"
 
+	"cloud.google.com/go/bigquery"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/api/iterator"
+
+	"github.com/benthosdev/benthos/v4/public/service"
 )
 
 type mockBQIterator struct {
@@ -18,7 +23,7 @@ type mockBQIterator struct {
 	errIdx int
 }
 
-func (ti *mockBQIterator) Next(dst interface{}) error {
+func (ti *mockBQIterator) Next(dst any) error {
 	if ti.err != nil && ti.idx == ti.errIdx {
 		return ti.err
 	}
@@ -51,4 +56,40 @@ func (client *mockBQClient) RunQuery(ctx context.Context, options *bqQueryBuilde
 
 func (client *mockBQClient) Close() error {
 	return nil
+}
+
+func TestParseQueryPriority(t *testing.T) {
+	spec := service.NewConfigSpec().Field(service.NewStringField("foo").Default(""))
+
+	conf, err := spec.ParseYAML(`foo: batch`, nil)
+	require.NoError(t, err)
+	priority, err := parseQueryPriority(conf, "foo")
+	require.NoError(t, err)
+	require.Equal(t, priority, bigquery.BatchPriority)
+
+	conf, err = spec.ParseYAML(`foo: interactive`, nil)
+	require.NoError(t, err)
+	priority, err = parseQueryPriority(conf, "foo")
+	require.NoError(t, err)
+	require.Equal(t, priority, bigquery.InteractivePriority)
+}
+
+func TestParseQueryPriority_Empty(t *testing.T) {
+	spec := service.NewConfigSpec().Field(service.NewStringField("foo").Default(""))
+
+	conf, err := spec.ParseYAML("", nil)
+	require.NoError(t, err)
+	priority, err := parseQueryPriority(conf, "foo")
+	require.NoError(t, err)
+	require.Equal(t, priority, bigquery.QueryPriority(""))
+}
+
+func TestParseQueryPriority_Unrecognised(t *testing.T) {
+	spec := service.NewConfigSpec().Field(service.NewStringField("foo").Default(""))
+
+	conf, err := spec.ParseYAML("foo: blahblah", nil)
+	require.NoError(t, err)
+	priority, err := parseQueryPriority(conf, "foo")
+	require.ErrorContains(t, err, "unrecognised query priority")
+	require.Equal(t, priority, bigquery.QueryPriority(""))
 }

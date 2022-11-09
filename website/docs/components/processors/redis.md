@@ -15,11 +15,8 @@ categories: ["Integration"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-
-Performs actions against Redis that aren't possible using a
-[`cache`](/docs/components/processors/cache) processor. Actions are
-performed for each message of a batch, where the contents are replaced with the
-result.
+Performs actions against Redis that aren't possible using a [`cache`](/docs/components/processors/cache) processor. Actions are
+performed for each message and the message contents are replaced with the result. In order to merge the result into the original message compose this processor within a [`branch` processor](/docs/components/processors/branch).
 
 
 <Tabs defaultValue="common" values={[
@@ -34,8 +31,8 @@ result.
 label: ""
 redis:
   url: ""
-  operator: ""
-  key: ""
+  command: ""
+  args_mapping: ""
 ```
 
 </TabItem>
@@ -55,34 +52,14 @@ redis:
     root_cas: ""
     root_cas_file: ""
     client_certs: []
-  operator: ""
-  key: ""
+  command: ""
+  args_mapping: ""
   retries: 3
   retry_period: 500ms
 ```
 
 </TabItem>
 </Tabs>
-
-## Operators
-
-### `keys`
-
-Returns an array of strings containing all the keys that match the pattern specified by the `key` field.
-
-### `scard`
-
-Returns the cardinality of a set, or `0` if the key does not exist.
-
-### `sadd`
-
-Adds a new member to a set. Returns `1` if the member was added.
-
-### `incrby`
-
-Increments the number stored at `key` by the message content. If the
-key does not exist, it is set to `0` before performing the operation.
-Returns the value of `key` after the increment.
 
 ## Examples
 
@@ -93,11 +70,7 @@ Returns the value of `key` after the increment.
 
 <TabItem value="Querying Cardinality">
 
-
-If given payloads containing a metadata field `set_key` it's possible
-to query and store the cardinality of the set for each message using a
-[`branch` processor](/docs/components/processors/branch) in order to
-augment rather than replace the message contents:
+If given payloads containing a metadata field `set_key` it's possible to query and store the cardinality of the set for each message using a [`branch` processor](/docs/components/processors/branch) in order to augment rather than replace the message contents:
 
 ```yaml
 pipeline:
@@ -106,14 +79,13 @@ pipeline:
         processors:
           - redis:
               url: TODO
-              operator: scard
-              key: ${! meta("set_key") }
+              command: scard
+              args_mapping: 'root = [ meta("set_key") ]'
         result_map: 'root.cardinality = this'
 ```
 
 </TabItem>
 <TabItem value="Running Total">
-
 
 If we have JSON data containing number of friends visited during covid 19:
 
@@ -133,21 +105,17 @@ We can add a field that contains the running total number of friends visited:
 {"name":"bob","month":"apr","year":2019,"friends_visited":1,"total":4}
 ```
 
-Using the `incrby` operator:
-                
+Using the `incrby` command:
 
 ```yaml
 pipeline:
   processors:
     - branch:
-        request_map: |
-            root = this.friends_visited
-            meta name = this.name
         processors:
           - redis:
               url: TODO
-              operator: incrby
-              key: ${! meta("name") }
+              command: incrby
+              args_mapping: 'root = [ this.name, this.friends_visited ]'
         result_map: 'root.total = this'
 ```
 
@@ -158,11 +126,10 @@ pipeline:
 
 ### `url`
 
-The URL of the target Redis server. Database is optional and is supplied as the URL path. The scheme `tcp` is equivalent to `redis`.
+The URL of the target Redis server. Database is optional and is supplied as the URL path.
 
 
 Type: `string`  
-Default: `""`  
 
 ```yml
 # Examples
@@ -187,16 +154,7 @@ Specifies a simple, cluster-aware, or failover-aware redis client.
 
 Type: `string`  
 Default: `"simple"`  
-
-```yml
-# Examples
-
-kind: simple
-
-kind: cluster
-
-kind: failover
-```
+Options: `simple`, `cluster`, `failover`.
 
 ### `master`
 
@@ -251,6 +209,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -309,6 +270,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -316,7 +280,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -330,23 +294,59 @@ The path of a certificate key to use.
 Type: `string`  
 Default: `""`  
 
-### `operator`
+### `tls.client_certs[].password`
 
-The [operator](#operators) to apply.
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
 Default: `""`  
-Options: `scard`, `sadd`, `incrby`, `keys`.
 
-### `key`
+```yml
+# Examples
 
-A key to use for the target operator.
+password: foo
+
+password: ${KEY_PASSWORD}
+```
+
+### `command`
+
+The command to execute.
 This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
 
 
 Type: `string`  
-Default: `""`  
+Requires version 4.3.0 or newer  
+
+```yml
+# Examples
+
+command: scard
+
+command: incrby
+
+command: ${! meta("command") }
+```
+
+### `args_mapping`
+
+A [Bloblang mapping](/docs/guides/bloblang/about) which should evaluate to an array of values matching in size to the number of arguments required for the specified Redis command.
+
+
+Type: `string`  
+Requires version 4.3.0 or newer  
+
+```yml
+# Examples
+
+args_mapping: root = [ this.key ]
+
+args_mapping: root = [ meta("kafka_key"), this.count ]
+```
 
 ### `retries`
 

@@ -35,7 +35,7 @@ func sqlSelectInputConfig() *service.ConfigSpec {
 			Optional()).
 		Field(service.NewBloblangField("args_mapping").
 			Description("An optional [Bloblang mapping](/docs/guides/bloblang/about) which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `where`.").
-			Example(`root = [ "article", now().format_timestamp("2006-01-02") ]`).
+			Example(`root = [ "article", now().ts_format("2006-01-02") ]`).
 			Optional()).
 		Field(service.NewStringField("prefix").
 			Description("An optional prefix to prepend to the select query (before SELECT).").
@@ -65,7 +65,7 @@ input:
     where: created_at >= ?
     args_mapping: |
       root = [
-        now().format_timestamp_unix() - 3600
+        now().ts_unix() - 3600
       ]
 `,
 		)
@@ -76,13 +76,12 @@ func init() {
 	err := service.RegisterInput(
 		"sql_select", sqlSelectInputConfig(),
 		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
-			i, err := newSQLSelectInputFromConfig(conf, mgr.Logger())
+			i, err := newSQLSelectInputFromConfig(conf, mgr)
 			if err != nil {
 				return nil, err
 			}
 			return service.AutoRetryNacks(i), nil
 		})
-
 	if err != nil {
 		panic(err)
 	}
@@ -101,15 +100,15 @@ type sqlSelectInput struct {
 	where       string
 	argsMapping *bloblang.Executor
 
-	connSettings connSettings
+	connSettings *connSettings
 
 	logger  *service.Logger
 	shutSig *shutdown.Signaller
 }
 
-func newSQLSelectInputFromConfig(conf *service.ParsedConfig, logger *service.Logger) (*sqlSelectInput, error) {
+func newSQLSelectInputFromConfig(conf *service.ParsedConfig, mgr *service.Resources) (*sqlSelectInput, error) {
 	s := &sqlSelectInput{
-		logger:  logger,
+		logger:  mgr.Logger(),
 		shutSig: shutdown.NewSignaller(),
 	}
 
@@ -148,6 +147,8 @@ func newSQLSelectInputFromConfig(conf *service.ParsedConfig, logger *service.Log
 	s.builder = squirrel.Select(columns...).From(tableStr)
 	if s.driver == "postgres" || s.driver == "clickhouse" {
 		s.builder = s.builder.PlaceholderFormat(squirrel.Dollar)
+	} else if s.driver == "oracle" {
+		s.builder = s.builder.PlaceholderFormat(squirrel.Colon)
 	}
 
 	if conf.Contains("prefix") {
@@ -166,7 +167,7 @@ func newSQLSelectInputFromConfig(conf *service.ParsedConfig, logger *service.Log
 		s.builder = s.builder.Suffix(suffixStr)
 	}
 
-	if s.connSettings, err = connSettingsFromParsed(conf); err != nil {
+	if s.connSettings, err = connSettingsFromParsed(conf, mgr); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -190,17 +191,17 @@ func (s *sqlSelectInput) Connect(ctx context.Context) (err error) {
 		}
 	}()
 
-	s.connSettings.apply(db)
+	s.connSettings.apply(ctx, db, s.logger)
 
-	var args []interface{}
+	var args []any
 	if s.argsMapping != nil {
-		var iargs interface{}
+		var iargs any
 		if iargs, err = s.argsMapping.Query(nil); err != nil {
-			return err
+			return
 		}
 
 		var ok bool
-		if args, ok = iargs.([]interface{}); !ok {
+		if args, ok = iargs.([]any); !ok {
 			err = fmt.Errorf("mapping returned non-array result: %T", iargs)
 			return
 		}
@@ -266,7 +267,7 @@ func (s *sqlSelectInput) Read(ctx context.Context) (*service.Message, service.Ac
 	}
 
 	msg := service.NewMessage(nil)
-	msg.SetStructured(obj)
+	msg.SetStructuredMut(obj)
 	return msg, func(ctx context.Context, err error) error {
 		// Nacks are handled by AutoRetryNacks because we don't have an explicit
 		// ack mechanism right now.

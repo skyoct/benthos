@@ -15,7 +15,6 @@ categories: ["Network"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-
 Connects to a server and continuously performs requests for a single message.
 
 
@@ -33,8 +32,7 @@ input:
   http_client:
     url: ""
     verb: GET
-    headers:
-      Content-Type: application/octet-stream
+    headers: {}
     rate_limit: ""
     timeout: 5s
     payload: ""
@@ -54,8 +52,7 @@ input:
   http_client:
     url: ""
     verb: GET
-    headers:
-      Content-Type: application/octet-stream
+    headers: {}
     metadata:
       include_prefixes: []
       include_patterns: []
@@ -113,8 +110,7 @@ input:
 </TabItem>
 </Tabs>
 
-The URL and header values of this type can be dynamically set using function
-interpolations described [here](/docs/configuration/interpolation#bloblang-queries).
+The URL and header values of this type can be dynamically set using function interpolations described [here](/docs/configuration/interpolation#bloblang-queries).
 
 ### Streaming
 
@@ -139,7 +135,7 @@ input:
   http_client:
     url: >-
       https://api.example.com/search?query=allmyfoos&start_time=${! (
-        (timestamp_unix()-300).format_timestamp("2006-01-02T15:04:05Z","UTC").escape_url_query()
+        (timestamp_unix()-300).ts_format("2006-01-02T15:04:05Z","UTC").escape_url_query()
       ) }${! ("&next_token="+this.meta.next_token.not_null()) | "" }
     verb: GET
     rate_limit: foo_searches
@@ -195,13 +191,14 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 
 Type: `object`  
-Default: `{"Content-Type":"application/octet-stream"}`  
+Default: `{}`  
 
 ```yml
 # Examples
 
 headers:
   Content-Type: application/octet-stream
+  traceparent: ${! tracing_span().traceparent }
 ```
 
 ### `metadata`
@@ -277,6 +274,9 @@ Default: `""`
 ### `oauth.consumer_secret`
 
 A secret used to establish ownership of the consumer key.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -293,6 +293,9 @@ Default: `""`
 ### `oauth.access_token_secret`
 
 A secret provided in order to establish ownership of a given access token.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -324,6 +327,9 @@ Default: `""`
 ### `oauth2.client_secret`
 
 A secret used to establish ownership of the client key.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -419,6 +425,9 @@ Default: `""`
 ### `basic_auth.password`
 
 A password to authenticate with.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -459,6 +468,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -518,6 +530,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -525,7 +540,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -538,6 +553,25 @@ The path of a certificate key to use.
 
 Type: `string`  
 Default: `""`  
+
+### `tls.client_certs[].password`
+
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+password: foo
+
+password: ${KEY_PASSWORD}
+```
 
 ### `extract_headers`
 
@@ -710,6 +744,7 @@ Requires version 3.42.0 or newer
 |---|---|
 | `auto` | EXPERIMENTAL: Attempts to derive a codec for each file based on information such as the extension. For example, a .tar.gz file would be consumed with the `gzip/tar` codec. Defaults to all-bytes. |
 | `all-bytes` | Consume the entire file as a single binary message. |
+| `avro-ocf:marshaler=x` | EXPERIMENTAL: Consume a stream of Avro OCF datum. The `marshaler` parameter is optional and has the options: `goavro` (default), `json`. Use `goavro` if OCF contains logical types. |
 | `chunker:x` | Consume the file in chunks of a given number of bytes. |
 | `csv` | Consume structured rows as comma separated values, the first row must be a header row. |
 | `csv:x` | Consume structured rows as values separated by a custom delimiter, the first row must be a header row. The custom delimiter must be a single character, e.g. the codec `"csv:\t"` would consume a tab delimited file. |

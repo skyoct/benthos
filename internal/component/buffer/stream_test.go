@@ -9,8 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/message"
 )
 
@@ -23,7 +22,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	tChan := make(chan message.Transaction)
 	resChan := make(chan error)
 
-	b := NewStream("meow", newMemoryBuffer(int(total)), log.Noop(), metrics.Noop())
+	b := NewStream("meow", newMemoryBuffer(int(total)), component.NoopObservability())
 	require.NoError(t, b.Consume(tChan))
 
 	var i uint8
@@ -53,7 +52,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 		var outTr message.Transaction
 		select {
 		case outTr = <-b.TransactionChan():
-			assert.Equal(t, i, outTr.Payload.Get(0).Get()[0])
+			assert.Equal(t, i, outTr.Payload.Get(0).AsBytes()[0])
 		case <-time.After(time.Second):
 			t.Fatalf("Timed out waiting for unbuffered message %v read", i)
 		}
@@ -106,7 +105,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	// Extract last message
 	select {
 	case outTr = <-b.TransactionChan():
-		assert.Equal(t, byte(0), outTr.Payload.Get(0).Get()[0])
+		assert.Equal(t, byte(0), outTr.Payload.Get(0).AsBytes()[0])
 		require.NoError(t, outTr.Ack(tCtx, nil))
 	case <-time.After(time.Second):
 		t.Fatalf("Timed out waiting for final buffered message read")
@@ -124,7 +123,7 @@ func TestStreamMemoryBuffer(t *testing.T) {
 	for i = 1; i <= total; i++ {
 		select {
 		case outTr = <-b.TransactionChan():
-			assert.Equal(t, i, outTr.Payload.Get(0).Get()[0])
+			assert.Equal(t, i, outTr.Payload.Get(0).AsBytes()[0])
 		case <-time.After(time.Second):
 			t.Fatalf("Timed out waiting for buffered message %v read", i)
 		}
@@ -140,8 +139,8 @@ func TestStreamMemoryBuffer(t *testing.T) {
 
 	require.NoError(t, outTr.Ack(tCtx, nil))
 
-	b.CloseAsync()
-	require.NoError(t, b.WaitForClose(time.Second))
+	b.TriggerCloseNow()
+	require.NoError(t, b.WaitForClose(tCtx))
 
 	close(resChan)
 	close(tChan)
@@ -156,7 +155,7 @@ func TestStreamBufferClosing(t *testing.T) {
 	tChan := make(chan message.Transaction)
 	resChan := make(chan error)
 
-	b := NewStream("meow", newMemoryBuffer(int(total)), log.Noop(), metrics.Noop())
+	b := NewStream("meow", newMemoryBuffer(int(total)), component.NoopObservability())
 	require.NoError(t, b.Consume(tChan))
 
 	var i uint8
@@ -187,7 +186,7 @@ func TestStreamBufferClosing(t *testing.T) {
 	for i = 0; i < total; i++ {
 		select {
 		case val := <-b.TransactionChan():
-			assert.Equal(t, i, val.Payload.Get(0).Get()[0])
+			assert.Equal(t, i, val.Payload.Get(0).AsBytes()[0])
 			require.NoError(t, val.Ack(tCtx, nil))
 		case <-time.After(time.Second):
 			t.Fatalf("Timed out waiting for final buffered message read")
@@ -203,7 +202,7 @@ func TestStreamBufferClosing(t *testing.T) {
 	}
 
 	// Should already be shut down.
-	assert.NoError(t, b.WaitForClose(time.Second))
+	assert.NoError(t, b.WaitForClose(tCtx))
 }
 
 //------------------------------------------------------------------------------
@@ -212,7 +211,7 @@ type readErrorBuffer struct {
 	readErrs chan error
 }
 
-func (r *readErrorBuffer) Read(ctx context.Context) (*message.Batch, AckFunc, error) {
+func (r *readErrorBuffer) Read(ctx context.Context) (message.Batch, AckFunc, error) {
 	select {
 	case err := <-r.readErrs:
 		return nil, nil, err
@@ -223,7 +222,7 @@ func (r *readErrorBuffer) Read(ctx context.Context) (*message.Batch, AckFunc, er
 	}, nil
 }
 
-func (r *readErrorBuffer) Write(ctx context.Context, msg *message.Batch, aFn AckFunc) error {
+func (r *readErrorBuffer) Write(ctx context.Context, msg message.Batch, aFn AckFunc) error {
 	return aFn(context.Background(), nil)
 }
 
@@ -247,7 +246,7 @@ func TestStreamReadErrors(t *testing.T) {
 	errBuf.readErrs <- errors.New("first error")
 	errBuf.readErrs <- errors.New("second error")
 
-	b := NewStream("meow", errBuf, log.Noop(), metrics.Noop())
+	b := NewStream("meow", errBuf, component.NoopObservability())
 	require.NoError(t, b.Consume(tChan))
 
 	var tran message.Transaction
@@ -258,12 +257,12 @@ func TestStreamReadErrors(t *testing.T) {
 	}
 
 	require.Equal(t, 1, tran.Payload.Len())
-	assert.Equal(t, "hello world", string(tran.Payload.Get(0).Get()))
+	assert.Equal(t, "hello world", string(tran.Payload.Get(0).AsBytes()))
 
 	require.NoError(t, tran.Ack(tCtx, nil))
 
-	b.CloseAsync()
-	require.NoError(t, b.WaitForClose(time.Second))
+	b.TriggerCloseNow()
+	require.NoError(t, b.WaitForClose(tCtx))
 
 	close(resChan)
 	close(tChan)

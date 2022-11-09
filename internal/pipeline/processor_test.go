@@ -25,7 +25,7 @@ type mockMsgProcessor struct {
 	mut               sync.Mutex
 }
 
-func (m *mockMsgProcessor) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
+func (m *mockMsgProcessor) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
 	if drop := <-m.dropChan; drop {
 		return nil, errMockProc
 	}
@@ -33,20 +33,13 @@ func (m *mockMsgProcessor) ProcessMessage(msg *message.Batch) ([]*message.Batch,
 		[]byte("foo"),
 		[]byte("bar"),
 	})
-	msgs := [1]*message.Batch{newMsg}
+	msgs := [1]message.Batch{newMsg}
 	return msgs[:], nil
 }
 
-// CloseAsync shuts down the processor and stops processing requests.
-func (m *mockMsgProcessor) CloseAsync() {
+func (m *mockMsgProcessor) Close(ctx context.Context) error {
 	m.mut.Lock()
 	m.hasClosedAsync = true
-	m.mut.Unlock()
-}
-
-// WaitForClose blocks until the processor has closed down.
-func (m *mockMsgProcessor) WaitForClose(timeout time.Duration) error {
-	m.mut.Lock()
 	m.hasWaitedForClose = true
 	m.mut.Unlock()
 	return nil
@@ -155,8 +148,8 @@ func TestProcessorPipeline(t *testing.T) {
 		t.Error("Timed out")
 	}
 
-	proc.CloseAsync()
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
+	proc.TriggerCloseNow()
+	if err := proc.WaitForClose(ctx); err != nil {
 		t.Error(err)
 	}
 	if !mockProc.hasClosedAsync {
@@ -174,8 +167,8 @@ type mockMultiMsgProcessor struct {
 	mut               sync.Mutex
 }
 
-func (m *mockMultiMsgProcessor) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
-	var msgs []*message.Batch
+func (m *mockMultiMsgProcessor) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
+	var msgs []message.Batch
 	for i := 0; i < m.N; i++ {
 		newMsg := message.QuickBatch([][]byte{
 			[]byte(fmt.Sprintf("test%v", i)),
@@ -185,16 +178,9 @@ func (m *mockMultiMsgProcessor) ProcessMessage(msg *message.Batch) ([]*message.B
 	return msgs, nil
 }
 
-// CloseAsync shuts down the processor and stops processing requests.
-func (m *mockMultiMsgProcessor) CloseAsync() {
+func (m *mockMultiMsgProcessor) Close(ctx context.Context) error {
 	m.mut.Lock()
 	m.hasClosedAsync = true
-	m.mut.Unlock()
-}
-
-// WaitForClose blocks until the processor has closed down.
-func (m *mockMultiMsgProcessor) WaitForClose(timeout time.Duration) error {
-	m.mut.Lock()
 	m.hasWaitedForClose = true
 	m.mut.Unlock()
 	return nil
@@ -235,7 +221,7 @@ func TestProcessorMultiMsgs(t *testing.T) {
 			if !open {
 				t.Error("Closed early")
 			}
-			act := string(procT.Payload.Get(0).Get())
+			act := string(procT.Payload.Get(0).AsBytes())
 			if _, exists := expMsgs[act]; !exists {
 				t.Errorf("Unexpected result: %v", act)
 			} else {
@@ -268,8 +254,8 @@ func TestProcessorMultiMsgs(t *testing.T) {
 		t.Error("Timed out")
 	}
 
-	proc.CloseAsync()
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
+	proc.TriggerCloseNow()
+	if err := proc.WaitForClose(ctx); err != nil {
 		t.Error(err)
 	}
 	if !mockProc.hasClosedAsync {
@@ -314,7 +300,7 @@ func TestProcessorMultiMsgsOddSync(t *testing.T) {
 		if !open {
 			t.Error("Closed early")
 		}
-		act := string(procT.Payload.Get(0).Get())
+		act := string(procT.Payload.Get(0).AsBytes())
 		if _, exists := expMsgs[act]; !exists {
 			t.Errorf("Unexpected result: %v", act)
 		}
@@ -336,7 +322,7 @@ func TestProcessorMultiMsgsOddSync(t *testing.T) {
 			if !open {
 				t.Error("Closed early")
 			}
-			act := string(procT.Payload.Get(0).Get())
+			act := string(procT.Payload.Get(0).AsBytes())
 			if _, exists := expMsgs[act]; !exists {
 				t.Errorf("Unexpected result: %v", act)
 			} else {
@@ -363,7 +349,7 @@ func TestProcessorMultiMsgsOddSync(t *testing.T) {
 		if !open {
 			t.Error("Closed early")
 		}
-		act := string(procT.Payload.Get(0).Get())
+		act := string(procT.Payload.Get(0).AsBytes())
 		assert.Equal(t, "test0", act)
 		errResFn = procT.Ack
 	case <-time.After(time.Second):
@@ -385,8 +371,8 @@ func TestProcessorMultiMsgsOddSync(t *testing.T) {
 		t.Error("Timed out")
 	}
 
-	proc.CloseAsync()
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
+	proc.TriggerCloseNow()
+	if err := proc.WaitForClose(ctx); err != nil {
 		t.Error(err)
 	}
 	if !mockProc.hasClosedAsync {

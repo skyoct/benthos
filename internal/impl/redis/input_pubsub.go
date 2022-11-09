@@ -3,27 +3,21 @@ package redis
 import (
 	"context"
 	"sync"
-	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/redis/old"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		return newRedisPubSubInput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllInputs.Add(processors.WrapConstructor(newRedisPubSubInput), docs.ComponentSpec{
 		Name: "redis_pubsub",
 		Summary: `
 Consume from a Redis publish/subscribe channel using either the SUBSCRIBE or
@@ -42,7 +36,7 @@ verbatim.`,
 		Config: docs.FieldComponent().WithChildren(old.ConfigDocs()...).WithChildren(
 			docs.FieldString("channels", "A list of channels to consume from.").Array(),
 			docs.FieldBool("use_patterns", "Whether to use the PSUBSCRIBE command."),
-		).ChildDefaultAndTypesFromStruct(oinput.NewRedisPubSubConfig()),
+		).ChildDefaultAndTypesFromStruct(input.NewRedisPubSubConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -52,12 +46,12 @@ verbatim.`,
 	}
 }
 
-func newRedisPubSubInput(conf oinput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (input.Streamed, error) {
-	r, err := newRedisPubSubReader(conf.RedisPubSub, log)
+func newRedisPubSubInput(conf input.Config, mgr bundle.NewManagement) (input.Streamed, error) {
+	r, err := newRedisPubSubReader(conf.RedisPubSub, mgr)
 	if err != nil {
 		return nil, err
 	}
-	return oinput.NewAsyncReader("redis_pubsub", true, reader.NewAsyncPreserver(r), log, stats)
+	return input.NewAsyncReader("redis_pubsub", true, input.NewAsyncPreserver(r), mgr)
 }
 
 type redisPubSubReader struct {
@@ -65,18 +59,20 @@ type redisPubSubReader struct {
 	pubsub *redis.PubSub
 	cMut   sync.Mutex
 
-	conf oinput.RedisPubSubConfig
+	conf input.RedisPubSubConfig
 
+	mgr bundle.NewManagement
 	log log.Modular
 }
 
-func newRedisPubSubReader(conf oinput.RedisPubSubConfig, log log.Modular) (*redisPubSubReader, error) {
+func newRedisPubSubReader(conf input.RedisPubSubConfig, mgr bundle.NewManagement) (*redisPubSubReader, error) {
 	r := &redisPubSubReader{
 		conf: conf,
-		log:  log,
+		mgr:  mgr,
+		log:  mgr.Logger(),
 	}
 
-	_, err := clientFromConfig(r.conf.Config)
+	_, err := clientFromConfig(mgr.FS(), r.conf.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +80,7 @@ func newRedisPubSubReader(conf oinput.RedisPubSubConfig, log log.Modular) (*redi
 	return r, nil
 }
 
-func (r *redisPubSubReader) ConnectWithContext(ctx context.Context) error {
+func (r *redisPubSubReader) Connect(ctx context.Context) error {
 	r.cMut.Lock()
 	defer r.cMut.Unlock()
 
@@ -92,11 +88,11 @@ func (r *redisPubSubReader) ConnectWithContext(ctx context.Context) error {
 		return nil
 	}
 
-	client, err := clientFromConfig(r.conf.Config)
+	client, err := clientFromConfig(r.mgr.FS(), r.conf.Config)
 	if err != nil {
 		return err
 	}
-	if _, err := client.Ping().Result(); err != nil {
+	if _, err := client.Ping(ctx).Result(); err != nil {
 		return err
 	}
 
@@ -104,14 +100,14 @@ func (r *redisPubSubReader) ConnectWithContext(ctx context.Context) error {
 
 	r.client = client
 	if r.conf.UsePatterns {
-		r.pubsub = r.client.PSubscribe(r.conf.Channels...)
+		r.pubsub = r.client.PSubscribe(ctx, r.conf.Channels...)
 	} else {
-		r.pubsub = r.client.Subscribe(r.conf.Channels...)
+		r.pubsub = r.client.Subscribe(ctx, r.conf.Channels...)
 	}
 	return nil
 }
 
-func (r *redisPubSubReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (r *redisPubSubReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	var pubsub *redis.PubSub
 
 	r.cMut.Lock()
@@ -153,10 +149,7 @@ func (r *redisPubSubReader) disconnect() error {
 	return err
 }
 
-func (r *redisPubSubReader) CloseAsync() {
-	_ = r.disconnect()
-}
-
-func (r *redisPubSubReader) WaitForClose(timeout time.Duration) error {
-	return nil
+func (r *redisPubSubReader) Close(ctx context.Context) (err error) {
+	err = r.disconnect()
+	return
 }

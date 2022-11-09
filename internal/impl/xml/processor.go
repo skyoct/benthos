@@ -7,19 +7,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newXML(conf.XML, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("xml", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("xml", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name:   "xml",
 		Status: docs.StatusBeta,
@@ -108,7 +106,7 @@ type xmlProc struct {
 	cast bool
 }
 
-func newXML(conf oprocessor.XMLConfig, mgr interop.Manager) (*xmlProc, error) {
+func newXML(conf processor.XMLConfig, mgr bundle.NewManagement) (*xmlProc, error) {
 	if conf.Operator != "to_json" {
 		return nil, fmt.Errorf("operator not recognised: %v", conf.Operator)
 	}
@@ -120,14 +118,13 @@ func newXML(conf oprocessor.XMLConfig, mgr interop.Manager) (*xmlProc, error) {
 }
 
 func (p *xmlProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	newPart := msg.Copy()
-	root, err := ToMap(newPart.Get(), p.cast)
+	root, err := ToMap(msg.AsBytes(), p.cast)
 	if err != nil {
 		p.log.Debugf("Failed to parse part as XML: %v", err)
 		return nil, err
 	}
-	newPart.SetJSON(root)
-	return []*message.Part{newPart}, nil
+	msg.SetStructuredMut(root)
+	return []*message.Part{msg}, nil
 }
 
 func (p *xmlProc) Close(ctx context.Context) error {

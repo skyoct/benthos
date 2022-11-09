@@ -14,17 +14,17 @@ import (
 func TestFunctions(t *testing.T) {
 	type easyMsg struct {
 		content string
-		meta    map[string]string
+		meta    map[string]any
 	}
 
-	mustFunc := func(name string, args ...interface{}) Function {
+	mustFunc := func(name string, args ...any) Function {
 		t.Helper()
 		fn, err := InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
 
-	mustMethod := func(fn Function, name string, args ...interface{}) Function {
+	mustMethod := func(fn Function, name string, args ...any) Function {
 		t.Helper()
 		fn, err := InitMethodHelper(name, fn, args...)
 		require.NoError(t, err)
@@ -33,10 +33,10 @@ func TestFunctions(t *testing.T) {
 
 	tests := map[string]struct {
 		input    Function
-		output   interface{}
+		output   any
 		err      string
 		messages []easyMsg
-		vars     map[string]interface{}
+		vars     map[string]any
 		index    int
 	}{
 		"check throw function 1": {
@@ -56,7 +56,7 @@ func TestFunctions(t *testing.T) {
 				"uppercase",
 			),
 			output: "FOOBAR",
-			vars: map[string]interface{}{
+			vars: map[string]any{
 				"foo": "foobar",
 			},
 		},
@@ -69,36 +69,36 @@ func TestFunctions(t *testing.T) {
 				"uppercase",
 			),
 			output: "FOOBAR",
-			vars: map[string]interface{}{
-				"foo": map[string]interface{}{
+			vars: map[string]any{
+				"foo": map[string]any{
 					"bar": "foobar",
 				},
 			},
 		},
 		"check var function error": {
 			input: mustFunc("var", "foo"),
-			vars:  map[string]interface{}{},
+			vars:  map[string]any{},
 			err:   `variable 'foo' undefined`,
 		},
 		"check meta function object": {
 			input:  mustFunc("meta", "foo"),
 			output: "foobar",
 			messages: []easyMsg{
-				{content: "", meta: map[string]string{
+				{content: "", meta: map[string]any{
 					"foo": "foobar",
 				}},
 			},
 		},
 		"check meta function error": {
 			input:  mustFunc("meta", "foo"),
-			vars:   map[string]interface{}{},
+			vars:   map[string]any{},
 			output: nil,
 		},
 		"check metadata function object": {
 			input:  mustFunc("meta", "foo"),
 			output: "foobar",
 			messages: []easyMsg{
-				{content: "", meta: map[string]string{
+				{content: "", meta: map[string]any{
 					"foo": "foobar",
 				}},
 			},
@@ -107,35 +107,35 @@ func TestFunctions(t *testing.T) {
 			input:  mustFunc("meta", "foo"),
 			output: "foobar",
 			messages: []easyMsg{
-				{content: "", meta: map[string]string{
+				{content: "", meta: map[string]any{
 					"foo": "foobar",
 				}},
 			},
 		},
 		"check range start > end": {
 			input: mustFunc("range", mustFunc("var", "start"), 0, 1),
-			vars: map[string]interface{}{
+			vars: map[string]any{
 				"start": 10,
 			},
 			err: `with positive step arg start (10) must be < stop (0)`,
 		},
 		"check range start >= end": {
 			input: mustFunc("range", mustFunc("var", "start"), 10, 1),
-			vars: map[string]interface{}{
+			vars: map[string]any{
 				"start": 10,
 			},
 			err: `with positive step arg start (10) must be < stop (10)`,
 		},
 		"check range zero step": {
 			input: mustFunc("range", mustFunc("var", "start"), 100, 0),
-			vars: map[string]interface{}{
+			vars: map[string]any{
 				"start": 10,
 			},
 			err: `step must be greater than or less than 0`,
 		},
 		"check range start < end neg step": {
 			input: mustFunc("range", mustFunc("var", "start"), 100, -1),
-			vars: map[string]interface{}{
+			vars: map[string]any{
 				"start": 10,
 			},
 			err: `with negative step arg stop (100) must be <= start (10)`,
@@ -152,10 +152,10 @@ func TestFunctions(t *testing.T) {
 				part := message.NewPart([]byte(m.content))
 				if m.meta != nil {
 					for k, v := range m.meta {
-						part.MetaSet(k, v)
+						part.MetaSetMut(k, v)
 					}
 				}
-				msg.Append(part)
+				msg = append(msg, part)
 			}
 
 			for i := 0; i < 10; i++ {
@@ -176,18 +176,18 @@ func TestFunctions(t *testing.T) {
 
 			// Ensure nothing changed
 			for i, m := range test.messages {
-				doc, err := msg.Get(i).JSON()
+				doc, err := msg.Get(i).AsStructuredMut()
 				if err == nil {
-					msg.Get(i).SetJSON(doc)
+					msg.Get(i).SetStructured(doc)
 				}
-				assert.Equal(t, m.content, string(msg.Get(i).Get()))
+				assert.Equal(t, m.content, string(msg.Get(i).AsBytes()))
 			}
 		})
 	}
 }
 
 func TestFunctionTargets(t *testing.T) {
-	function := func(name string, args ...interface{}) Function {
+	function := func(name string, args ...any) Function {
 		t.Helper()
 		fn, err := InitFunctionHelper(name, args...)
 		require.NoError(t, err)

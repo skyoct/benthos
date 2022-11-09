@@ -9,20 +9,19 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		ca, err := NewCacheWriter(c.Cache, nm, nm.Logger())
 		if err != nil {
 			return nil, err
 		}
-		return ooutput.NewAsyncWriter("cache", c.Cache.MaxInFlight, ca, nm.Logger(), nm.Metrics())
+		return output.NewAsyncWriter("cache", c.Cache.MaxInFlight, ca, nm)
 	}), docs.ComponentSpec{
 		Name:    "cache",
 		Summary: `Stores each message in a [cache](/docs/components/caches/about).`,
@@ -57,7 +56,7 @@ In order to create a unique `+"`key`"+` value per item you should use function i
 				"60s", "5m", "36h",
 			).IsInterpolated().AtVersion("3.33.0").Advanced(),
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewCacheConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewCacheConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -69,8 +68,8 @@ In order to create a unique `+"`key`"+` value per item you should use function i
 
 // CacheWriter implements an output writer for caches.
 type CacheWriter struct {
-	conf ooutput.CacheConfig
-	mgr  interop.Manager
+	conf output.CacheConfig
+	mgr  bundle.NewManagement
 
 	key *field.Expression
 	ttl *field.Expression
@@ -79,7 +78,7 @@ type CacheWriter struct {
 }
 
 // NewCacheWriter creates a writer for cache the output plugin.
-func NewCacheWriter(conf ooutput.CacheConfig, mgr interop.Manager, log log.Modular) (*CacheWriter, error) {
+func NewCacheWriter(conf output.CacheConfig, mgr bundle.NewManagement, log log.Modular) (*CacheWriter, error) {
 	key, err := mgr.BloblEnvironment().NewField(conf.Key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse key expression: %v", err)
@@ -100,13 +99,13 @@ func NewCacheWriter(conf ooutput.CacheConfig, mgr interop.Manager, log log.Modul
 	}, nil
 }
 
-// ConnectWithContext does nothing.
-func (c *CacheWriter) ConnectWithContext(ctx context.Context) error {
+// Connect does nothing.
+func (c *CacheWriter) Connect(ctx context.Context) error {
 	c.log.Infof("Writing message parts as items in cache: %v\n", c.conf.Target)
 	return nil
 }
 
-func (c *CacheWriter) writeMulti(ctx context.Context, msg *message.Batch) error {
+func (c *CacheWriter) writeMulti(ctx context.Context, msg message.Batch) error {
 	var err error
 	if cerr := c.mgr.AccessCache(ctx, c.conf.Target, func(ac cache.V1) {
 		items := map[string]cache.TTLItem{}
@@ -121,7 +120,7 @@ func (c *CacheWriter) writeMulti(ctx context.Context, msg *message.Batch) error 
 				ttl = &t
 			}
 			items[c.key.String(i, msg)] = cache.TTLItem{
-				Value: p.Get(),
+				Value: p.AsBytes(),
 				TTL:   ttl,
 			}
 			return nil
@@ -135,8 +134,8 @@ func (c *CacheWriter) writeMulti(ctx context.Context, msg *message.Batch) error 
 	return err
 }
 
-// WriteWithContext attempts to store a message within a cache.
-func (c *CacheWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+// WriteBatch attempts to store a message within a cache.
+func (c *CacheWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	if msg.Len() > 1 {
 		return c.writeMulti(ctx, msg)
 	}
@@ -152,18 +151,14 @@ func (c *CacheWriter) WriteWithContext(ctx context.Context, msg *message.Batch) 
 			}
 			ttl = &t
 		}
-		err = cache.Set(ctx, c.key.String(0, msg), msg.Get(0).Get(), ttl)
+		err = cache.Set(ctx, c.key.String(0, msg), msg.Get(0).AsBytes(), ttl)
 	}); cerr != nil {
 		err = cerr
 	}
 	return err
 }
 
-// CloseAsync does nothing.
-func (c *CacheWriter) CloseAsync() {
-}
-
-// WaitForClose does nothing.
-func (c *CacheWriter) WaitForClose(time.Duration) error {
+// Close does nothing.
+func (c *CacheWriter) Close(context.Context) error {
 	return nil
 }

@@ -12,16 +12,15 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(conf ooutput.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
 		return retryOutputFromConfig(conf.Retry, mgr)
 	}), docs.ComponentSpec{
 		Name: "retry",
@@ -44,8 +43,8 @@ use the ` + "[`fallback`](/docs/components/outputs/fallback)" + ` output type.`,
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldInt("max_retries", "The maximum number of retries before giving up on the request. If set to zero there is no discrete limit.").HasDefault(0).Advanced(),
 			docs.FieldObject("backoff", "Control time intervals between retry attempts.").WithChildren(
-				docs.FieldString("initial_interval", "The initial period to wait between retry attempts.").HasDefault("100ms"),
-				docs.FieldString("max_interval", "The maximum period to wait between retry attempts.").HasDefault("1s"),
+				docs.FieldString("initial_interval", "The initial period to wait between retry attempts.").HasDefault("500ms"),
+				docs.FieldString("max_interval", "The maximum period to wait between retry attempts.").HasDefault("3s"),
 				docs.FieldString("max_elapsed_time", "The maximum period to wait before retry attempts are abandoned. If zero then no limit is used.").HasDefault("0s"),
 			).Advanced(),
 			docs.FieldOutput("output", "A child output."),
@@ -64,16 +63,16 @@ use the ` + "[`fallback`](/docs/components/outputs/fallback)" + ` output type.`,
 // RetryOutputIndefinitely returns a wrapped variant of the provided output
 // where send errors downstream are automatically caught and retried rather than
 // propagated upstream as nacks.
-func RetryOutputIndefinitely(mgr interop.Manager, wrapped output.Streamed) (output.Streamed, error) {
+func RetryOutputIndefinitely(mgr bundle.NewManagement, wrapped output.Streamed) (output.Streamed, error) {
 	return newIndefiniteRetry(mgr, nil, wrapped)
 }
 
-func retryOutputFromConfig(conf ooutput.RetryConfig, mgr interop.Manager) (output.Streamed, error) {
+func retryOutputFromConfig(conf output.RetryConfig, mgr bundle.NewManagement) (output.Streamed, error) {
 	if conf.Output == nil {
 		return nil, errors.New("cannot create retry output without a child")
 	}
 
-	wrapped, err := ooutput.New(*conf.Output, mgr, mgr.Logger(), mgr.Metrics())
+	wrapped, err := mgr.NewOutput(*conf.Output)
 	if err != nil {
 		return nil, err
 	}
@@ -86,9 +85,9 @@ func retryOutputFromConfig(conf ooutput.RetryConfig, mgr interop.Manager) (outpu
 	return newIndefiniteRetry(mgr, boffCtor, wrapped)
 }
 
-func newIndefiniteRetry(mgr interop.Manager, backoffCtor func() backoff.BackOff, wrapped output.Streamed) (*indefiniteRetry, error) {
+func newIndefiniteRetry(mgr bundle.NewManagement, backoffCtor func() backoff.BackOff, wrapped output.Streamed) (*indefiniteRetry, error) {
 	if backoffCtor == nil {
-		tmpConf := ooutput.NewRetryConfig()
+		tmpConf := output.NewRetryConfig()
 		var err error
 		if backoffCtor, err = tmpConf.GetCtor(); err != nil {
 			return nil, err
@@ -124,13 +123,13 @@ func (r *indefiniteRetry) loop() {
 	defer func() {
 		wg.Wait()
 		close(r.transactionsOut)
-		r.wrapped.CloseAsync()
-		_ = r.wrapped.WaitForClose(shutdown.MaximumShutdownWait())
+		r.wrapped.TriggerCloseNow()
+		_ = r.wrapped.WaitForClose(context.Background())
 		r.shutSig.ShutdownComplete()
 	}()
 
-	ctx, done := r.shutSig.CloseAtLeisureCtx(context.Background())
-	defer done()
+	cnCtx, cnDone := r.shutSig.CloseNowCtx(context.Background())
+	defer cnDone()
 
 	errInterruptChan := make(chan struct{})
 	var errLooped int64
@@ -143,7 +142,7 @@ func (r *indefiniteRetry) loop() {
 			case <-errInterruptChan:
 			case <-time.After(time.Millisecond * 100):
 				// Just incase an interrupt doesn't arrive.
-			case <-r.shutSig.CloseAtLeisureChan():
+			case <-r.shutSig.CloseNowChan():
 				return
 			}
 		}
@@ -155,14 +154,14 @@ func (r *indefiniteRetry) loop() {
 			if !open {
 				return
 			}
-		case <-r.shutSig.CloseAtLeisureChan():
+		case <-r.shutSig.CloseNowChan():
 			return
 		}
 
 		rChan := make(chan error)
 		select {
-		case r.transactionsOut <- message.NewTransaction(tran.Payload, rChan):
-		case <-r.shutSig.CloseAtLeisureChan():
+		case r.transactionsOut <- message.NewTransaction(tran.Payload.ShallowCopy(), rChan):
+		case <-r.shutSig.CloseNowChan():
 			return
 		}
 
@@ -186,11 +185,11 @@ func (r *indefiniteRetry) loop() {
 				}
 			}()
 
-			for !r.shutSig.ShouldCloseAtLeisure() {
+			for !r.shutSig.ShouldCloseNow() {
 				var res error
 				select {
 				case res = <-resChan:
-				case <-r.shutSig.CloseAtLeisureChan():
+				case <-r.shutSig.CloseNowChan():
 					return
 				}
 
@@ -214,13 +213,13 @@ func (r *indefiniteRetry) loop() {
 					}
 					select {
 					case <-time.After(nextBackoff):
-					case <-r.shutSig.CloseAtLeisureChan():
+					case <-r.shutSig.CloseNowChan():
 						return
 					}
 
 					select {
-					case r.transactionsOut <- message.NewTransaction(ts.Payload, resChan):
-					case <-r.shutSig.CloseAtLeisureChan():
+					case r.transactionsOut <- message.NewTransaction(ts.Payload.ShallowCopy(), resChan):
+					case <-r.shutSig.CloseNowChan():
 						return
 					}
 				} else {
@@ -229,7 +228,7 @@ func (r *indefiniteRetry) loop() {
 				}
 			}
 
-			if err := ts.Ack(ctx, resOut); err != nil && ctx.Err() != nil {
+			if err := ts.Ack(cnCtx, resOut); err != nil && cnCtx.Err() != nil {
 				return
 			}
 		}(tran, rChan)
@@ -256,16 +255,16 @@ func (r *indefiniteRetry) Connected() bool {
 }
 
 // CloseAsync shuts down the Retry input and stops processing requests.
-func (r *indefiniteRetry) CloseAsync() {
-	r.shutSig.CloseAtLeisure()
+func (r *indefiniteRetry) TriggerCloseNow() {
+	r.shutSig.CloseNow()
 }
 
 // WaitForClose blocks until the Retry input has closed down.
-func (r *indefiniteRetry) WaitForClose(timeout time.Duration) error {
+func (r *indefiniteRetry) WaitForClose(ctx context.Context) error {
 	select {
 	case <-r.shutSig.HasClosedChan():
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }

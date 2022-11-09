@@ -12,6 +12,7 @@ import (
 	"github.com/Shopify/sarama"
 
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
+	"github.com/benthosdev/benthos/v4/internal/batch/policy/batchconfig"
 	"github.com/benthosdev/benthos/v4/internal/message"
 )
 
@@ -37,16 +38,16 @@ func (k *kafkaReader) runPartitionConsumer(
 	batchPolicy, err := policy.New(k.conf.Batching, k.mgr.IntoPath("kafka", "batching"))
 	if err != nil {
 		k.log.Errorf("Failed to initialise batch policy: %v, falling back to no policy.\n", err)
-		conf := policy.NewConfig()
+		conf := batchconfig.NewConfig()
 		conf.Count = 1
 		if batchPolicy, err = policy.New(conf, k.mgr.IntoPath("kafka", "batching")); err != nil {
 			panic(err)
 		}
 	}
-	defer batchPolicy.CloseAsync()
+	defer batchPolicy.Close(context.Background())
 
 	var nextTimedBatchChan <-chan time.Time
-	var flushBatch func(context.Context, chan<- asyncMessage, *message.Batch, int64) bool
+	var flushBatch func(context.Context, chan<- asyncMessage, message.Batch, int64) bool
 	if k.conf.CheckpointLimit > 1 {
 		flushBatch = k.asyncCheckpointer(topic, partition)
 	} else {
@@ -65,7 +66,7 @@ partMsgLoop:
 		select {
 		case <-nextTimedBatchChan:
 			nextTimedBatchChan = nil
-			if !flushBatch(ctx, k.msgChan, batchPolicy.Flush(), latestOffset+1) {
+			if !flushBatch(ctx, k.msgChan, batchPolicy.Flush(ctx), latestOffset+1) {
 				break partMsgLoop
 			}
 		case data, open := <-consumer.Messages():
@@ -75,11 +76,11 @@ partMsgLoop:
 			k.log.Tracef("Received message from topic %v partition %v\n", topic, partition)
 
 			latestOffset = data.Offset
-			part := dataToPart(consumer.HighWaterMarkOffset(), data)
+			part := dataToPart(consumer.HighWaterMarkOffset(), data, k.conf.MultiHeader)
 
 			if batchPolicy.Add(part) {
 				nextTimedBatchChan = nil
-				if !flushBatch(ctx, k.msgChan, batchPolicy.Flush(), latestOffset+1) {
+				if !flushBatch(ctx, k.msgChan, batchPolicy.Flush(ctx), latestOffset+1) {
 					break partMsgLoop
 				}
 			}
@@ -185,6 +186,8 @@ func (k *kafkaReader) connectExplicitTopics(ctx context.Context, config *sarama.
 		// checkpointer that uses it already does this, but it's not
 		// particularly clear, hence this comment.
 		fn: func(topic string, partition int32, offset int64, metadata string) {
+			// TODO: Since offsetVersion() returns v1 we can set leaderEpoch to 0 for now
+			// Per sarama and kafka protocol docs leaderEpoch is in v7 payload
 			offsetPutReq.AddBlock(topic, partition, offset, time.Now().Unix(), metadata)
 		},
 	}

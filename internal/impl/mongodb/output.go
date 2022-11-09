@@ -19,28 +19,27 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	ioutput "github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/mongodb/client"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
-	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c output.Config, nm bundle.NewManagement) (ioutput.Streamed, error) {
-		return NewOutput(c.MongoDB, nm, nm.Logger(), nm.Metrics())
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
+		return NewOutput(c.MongoDB, nm)
 	}), docs.ComponentSpec{
-		Name:        output.TypeMongoDB,
+		Name:        "mongodb",
 		Type:        docs.TypeOutput,
 		Status:      docs.StatusExperimental,
 		Version:     "3.43.0",
 		Categories:  []string{"Services"},
 		Summary:     `Inserts items into a MongoDB collection.`,
-		Description: ioutput.Description(true, true, ""),
+		Description: output.Description(true, true, ""),
 		Config: docs.FieldComponent().WithChildren(
 			client.ConfigDocs().Add(
 				outputOperationDocs(client.OperationUpdateOne),
@@ -76,7 +75,7 @@ func init() {
 				).HasDefault(false).AtVersion("3.60.0"),
 				docs.FieldInt(
 					"max_in_flight",
-					"The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
+					"The maximum number of parallel message batches to have in flight at any given time."),
 				policy.FieldSpec(),
 			).Merge(retries.FieldSpecs())...,
 		).ChildDefaultAndTypesFromStruct(output.NewMongoDBConfig()),
@@ -89,16 +88,16 @@ func init() {
 //------------------------------------------------------------------------------
 
 // NewOutput creates a new MongoDB output type.
-func NewOutput(conf output.MongoDBConfig, mgr bundle.NewManagement, log log.Modular, stats metrics.Type) (ioutput.Streamed, error) {
-	m, err := NewWriter(mgr, conf, log, stats)
+func NewOutput(conf output.MongoDBConfig, mgr bundle.NewManagement) (output.Streamed, error) {
+	m, err := NewWriter(mgr, conf, mgr.Logger(), mgr.Metrics())
 	if err != nil {
 		return nil, err
 	}
-	var w ioutput.Streamed
-	if w, err = output.NewAsyncWriter(output.TypeMongoDB, conf.MaxInFlight, m, log, stats); err != nil {
+	var w output.Streamed
+	if w, err = output.NewAsyncWriter("mongodb", conf.MaxInFlight, m, mgr); err != nil {
 		return w, err
 	}
-	return output.NewBatcherFromConfig(conf.Batching, w, mgr, log, stats)
+	return batcher.NewFromConfig(conf.Batching, w, mgr)
 }
 
 // NewWriter creates a new MongoDB writer.Type.
@@ -119,7 +118,6 @@ func NewWriter(
 		log:       log,
 		stats:     stats,
 		operation: operation,
-		shutSig:   shutdown.NewSignaller(),
 	}
 
 	if conf.MongoConfig.URL == "" {
@@ -171,8 +169,10 @@ func NewWriter(
 		return nil, fmt.Errorf("mongodb upsert not allowed for '%s' operation", db.operation)
 	}
 
-	if db.wcTimeout, err = time.ParseDuration(conf.WriteConcern.WTimeout); err != nil {
-		return nil, fmt.Errorf("failed to parse write concern wtimeout string: %v", err)
+	if len(conf.WriteConcern.WTimeout) > 0 {
+		if db.wcTimeout, err = time.ParseDuration(conf.WriteConcern.WTimeout); err != nil {
+			return nil, fmt.Errorf("failed to parse write concern wtimeout string: %v", err)
+		}
 	}
 	if db.collection, err = mgr.BloblEnvironment().NewField(conf.MongoConfig.Collection); err != nil {
 		return nil, fmt.Errorf("failed to parse collection expression: %v", err)
@@ -200,12 +200,10 @@ type Writer struct {
 	collection                   *field.Expression
 	database                     *mongo.Database
 	writeConcernCollectionOption *options.CollectionOptions
-
-	shutSig *shutdown.Signaller
 }
 
-// ConnectWithContext attempts to establish a connection to the target mongo DB
-func (m *Writer) ConnectWithContext(ctx context.Context) error {
+// Connect attempts to establish a connection to the target mongo DB.
+func (m *Writer) Connect(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -253,8 +251,8 @@ func (m *Writer) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-// WriteWithContext attempts to perform the designated operation to the mongo DB collection.
-func (m *Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+// WriteBatch attempts to perform the designated operation to the mongo DB collection.
+func (m *Writer) WriteBatch(ctx context.Context, msg message.Batch) error {
 	m.mu.Lock()
 	collection := m.collection
 	m.mu.Unlock()
@@ -264,7 +262,7 @@ func (m *Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error
 	}
 
 	writeModelsMap := map[*mongo.Collection][]mongo.WriteModel{}
-	err := writer.IterateBatchedSend(msg, func(i int, _ *message.Part) error {
+	err := output.IterateBatchedSend(msg, func(i int, _ *message.Part) error {
 		var err error
 		var filterVal, documentVal *message.Part
 		var upsertVal, filterValWanted, documentValWanted bool
@@ -293,16 +291,16 @@ func (m *Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error
 			return fmt.Errorf("failed to generate documentVal")
 		}
 
-		var docJSON, filterJSON, hintJSON interface{}
+		var docJSON, filterJSON, hintJSON any
 
 		if filterValWanted {
-			if filterJSON, err = filterVal.JSON(); err != nil {
+			if filterJSON, err = filterVal.AsStructured(); err != nil {
 				return err
 			}
 		}
 
 		if documentValWanted {
-			if docJSON, err = documentVal.JSON(); err != nil {
+			if docJSON, err = documentVal.AsStructured(); err != nil {
 				return err
 			}
 		}
@@ -312,7 +310,7 @@ func (m *Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error
 			if err != nil {
 				return fmt.Errorf("failed to execute hint_map: %v", err)
 			}
-			if hintJSON, err = hintVal.JSON(); err != nil {
+			if hintJSON, err = hintVal.AsStructured(); err != nil {
 				return err
 			}
 		}
@@ -382,27 +380,16 @@ func (m *Writer) WriteWithContext(ctx context.Context, msg *message.Batch) error
 	return nil
 }
 
-// CloseAsync begins cleaning up resources used by this writer asynchronously.
-func (m *Writer) CloseAsync() {
-	go func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.client != nil {
-			_ = m.client.Disconnect(context.Background())
-			m.client = nil
-		}
-		m.collection = nil
-		m.shutSig.ShutdownComplete()
-	}()
-}
+// Close begins cleaning up resources used by this writer.
+func (m *Writer) Close(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-// WaitForClose will block until either the writer is closed or a specified
-// timeout occurs.
-func (m *Writer) WaitForClose(timeout time.Duration) error {
-	select {
-	case <-m.shutSig.HasClosedChan():
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	var err error
+	if m.client != nil {
+		err = m.client.Disconnect(ctx)
+		m.client = nil
 	}
-	return nil
+	m.collection = nil
+	return err
 }

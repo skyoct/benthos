@@ -20,8 +20,8 @@ import (
 )
 
 func init() {
-	_ = bundle.AllMetrics.Add(func(c metrics.Config, l log.Modular) (metrics.Type, error) {
-		return newCloudWatch(c.AWSCloudWatch, l)
+	_ = bundle.AllMetrics.Add(func(c metrics.Config, nm bundle.NewManagement) (metrics.Type, error) {
+		return newCloudWatch(c.AWSCloudWatch, nm.Logger())
 	}, docs.ComponentSpec{
 		Name:    "aws_cloudwatch",
 		Type:    docs.TypeMetrics,
@@ -59,9 +59,11 @@ metrics:
 
 //------------------------------------------------------------------------------
 
-const maxCloudWatchMetrics = 20
-const maxCloudWatchValues = 150
-const maxCloudWatchDimensions = 10
+const (
+	maxCloudWatchMetrics    = 20
+	maxCloudWatchValues     = 150
+	maxCloudWatchDimensions = 10
+)
 
 type cloudWatchDatum struct {
 	MetricName string

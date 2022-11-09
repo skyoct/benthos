@@ -22,8 +22,16 @@ Executes a find query and creates a message for each row received.
 
 Introduced in version 3.64.0.
 
+
+<Tabs defaultValue="common" values={[
+  { label: 'Common', value: 'common', },
+  { label: 'Advanced', value: 'advanced', },
+]}>
+
+<TabItem value="common">
+
 ```yml
-# Config fields, showing default values
+# Common config fields, showing default values
 input:
   label: ""
   mongodb:
@@ -34,6 +42,27 @@ input:
     password: ""
     query: ""
 ```
+
+</TabItem>
+<TabItem value="advanced">
+
+```yml
+# All config fields, showing default values
+input:
+  label: ""
+  mongodb:
+    url: ""
+    database: ""
+    collection: ""
+    username: ""
+    password: ""
+    operation: find
+    json_marshal_mode: canonical
+    query: ""
+```
+
+</TabItem>
+</Tabs>
 
 Once the rows from the query are exhausted this input shuts down, allowing the pipeline to gracefully terminate (or the next input in a [sequence](/docs/components/inputs/sequence) to execute).
 
@@ -81,6 +110,31 @@ The password to connect to the database.
 
 Type: `string`  
 Default: `""`  
+
+### `operation`
+
+The mongodb operation to perform.
+
+
+Type: `string`  
+Default: `"find"`  
+Requires version 4.2.0 or newer  
+Options: `find`, `aggregate`.
+
+### `json_marshal_mode`
+
+The json_marshal_mode setting is optional and controls the format of the output message.
+
+
+Type: `string`  
+Default: `"canonical"`  
+Requires version 4.7.0 or newer  
+
+| Option | Summary |
+|---|---|
+| `canonical` | A string format that emphasizes type preservation at the expense of readability and interoperability. That is, conversion from canonical to BSON will generally preserve type information except in certain specific cases.  |
+| `relaxed` | A string format that emphasizes readability and interoperability at the expense of type preservation.That is, conversion from relaxed format to BSON can lose type information. |
+
 
 ### `query`
 

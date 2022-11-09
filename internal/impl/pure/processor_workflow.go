@@ -1,12 +1,14 @@
 package pure
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/Jeffail/gabs/v2"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
@@ -14,12 +16,11 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := NewWorkflow(conf.Workflow, mgr)
 		return p, err
 	}, docs.ComponentSpec{
@@ -247,15 +248,15 @@ processor_resources:
 				"An explicit declaration of branch ordered tiers, which describes the order in which parallel tiers of branches should be executed. Branches should be identified by the name as they are configured in the field `branches`. It's also possible to specify branch processors configured [as a resource](#resources).",
 				[][]string{{"foo", "bar"}, {"baz"}},
 				[][]string{{"foo"}, {"bar"}, {"baz"}},
-			).ArrayOfArrays().HasDefault([]interface{}{}),
+			).ArrayOfArrays().HasDefault([]any{}),
 			docs.FieldString(
 				"branch_resources",
 				"An optional list of [`branch` processor](/docs/components/processors/branch) names that are configured as [resources](#resources). These resources will be included in the workflow with any branches configured inline within the [`branches`](#branches) field. The order and parallelism in which branches are executed is automatically resolved based on the mappings of each branch. When using resources with an explicit order it is not necessary to list resources in this field.",
-			).AtVersion("3.38.0").Advanced().Array().HasDefault([]interface{}{}),
+			).AtVersion("3.38.0").Advanced().Array().HasDefault([]any{}),
 			docs.FieldObject(
 				"branches",
 				"An object of named [`branch` processors](/docs/components/processors/branch) that make up the workflow. The order and parallelism in which branches are executed can either be made explicit with the field `order`, or if omitted an attempt is made to automatically resolve an ordering based on the mappings of each branch.",
-			).Map().WithChildren(branchFields...).HasDefault(map[string]interface{}{}),
+			).Map().WithChildren(branchFields...).HasDefault(map[string]any{}),
 		),
 	})
 	if err != nil {
@@ -269,7 +270,8 @@ processor_resources:
 // payload mapped from the original, and after processing attempts to overlay
 // the results back onto the original payloads according to more mappings.
 type Workflow struct {
-	log log.Modular
+	log    log.Modular
+	tracer trace.TracerProvider
 
 	children  *workflowBranchMap
 	allStages map[string]struct{}
@@ -285,10 +287,12 @@ type Workflow struct {
 }
 
 // NewWorkflow instanciates a new workflow processor.
-func NewWorkflow(conf oprocessor.WorkflowConfig, mgr bundle.NewManagement) (*Workflow, error) {
+func NewWorkflow(conf processor.WorkflowConfig, mgr bundle.NewManagement) (*Workflow, error) {
 	stats := mgr.Metrics()
 	w := &Workflow{
-		log:       mgr.Logger(),
+		log:    mgr.Logger(),
+		tracer: mgr.Tracer(),
+
 		metaPath:  nil,
 		allStages: map[string]struct{}{},
 
@@ -359,10 +363,10 @@ func (r *resultTracker) Failed(k, why string) {
 	r.Unlock()
 }
 
-func (r *resultTracker) ToObject() map[string]interface{} {
-	succeeded := make([]interface{}, 0, len(r.succeeded))
-	skipped := make([]interface{}, 0, len(r.skipped))
-	failed := make(map[string]interface{}, len(r.failed))
+func (r *resultTracker) ToObject() map[string]any {
+	succeeded := make([]any, 0, len(r.succeeded))
+	skipped := make([]any, 0, len(r.skipped))
+	failed := make(map[string]any, len(r.failed))
 
 	for k := range r.succeeded {
 		succeeded = append(succeeded, k)
@@ -380,7 +384,7 @@ func (r *resultTracker) ToObject() map[string]interface{} {
 		failed[k] = v
 	}
 
-	m := map[string]interface{}{}
+	m := map[string]any{}
 	if len(succeeded) > 0 {
 		m["succeeded"] = succeeded
 	}
@@ -394,7 +398,7 @@ func (r *resultTracker) ToObject() map[string]interface{} {
 }
 
 // Returns a map of enrichment IDs that should be skipped for this payload.
-func (w *Workflow) skipFromMeta(root interface{}) map[string]struct{} {
+func (w *Workflow) skipFromMeta(root any) map[string]struct{} {
 	skipList := map[string]struct{}{}
 	if len(w.metaPath) == 0 {
 		return skipList
@@ -404,7 +408,7 @@ func (w *Workflow) skipFromMeta(root interface{}) map[string]struct{} {
 
 	// If a whitelist is provided for this flow then skip stages that aren't
 	// within it.
-	if apply, ok := gObj.S(append(w.metaPath, "apply")...).Data().([]interface{}); ok {
+	if apply, ok := gObj.S(append(w.metaPath, "apply")...).Data().([]any); ok {
 		if len(apply) > 0 {
 			for k := range w.allStages {
 				skipList[k] = struct{}{}
@@ -418,7 +422,7 @@ func (w *Workflow) skipFromMeta(root interface{}) map[string]struct{} {
 	}
 
 	// Skip stages that already succeeded in a previous run of this workflow.
-	if succeeded, ok := gObj.S(append(w.metaPath, "succeeded")...).Data().([]interface{}); ok {
+	if succeeded, ok := gObj.S(append(w.metaPath, "succeeded")...).Data().([]any); ok {
 		for _, id := range succeeded {
 			if idStr, isString := id.(string); isString {
 				if _, exists := w.allStages[idStr]; exists {
@@ -429,7 +433,7 @@ func (w *Workflow) skipFromMeta(root interface{}) map[string]struct{} {
 	}
 
 	// Skip stages that were already skipped in a previous run of this workflow.
-	if skipped, ok := gObj.S(append(w.metaPath, "skipped")...).Data().([]interface{}); ok {
+	if skipped, ok := gObj.S(append(w.metaPath, "skipped")...).Data().([]any); ok {
 		for _, id := range skipped {
 			if idStr, isString := id.(string); isString {
 				if _, exists := w.allStages[idStr]; exists {
@@ -442,13 +446,11 @@ func (w *Workflow) skipFromMeta(root interface{}) map[string]struct{} {
 	return skipList
 }
 
-// ProcessMessage applies workflow stages to each part of a message type.
-func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
+// ProcessBatch applies workflow stages to each part of a message type.
+func (w *Workflow) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
 	w.mReceived.Incr(int64(msg.Len()))
 	w.mBatchReceived.Incr(1)
 	startedAt := time.Now()
-
-	payload := msg.DeepCopy()
 
 	// Prevent resourced branches from being updated mid-flow.
 	dag, children, unlock, err := w.children.Lock()
@@ -456,21 +458,20 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 		w.mError.Incr(1)
 		w.log.Errorf("Failed to establish workflow: %v\n", err)
 
-		_ = payload.Iter(func(i int, p *message.Part) error {
+		_ = msg.Iter(func(i int, p *message.Part) error {
 			p.ErrorSet(err)
 			return nil
 		})
-		w.mSent.Incr(int64(payload.Len()))
+		w.mSent.Incr(int64(msg.Len()))
 		w.mBatchSent.Incr(1)
-		return []*message.Batch{payload}, nil
+		return []message.Batch{msg}, nil
 	}
 	defer unlock()
 
 	skipOnMeta := make([]map[string]struct{}, msg.Len())
-	_ = payload.Iter(func(i int, p *message.Part) error {
-		p.Get()
-		_ = p.MetaIter(func(k, v string) error { return nil })
-		if jObj, err := p.JSON(); err == nil {
+	_ = msg.Iter(func(i int, p *message.Part) error {
+		// TODO: Do we want to evaluate bytes here? And metadata?
+		if jObj, err := p.AsStructured(); err == nil {
 			skipOnMeta[i] = w.skipFromMeta(jObj)
 		} else {
 			skipOnMeta[i] = map[string]struct{}{}
@@ -478,9 +479,9 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 		return nil
 	})
 
-	propMsg, _ := tracing.WithChildSpans("workflow", payload)
+	propMsg, _ := tracing.WithChildSpans(w.tracer, "workflow", msg)
 
-	records := make([]*resultTracker, payload.Len())
+	records := make([]*resultTracker, msg.Len())
 	for i := range records {
 		records[i] = trackerFromTree(dag)
 	}
@@ -492,9 +493,8 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 		wg := sync.WaitGroup{}
 		wg.Add(len(layer))
 		for i, eid := range layer {
+			branchMsg, branchSpans := tracing.WithChildSpans(w.tracer, eid, propMsg.ShallowCopy())
 			go func(id string, index int) {
-				branchMsg, branchSpans := tracing.WithChildSpans(id, propMsg.Copy())
-
 				branchParts := make([]*message.Part, branchMsg.Len())
 				_ = branchMsg.Iter(func(partIndex int, part *message.Part) error {
 					// Remove errors so that they aren't propagated into the
@@ -507,7 +507,7 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 				})
 
 				var mapErrs []branchMapError
-				results[index], mapErrs, errors[index] = children[id].createResult(branchParts, propMsg)
+				results[index], mapErrs, errors[index] = children[id].createResult(ctx, branchParts, propMsg.ShallowCopy())
 				for _, s := range branchSpans {
 					s.Finish()
 				}
@@ -528,7 +528,7 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 			var failed []branchMapError
 			err := errors[i]
 			if err == nil {
-				failed, err = children[id].overlayResult(payload, results[i])
+				failed, err = children[id].overlayResult(msg, results[i])
 			}
 			if err != nil {
 				w.mError.Incr(1)
@@ -546,8 +546,8 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 
 	// Finally, set the meta records of each document.
 	if len(w.metaPath) > 0 {
-		_ = payload.Iter(func(i int, p *message.Part) error {
-			pJSON, err := p.JSON()
+		_ = msg.Iter(func(i int, p *message.Part) error {
+			pJSON, err := p.AsStructuredMut()
 			if err != nil {
 				w.mError.Incr(1)
 				w.log.Errorf("Failed to parse message for meta update: %v\n", err)
@@ -563,11 +563,11 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 			}
 			_, _ = gObj.Set(current, w.metaPath...)
 
-			p.SetJSON(gObj.Data())
+			p.SetStructuredMut(gObj.Data())
 			return nil
 		})
 	} else {
-		_ = payload.Iter(func(i int, p *message.Part) error {
+		_ = msg.Iter(func(i int, p *message.Part) error {
 			if lf := len(records[i].failed); lf > 0 {
 				failed := make([]string, 0, lf)
 				for k := range records[i].failed {
@@ -582,18 +582,13 @@ func (w *Workflow) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) 
 
 	tracing.FinishSpans(propMsg)
 
-	w.mSent.Incr(int64(payload.Len()))
+	w.mSent.Incr(int64(msg.Len()))
 	w.mBatchSent.Incr(1)
 	w.mLatency.Timing(time.Since(startedAt).Nanoseconds())
-	return []*message.Batch{payload}, nil
+	return []message.Batch{msg}, nil
 }
 
-// CloseAsync shuts down the processor and stops processing requests.
-func (w *Workflow) CloseAsync() {
-	w.children.CloseAsync()
-}
-
-// WaitForClose blocks until the processor has closed down.
-func (w *Workflow) WaitForClose(timeout time.Duration) error {
-	return w.children.WaitForClose(timeout)
+// Close shuts down the processor and stops processing requests.
+func (w *Workflow) Close(ctx context.Context) error {
+	return w.children.Close(ctx)
 }

@@ -1,23 +1,25 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/manager"
+	bmock "github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
 )
 
 func TestInprocDryRun(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	t.Parallel()
 
-	mgr, err := manager.NewV2(manager.NewResourceConfig(), nil, log.Noop(), metrics.Noop())
+	mgr, err := manager.New(manager.NewResourceConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,13 +35,16 @@ func TestInprocDryRun(t *testing.T) {
 
 	<-time.After(time.Millisecond * 100)
 
-	ip.CloseAsync()
-	if err = ip.WaitForClose(time.Second); err != nil {
+	ip.TriggerStopConsuming()
+	if err = ip.WaitForClose(ctx); err != nil {
 		t.Error(err)
 	}
 }
 
 func TestInprocDryRunNoConn(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	t.Parallel()
 
 	conf := input.NewConfig()
@@ -51,8 +56,8 @@ func TestInprocDryRunNoConn(t *testing.T) {
 
 	<-time.After(time.Millisecond * 100)
 
-	ip.CloseAsync()
-	if err = ip.WaitForClose(time.Second); err != nil {
+	ip.TriggerStopConsuming()
+	if err = ip.WaitForClose(ctx); err != nil {
 		t.Error(err)
 	}
 }

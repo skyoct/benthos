@@ -11,18 +11,30 @@ import (
 
 // Config holds configuration options for a logger object.
 type Config struct {
-	LogLevel     string            `json:"level" yaml:"level"`
-	Format       string            `json:"format" yaml:"format"`
-	AddTimeStamp bool              `json:"add_timestamp" yaml:"add_timestamp"`
-	StaticFields map[string]string `json:"static_fields" yaml:"static_fields"`
+	LogLevel      string            `json:"level" yaml:"level"`
+	Format        string            `json:"format" yaml:"format"`
+	AddTimeStamp  bool              `json:"add_timestamp" yaml:"add_timestamp"`
+	MessageName   string            `json:"message_name" yaml:"message_name"`
+	TimestampName string            `json:"timestamp_name" yaml:"timestamp_name"`
+	StaticFields  map[string]string `json:"static_fields" yaml:"static_fields"`
+	File          File              `json:"file" yaml:"file"`
+}
+
+// File contains configuration for file based logging.
+type File struct {
+	Path         string `json:"path" yaml:"path"`
+	Rotate       bool   `json:"rotate" yaml:"rotate"`
+	RotateMaxAge int    `json:"rotate_max_age_days" yaml:"rotate_max_age_days"`
 }
 
 // NewConfig returns a config struct with the default values for each field.
 func NewConfig() Config {
 	return Config{
-		LogLevel:     "INFO",
-		Format:       "logfmt",
-		AddTimeStamp: false,
+		LogLevel:      "INFO",
+		Format:        "logfmt",
+		AddTimeStamp:  false,
+		TimestampName: "time",
+		MessageName:   "msg",
 		StaticFields: map[string]string{
 			"@service": "benthos",
 		},
@@ -53,7 +65,7 @@ func (conf *Config) UnmarshalJSON(bytes []byte) error {
 
 // UnmarshalYAML ensures that when parsing configs that are in a slice the
 // default values are still applied.
-func (conf *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (conf *Config) UnmarshalYAML(unmarshal func(any) error) error {
 	type confAlias Config
 	aliased := confAlias(NewConfig())
 
@@ -89,11 +101,20 @@ func NewV2(stream io.Writer, config Config) (Modular, error) {
 	case "json":
 		logger.SetFormatter(&logrus.JSONFormatter{
 			DisableTimestamp: !config.AddTimeStamp,
+			FieldMap: logrus.FieldMap{
+				logrus.FieldKeyTime: config.TimestampName,
+				logrus.FieldKeyMsg:  config.MessageName,
+			},
 		})
 	case "logfmt":
 		logger.SetFormatter(&logrus.TextFormatter{
 			DisableTimestamp: !config.AddTimeStamp,
 			QuoteEmptyFields: true,
+			FullTimestamp:    config.AddTimeStamp,
+			FieldMap: logrus.FieldMap{
+				logrus.FieldKeyTime: config.TimestampName,
+				logrus.FieldKeyMsg:  config.MessageName,
+			},
 		})
 	default:
 		return nil, fmt.Errorf("log format '%v' not recognized", config.Format)
@@ -150,7 +171,7 @@ func (l *Logger) WithFields(inboundFields map[string]string) Modular {
 
 // With returns a copy of the logger with new labels added to the logging
 // context.
-func (l *Logger) With(keyValues ...interface{}) Modular {
+func (l *Logger) With(keyValues ...any) Modular {
 	newEntry := l.entry.WithFields(logrus.Fields{})
 	for i := 0; i < (len(keyValues) - 1); i += 2 {
 		key, ok := keyValues[i].(string)
@@ -168,32 +189,32 @@ func (l *Logger) With(keyValues ...interface{}) Modular {
 //------------------------------------------------------------------------------
 
 // Fatalf prints a fatal message to the console. Does NOT cause panic.
-func (l *Logger) Fatalf(format string, v ...interface{}) {
+func (l *Logger) Fatalf(format string, v ...any) {
 	l.entry.Fatalf(strings.TrimSuffix(format, "\n"), v...)
 }
 
 // Errorf prints an error message to the console.
-func (l *Logger) Errorf(format string, v ...interface{}) {
+func (l *Logger) Errorf(format string, v ...any) {
 	l.entry.Errorf(strings.TrimSuffix(format, "\n"), v...)
 }
 
 // Warnf prints a warning message to the console.
-func (l *Logger) Warnf(format string, v ...interface{}) {
+func (l *Logger) Warnf(format string, v ...any) {
 	l.entry.Warnf(strings.TrimSuffix(format, "\n"), v...)
 }
 
 // Infof prints an information message to the console.
-func (l *Logger) Infof(format string, v ...interface{}) {
+func (l *Logger) Infof(format string, v ...any) {
 	l.entry.Infof(strings.TrimSuffix(format, "\n"), v...)
 }
 
 // Debugf prints a debug message to the console.
-func (l *Logger) Debugf(format string, v ...interface{}) {
+func (l *Logger) Debugf(format string, v ...any) {
 	l.entry.Debugf(strings.TrimSuffix(format, "\n"), v...)
 }
 
 // Tracef prints a trace message to the console.
-func (l *Logger) Tracef(format string, v ...interface{}) {
+func (l *Logger) Tracef(format string, v ...any) {
 	l.entry.Tracef(strings.TrimSuffix(format, "\n"), v...)
 }
 

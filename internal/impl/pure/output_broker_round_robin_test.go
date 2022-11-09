@@ -24,8 +24,8 @@ func TestRoundRobinDoubleClose(t *testing.T) {
 	}
 
 	// This shouldn't cause a panic
-	oTM.CloseAsync()
-	oTM.CloseAsync()
+	oTM.TriggerCloseNow()
+	oTM.TriggerCloseNow()
 }
 
 //------------------------------------------------------------------------------
@@ -73,8 +73,8 @@ func TestBasicRoundRobin(t *testing.T) {
 			var ts message.Transaction
 			select {
 			case ts = <-mockOutputs[i%3].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 			case <-mockOutputs[(i+1)%3].TChan:
 				t.Errorf("Received message in wrong order: %v != %v", i%3, (i+1)%3)
@@ -100,10 +100,8 @@ func TestBasicRoundRobin(t *testing.T) {
 		}
 	}
 
-	oTM.CloseAsync()
-	if err := oTM.WaitForClose(time.Second * 10); err != nil {
-		t.Error(err)
-	}
+	oTM.TriggerCloseNow()
+	require.NoError(t, oTM.WaitForClose(tCtx))
 }
 
 //------------------------------------------------------------------------------
@@ -151,5 +149,3 @@ func BenchmarkBasicRoundRobin(b *testing.B) {
 
 	b.StopTimer()
 }
-
-//------------------------------------------------------------------------------

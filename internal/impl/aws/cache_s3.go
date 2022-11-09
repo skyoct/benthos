@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/cenkalti/backoff/v4"
 
+	"github.com/benthosdev/benthos/v4/internal/impl/aws/config"
 	"github.com/benthosdev/benthos/v4/public/service"
 )
 
@@ -39,7 +40,7 @@ func s3CacheConfig() *service.ConfigSpec {
 		Field(service.NewBackOffField("retries", false, retriesDefaults).
 			Advanced())
 
-	for _, f := range sessionFields() {
+	for _, f := range config.SessionFields() {
 		spec = spec.Field(f)
 	}
 	return spec
@@ -55,7 +56,6 @@ func init() {
 			}
 			return s, nil
 		})
-
 	if err != nil {
 		panic(err)
 	}
@@ -75,7 +75,7 @@ func newS3CacheFromConfig(conf *service.ParsedConfig) (*s3Cache, error) {
 		return nil, err
 	}
 
-	sess, err := getSession(conf, func(c *aws.Config) {
+	sess, err := GetSession(conf, func(c *aws.Config) {
 		c.S3ForcePathStyle = aws.Bool(forcePathStyleURLs)
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func newS3Cache(bucket, contentType string, backOff *backoff.ExponentialBackOff,
 		contentType: contentType,
 
 		boffPool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				bo := *backOff
 				bo.Reset()
 				return &bo

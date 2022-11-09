@@ -4,16 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	// nolint:staticcheck // Ignore SA1019 deprecation warning until we can switch to "google.golang.org/protobuf/types/dynamicpb"
 	"github.com/golang/protobuf/jsonpb"
@@ -26,12 +25,12 @@ import (
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newProtobuf(conf.Protobuf, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("protobuf", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("protobuf", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "protobuf",
 		Categories: []string{
@@ -67,7 +66,7 @@ Attempts to create a target protobuf message from a generic JSON structure.`,
 			docs.FieldString("operator", "The [operator](#operators) to execute").HasOptions("to_json", "from_json"),
 			docs.FieldString("message", "The fully qualified name of the protobuf message to convert to/from."),
 			docs.FieldString("import_paths", "A list of directories containing .proto files, including all definitions required for parsing the target message. If left empty the current directory is used. Each directory listed will be walked with all found .proto files imported.").Array(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewProtobufConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewProtobufConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title: "JSON to Protobuf",
@@ -164,12 +163,12 @@ pipeline:
 
 type protobufOperator func(part *message.Part) error
 
-func newProtobufToJSONOperator(msg string, importPaths []string) (protobufOperator, error) {
+func newProtobufToJSONOperator(f ifs.FS, msg string, importPaths []string) (protobufOperator, error) {
 	if msg == "" {
 		return nil, errors.New("message field must not be empty")
 	}
 
-	descriptors, err := loadDescriptors(importPaths)
+	descriptors, err := loadDescriptors(f, importPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +184,7 @@ func newProtobufToJSONOperator(msg string, importPaths []string) (protobufOperat
 
 	return func(part *message.Part) error {
 		msg := dynamic.NewMessage(m)
-		if err := proto.Unmarshal(part.Get(), msg); err != nil {
+		if err := proto.Unmarshal(part.AsBytes(), msg); err != nil {
 			return fmt.Errorf("failed to unmarshal message: %w", err)
 		}
 
@@ -194,17 +193,17 @@ func newProtobufToJSONOperator(msg string, importPaths []string) (protobufOperat
 			return fmt.Errorf("failed to marshal protobuf message: %w", err)
 		}
 
-		part.Set(data)
+		part.SetBytes(data)
 		return nil
 	}, nil
 }
 
-func newProtobufFromJSONOperator(msg string, importPaths []string) (protobufOperator, error) {
+func newProtobufFromJSONOperator(f ifs.FS, msg string, importPaths []string) (protobufOperator, error) {
 	if msg == "" {
 		return nil, errors.New("message field must not be empty")
 	}
 
-	descriptors, err := loadDescriptors(importPaths)
+	descriptors, err := loadDescriptors(f, importPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +219,7 @@ func newProtobufFromJSONOperator(msg string, importPaths []string) (protobufOper
 
 	return func(part *message.Part) error {
 		msg := dynamic.NewMessage(m)
-		if err := msg.UnmarshalJSONPB(unmarshaler, part.Get()); err != nil {
+		if err := msg.UnmarshalJSONPB(unmarshaler, part.AsBytes()); err != nil {
 			return fmt.Errorf("failed to unmarshal JSON message: %w", err)
 		}
 
@@ -229,22 +228,22 @@ func newProtobufFromJSONOperator(msg string, importPaths []string) (protobufOper
 			return fmt.Errorf("failed to marshal protobuf message: %v", err)
 		}
 
-		part.Set(data)
+		part.SetBytes(data)
 		return nil
 	}, nil
 }
 
-func strToProtobufOperator(opStr, message string, importPaths []string) (protobufOperator, error) {
+func strToProtobufOperator(f ifs.FS, opStr, message string, importPaths []string) (protobufOperator, error) {
 	switch opStr {
 	case "to_json":
-		return newProtobufToJSONOperator(message, importPaths)
+		return newProtobufToJSONOperator(f, message, importPaths)
 	case "from_json":
-		return newProtobufFromJSONOperator(message, importPaths)
+		return newProtobufFromJSONOperator(f, message, importPaths)
 	}
 	return nil, fmt.Errorf("operator not recognised: %v", opStr)
 }
 
-func loadDescriptors(importPaths []string) ([]*desc.FileDescriptor, error) {
+func loadDescriptors(f ifs.FS, importPaths []string) ([]*desc.FileDescriptor, error) {
 	var parser protoparse.Parser
 	if len(importPaths) == 0 {
 		importPaths = []string{"."}
@@ -254,7 +253,7 @@ func loadDescriptors(importPaths []string) ([]*desc.FileDescriptor, error) {
 
 	var files []string
 	for _, importPath := range importPaths {
-		if err := filepath.Walk(importPath, func(path string, info os.FileInfo, ferr error) error {
+		if err := fs.WalkDir(f, importPath, func(path string, info fs.DirEntry, ferr error) error {
 			if ferr != nil || info.IsDir() {
 				return ferr
 			}
@@ -300,24 +299,23 @@ type protobufProc struct {
 	log      log.Modular
 }
 
-func newProtobuf(conf oprocessor.ProtobufConfig, mgr interop.Manager) (*protobufProc, error) {
+func newProtobuf(conf processor.ProtobufConfig, mgr bundle.NewManagement) (*protobufProc, error) {
 	p := &protobufProc{
 		log: mgr.Logger(),
 	}
 	var err error
-	if p.operator, err = strToProtobufOperator(conf.Operator, conf.Message, conf.ImportPaths); err != nil {
+	if p.operator, err = strToProtobufOperator(mgr.FS(), conf.Operator, conf.Message, conf.ImportPaths); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
 func (p *protobufProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	newPart := msg.Copy()
-	if err := p.operator(newPart); err != nil {
+	if err := p.operator(msg); err != nil {
 		p.log.Debugf("Operator failed: %v", err)
 		return nil, err
 	}
-	return []*message.Part{newPart}, nil
+	return []*message.Part{msg}, nil
 }
 
 func (p *protobufProc) Close(context.Context) error {

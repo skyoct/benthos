@@ -12,9 +12,7 @@ import (
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/query"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 )
 
@@ -22,6 +20,32 @@ import (
 // to a ConfigSpec.
 type ConfigField struct {
 	field docs.FieldSpec
+}
+
+// NewAnyField describes a new config field that can assume any value type
+// without triggering a config parse or linting error.
+func NewAnyField(name string) *ConfigField {
+	return &ConfigField{
+		field: docs.FieldAnything(name, ""),
+	}
+}
+
+// NewAnyListField describes a new config field consisting of a list of values
+// that can assume any value type without triggering a config parse or linting
+// error.
+func NewAnyListField(name string) *ConfigField {
+	return &ConfigField{
+		field: docs.FieldAnything(name, "").Array(),
+	}
+}
+
+// NewAnyMapField describes a new config field consisting of a map of values
+// that can assume any value type without triggering a config parse or linting
+// error.
+func NewAnyMapField(name string) *ConfigField {
+	return &ConfigField{
+		field: docs.FieldAnything(name, "").Map(),
+	}
 }
 
 // NewStringField describes a new string type config field.
@@ -174,7 +198,7 @@ func (c *ConfigField) Deprecated() *ConfigField {
 // Default specifies a default value that this field will assume if it is
 // omitted from a provided config. Fields that do not have a default value are
 // considered mandatory, and so parsing a config will fail in their absence.
-func (c *ConfigField) Default(v interface{}) *ConfigField {
+func (c *ConfigField) Default(v any) *ConfigField {
 	c.field = c.field.HasDefault(v)
 	return c
 }
@@ -187,9 +211,17 @@ func (c *ConfigField) Optional() *ConfigField {
 	return c
 }
 
+// Secret marks this field as being a secret, which means it represents
+// information that is generally considered sensitive such as passwords or
+// access tokens.
+func (c *ConfigField) Secret() *ConfigField {
+	c.field = c.field.Secret()
+	return c
+}
+
 // Example adds an example value to the field which will be shown when printing
 // documentation for the component config spec.
-func (c *ConfigField) Example(e interface{}) *ConfigField {
+func (c *ConfigField) Example(e any) *ConfigField {
 	c.field.Examples = append(c.field.Examples, e)
 	return c
 }
@@ -211,8 +243,7 @@ func (c *ConfigField) Version(v string) *ConfigField {
 // ensures the value contains only lowercase values we might add the following
 // linting rule:
 //
-// `root = if this.lowercase() != this { [ "field must be lowercase" ] }`
-//
+// `root = if this.lowercase() != this { [ "field must be lowercase" ] }`.
 func (c *ConfigField) LintRule(blobl string) *ConfigField {
 	c.field = c.field.LinterBlobl(blobl)
 	return c
@@ -256,8 +287,8 @@ func (c *ConfigSpec) ParseYAML(yamlStr string, env *Environment) (*ParsedConfig,
 		nconf = *nconf.Content[0]
 	}
 
-	mgr, err := manager.NewV2(
-		manager.NewResourceConfig(), nil, log.Noop(), metrics.Noop(),
+	mgr, err := manager.New(
+		manager.NewResourceConfig(),
 		manager.OptSetEnvironment(env.internal),
 		manager.OptSetBloblangEnvironment(env.getBloblangParserEnv()),
 	)
@@ -392,10 +423,10 @@ func (c *ConfigSpec) EncodeJSON(v []byte) error {
 // that ensures some fields are mutually exclusive and some require others we
 // might use the following:
 //
-// `root = match {
-//   this.exists("meow") && this.exists("woof") => [ "both `+"`meow`"+` and `+"`woof`"+` can't be set simultaneously" ],
-//   this.exists("reticulation") && (!this.exists("splines") || this.splines == "") => [ "`+"`splines`"+` is required when setting `+"`reticulation`"+`" ],
-// }`
+// root = match {
+// this.exists("meow") && this.exists("woof") => [ "both `+"`meow`"+` and `+"`woof`"+` can't be set simultaneously" ],
+// this.exists("reticulation") && (!this.exists("splines") || this.splines == "") => [ "`+"`splines`"+` is required when setting `+"`reticulation`"+`" ],
+// }.
 func (c *ConfigSpec) LintRule(blobl string) *ConfigSpec {
 	c.component.Config = c.component.Config.LinterBlobl(blobl)
 	return c
@@ -437,6 +468,34 @@ func (c *ConfigView) FormatJSON() ([]byte, error) {
 	return json.Marshal(c.component)
 }
 
+// RenderDocs creates a markdown file that documents the configuration of the
+// component config view. This markdown may include Docusaurus react elements as
+// it matches the documentation generated for the official Benthos website.
+//
+// Experimental: This method is not intended for general use and could have its
+// signature and/or behaviour changed outside of major version bumps.
+func (c *ConfigView) RenderDocs() ([]byte, error) {
+	_, rootOnly := map[string]struct{}{
+		"cache":      {},
+		"rate_limit": {},
+		"processor":  {},
+	}[string(c.component.Type)]
+
+	conf := map[string]any{
+		"type": c.component.Name,
+	}
+	for k, v := range docs.ReservedFieldsByType(c.component.Type) {
+		if k == "plugin" {
+			continue
+		}
+		if v.Default != nil {
+			conf[k] = *v.Default
+		}
+	}
+
+	return c.component.AsMarkdown(!rootOnly, conf)
+}
+
 //------------------------------------------------------------------------------
 
 // ParsedConfig represents a plugin configuration that has been validated and
@@ -445,7 +504,7 @@ func (c *ConfigView) FormatJSON() ([]byte, error) {
 type ParsedConfig struct {
 	hiddenPath []string
 	mgr        bundle.NewManagement
-	generic    interface{}
+	generic    any
 }
 
 // Namespace returns a version of the parsed config at a given field namespace.
@@ -454,14 +513,14 @@ func (p *ParsedConfig) Namespace(path ...string) *ParsedConfig {
 	tmpConfig := *p
 	tmpConfig.hiddenPath = append([]string{}, p.hiddenPath...)
 	tmpConfig.hiddenPath = append(tmpConfig.hiddenPath, path...)
-	tmpConfig.mgr = p.mgr.IntoPath(path...).(bundle.NewManagement)
+	tmpConfig.mgr = p.mgr.IntoPath(path...)
 	return &tmpConfig
 }
 
 // Field accesses a field from the parsed config by its name and returns the
 // value if the field is found and a boolean indicating whether it was found.
-// Nested fields can be accessed by specifing the series of field names.
-func (p *ParsedConfig) field(path ...string) (interface{}, bool) {
+// Nested fields can be accessed by specifying the series of field names.
+func (p *ParsedConfig) field(path ...string) (any, bool) {
 	gObj := gabs.Wrap(p.generic).S(p.hiddenPath...)
 	if exists := gObj.Exists(path...); !exists {
 		return nil, false
@@ -481,6 +540,62 @@ func (p *ParsedConfig) fullDotPath(path ...string) string {
 func (p *ParsedConfig) Contains(path ...string) bool {
 	gObj := gabs.Wrap(p.generic).S(p.hiddenPath...)
 	return gObj.Exists(path...)
+}
+
+// FieldAny accesses a field from the parsed config by its name that can assume
+// any value type. If the field is not found an error is returned.
+func (p *ParsedConfig) FieldAny(path ...string) (any, error) {
+	v, exists := p.field(path...)
+	if !exists {
+		return "", fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
+	}
+	return v, nil
+}
+
+// FieldAnyList accesses a field that is a list of any value types from the
+// parsed config by its name and returns the value as an array of *ParsedConfig
+// types, where each one represents an object or value in the list. Returns an
+// error if the field is not found, or is not a list of values.
+func (p *ParsedConfig) FieldAnyList(path ...string) ([]*ParsedConfig, error) {
+	v, exists := p.field(path...)
+	if !exists {
+		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
+	}
+	iList, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("expected field '%v' to be a list, got %T", p.fullDotPath(path...), v)
+	}
+	sList := make([]*ParsedConfig, len(iList))
+	for i, ev := range iList {
+		sList[i] = &ParsedConfig{
+			mgr:     p.mgr,
+			generic: ev,
+		}
+	}
+	return sList, nil
+}
+
+// FieldAnyMap accesses a field that is an object of arbitrary keys and any
+// values from the parsed config by its name and returns a map of *ParsedConfig
+// types, where each one represents an object or value in the map. Returns an
+// error if the field is not found, or is not an object.
+func (p *ParsedConfig) FieldAnyMap(path ...string) (map[string]*ParsedConfig, error) {
+	v, exists := p.field(path...)
+	if !exists {
+		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
+	}
+	iMap, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("expected field '%v' to be a string map, got %T", p.fullDotPath(path...), v)
+	}
+	sMap := make(map[string]*ParsedConfig, len(iMap))
+	for k, v := range iMap {
+		sMap[k] = &ParsedConfig{
+			mgr:     p.mgr,
+			generic: v,
+		}
+	}
+	return sMap, nil
 }
 
 // FieldString accesses a string field from the parsed config by its name. If
@@ -524,7 +639,7 @@ func (p *ParsedConfig) FieldStringList(path ...string) ([]string, error) {
 	if !exists {
 		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
 	}
-	iList, ok := v.([]interface{})
+	iList, ok := v.([]any)
 	if !ok {
 		if sList, ok := v.([]string); ok {
 			return sList, nil
@@ -548,7 +663,7 @@ func (p *ParsedConfig) FieldStringMap(path ...string) (map[string]string, error)
 	if !exists {
 		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
 	}
-	iMap, ok := v.(map[string]interface{})
+	iMap, ok := v.(map[string]any)
 	if !ok {
 		if sMap, ok := v.(map[string]string); ok {
 			return sMap, nil
@@ -586,7 +701,7 @@ func (p *ParsedConfig) FieldIntList(path ...string) ([]int, error) {
 	if !exists {
 		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
 	}
-	iList, ok := v.([]interface{})
+	iList, ok := v.([]any)
 	if !ok {
 		if sList, ok := v.([]int); ok {
 			return sList, nil
@@ -612,7 +727,7 @@ func (p *ParsedConfig) FieldIntMap(path ...string) (map[string]int, error) {
 	if !exists {
 		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
 	}
-	iMap, ok := v.(map[string]interface{})
+	iMap, ok := v.(map[string]any)
 	if !ok {
 		if sMap, ok := v.(map[string]int); ok {
 			return sMap, nil
@@ -669,7 +784,7 @@ func (p *ParsedConfig) FieldObjectList(path ...string) ([]*ParsedConfig, error) 
 	if !exists {
 		return nil, fmt.Errorf("field '%v' was not found in the config", p.fullDotPath(path...))
 	}
-	iList, ok := v.([]interface{})
+	iList, ok := v.([]any)
 	if !ok {
 		return nil, fmt.Errorf("expected field '%v' to be a list, got %T", p.fullDotPath(path...), v)
 	}

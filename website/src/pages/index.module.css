@@ -38,10 +38,6 @@
   margin: 10px 0;
 }
 
-.configSnippet {
-  font-size: 10pt !important;
-}
-
 .configSnippets {
   margin: 10px 0;
 }
@@ -114,4 +110,15 @@
   height: 60px;
   margin: 0;
   background-color: white;
+}
+
+.synadiaImg {
+  height: 30px;
+  margin: 10px;
+}
+
+.furtherButton {
+  position: absolute;
+  right: calc(var(--ifm-pre-padding) / 2);
+  bottom: calc(var(--ifm-pre-padding) / 2);
 }

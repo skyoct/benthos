@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
@@ -8,10 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 type mockLog struct {
@@ -21,7 +22,7 @@ type mockLog struct {
 	warns         []string
 	errors        []string
 	fields        []map[string]string
-	mappingFields []interface{}
+	mappingFields []any
 }
 
 func (m *mockLog) NewModule(prefix string) log.Modular { return m }
@@ -29,26 +30,30 @@ func (m *mockLog) WithFields(fields map[string]string) log.Modular {
 	m.fields = append(m.fields, fields)
 	return m
 }
-func (m *mockLog) With(args ...interface{}) log.Modular {
+
+func (m *mockLog) With(args ...any) log.Modular {
 	m.mappingFields = append(m.mappingFields, args...)
 	return m
 }
 
-func (m *mockLog) Fatalf(format string, v ...interface{}) {}
-func (m *mockLog) Errorf(format string, v ...interface{}) {
+func (m *mockLog) Fatalf(format string, v ...any) {}
+func (m *mockLog) Errorf(format string, v ...any) {
 	m.errors = append(m.errors, fmt.Sprintf(format, v...))
 }
-func (m *mockLog) Warnf(format string, v ...interface{}) {
-	m.warns = append(m.warns, fmt.Sprintf(format, v...))
 
+func (m *mockLog) Warnf(format string, v ...any) {
+	m.warns = append(m.warns, fmt.Sprintf(format, v...))
 }
-func (m *mockLog) Infof(format string, v ...interface{}) {
+
+func (m *mockLog) Infof(format string, v ...any) {
 	m.infos = append(m.infos, fmt.Sprintf(format, v...))
 }
-func (m *mockLog) Debugf(format string, v ...interface{}) {
+
+func (m *mockLog) Debugf(format string, v ...any) {
 	m.debugs = append(m.debugs, fmt.Sprintf(format, v...))
 }
-func (m *mockLog) Tracef(format string, v ...interface{}) {
+
+func (m *mockLog) Tracef(format string, v ...any) {
 	m.traces = append(m.traces, fmt.Sprintf(format, v...))
 }
 
@@ -56,15 +61,19 @@ func (m *mockLog) Fatalln(message string) {}
 func (m *mockLog) Errorln(message string) {
 	m.errors = append(m.errors, message)
 }
+
 func (m *mockLog) Warnln(message string) {
 	m.warns = append(m.warns, message)
 }
+
 func (m *mockLog) Infoln(message string) {
 	m.infos = append(m.infos, message)
 }
+
 func (m *mockLog) Debugln(message string) {
 	m.debugs = append(m.debugs, message)
 }
+
 func (m *mockLog) Traceln(message string) {
 	m.traces = append(m.traces, message)
 }
@@ -99,8 +108,8 @@ func TestLogLevelTrace(t *testing.T) {
 		}
 
 		input := message.QuickBatch([][]byte{[]byte(fmt.Sprintf(`{"foo":"%v"}`, level))})
-		expMsgs := []*message.Batch{input}
-		actMsgs, res := l.ProcessMessage(input)
+		expMsgs := []message.Batch{input}
+		actMsgs, res := l.ProcessBatch(context.Background(), input)
 		if res != nil {
 			t.Fatal(res)
 		}
@@ -148,8 +157,8 @@ func TestLogWithFields(t *testing.T) {
 	}
 
 	input := message.QuickBatch([][]byte{[]byte(`{"foo":"info message","bar":"with fields"}`)})
-	expMsgs := []*message.Batch{input}
-	actMsgs, res := l.ProcessMessage(input)
+	expMsgs := []message.Batch{input}
+	actMsgs, res := l.ProcessBatch(context.Background(), input)
 	if res != nil {
 		t.Fatal(res)
 	}
@@ -169,8 +178,8 @@ func TestLogWithFields(t *testing.T) {
 	}
 
 	input = message.QuickBatch([][]byte{[]byte(`{"foo":"info message 2","bar":"with fields 2"}`)})
-	expMsgs = []*message.Batch{input}
-	actMsgs, res = l.ProcessMessage(input)
+	expMsgs = []message.Batch{input}
+	actMsgs, res = l.ProcessBatch(context.Background(), input)
 	if res != nil {
 		t.Fatal(res)
 	}
@@ -215,13 +224,13 @@ root.is_cool = this.is_cool`
 	input := message.QuickBatch([][]byte{[]byte(
 		`{"age":10,"is_cool":true,"ignore":"this value please"}`,
 	)})
-	expMsgs := []*message.Batch{input}
-	actMsgs, res := l.ProcessMessage(input)
+	expMsgs := []message.Batch{input}
+	actMsgs, res := l.ProcessBatch(context.Background(), input)
 	require.Nil(t, res)
 	assert.Equal(t, expMsgs, actMsgs)
 
 	assert.Equal(t, []string{"hello world"}, logMock.infos)
-	assert.Equal(t, []interface{}{
+	assert.Equal(t, []any{
 		"age", int64(12),
 		"is_cool", true,
 		"static", "static value",

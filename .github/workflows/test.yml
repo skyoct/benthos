@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '0,30 * * * *' # Every 30 mins
+    - cron: '0 0/2 * * *' # Every two hours
 
 jobs:
   cross-build:
@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go-version: [1.17.x, 1.18.x]
+        go-version: [1.18.x, 1.19.x]
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
@@ -20,9 +20,10 @@ jobs:
     steps:
 
     - name: Install Go
-      uses: actions/setup-go@v2
+      uses: actions/setup-go@v3
       with:
         go-version: ${{ matrix.go-version }}
+        check-latest: true
 
     - name: Checkout code
       uses: actions/checkout@v2
@@ -38,8 +39,11 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-go-
 
-    - name: Build
-      run: make
+    - name: GoReleaser
+      uses: goreleaser/goreleaser-action@v2
+      with:
+        version: latest
+        args: build --snapshot --timeout 60m
 
   test:
     if: ${{ github.repository == 'benthosdev/benthos' || github.event_name != 'schedule' }}
@@ -49,9 +53,10 @@ jobs:
     steps:
 
     - name: Install Go
-      uses: actions/setup-go@v2
+      uses: actions/setup-go@v3
       with:
-        go-version: 1.18.x
+        go-version: 1.19.x
+        check-latest: true
 
     - name: Checkout code
       uses: actions/checkout@v2
@@ -83,6 +88,12 @@ jobs:
       CGO_ENABLED: 0
     steps:
 
+    - name: Install Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.19.x
+        check-latest: true
+
     - name: Checkout code
       uses: actions/checkout@v2
 
@@ -90,4 +101,11 @@ jobs:
       uses: golangci/golangci-lint-action@v2
       with:
         version: latest
-        args: --timeout 10m cmd/... internal/... public/...
+        args: --timeout 30m cmd/... internal/... public/...
+
+    # TODO: Remove this after https://github.com/golangci/golangci-lint/issues/3094 is addressed
+    - name: Get govulncheck
+      run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+    - name: Run govulncheck
+      run: govulncheck ./...

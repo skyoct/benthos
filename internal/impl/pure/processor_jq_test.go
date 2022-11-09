@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"strconv"
 	"testing"
 
@@ -8,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestJQAllParts(t *testing.T) {
@@ -26,7 +27,7 @@ func TestJQAllParts(t *testing.T) {
 		[]byte(`{"foo":{"bar":1}}`),
 		[]byte(`{"foo":{"bar":2}}`),
 	})
-	msgs, res := jSet.ProcessMessage(msgIn)
+	msgs, res := jSet.ProcessBatch(context.Background(), msgIn)
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 	for i, part := range message.GetAllBytes(msgs[0]) {
@@ -43,7 +44,7 @@ func TestJQValidation(t *testing.T) {
 	require.NoError(t, err)
 
 	msgIn := message.QuickBatch([][]byte{[]byte("this is bad json")})
-	msgs, res := jSet.ProcessMessage(msgIn)
+	msgs, res := jSet.ProcessBatch(context.Background(), msgIn)
 
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
@@ -65,8 +66,8 @@ func TestJQMutation(t *testing.T) {
 	ogExp := ogObj.String()
 
 	msgIn := message.QuickBatch(make([][]byte, 1))
-	msgIn.Get(0).SetJSON(ogObj.Data())
-	msgs, res := jSet.ProcessMessage(msgIn)
+	msgIn.Get(0).SetStructured(ogObj.Data())
+	msgs, res := jSet.ProcessBatch(context.Background(), msgIn)
 	require.Nil(t, res)
 	require.Len(t, msgs, 1)
 
@@ -159,7 +160,7 @@ func TestJQ(t *testing.T) {
 					[]byte(test.input),
 				},
 			)
-			msgs, _ := jSet.ProcessMessage(inMsg)
+			msgs, _ := jSet.ProcessBatch(context.Background(), inMsg)
 			require.Len(t, msgs, 1)
 			assert.Equal(t, test.output, string(message.GetAllBytes(msgs[0])[0]))
 		})
@@ -252,7 +253,7 @@ func TestJQ_OutputRaw(t *testing.T) {
 					[]byte(test.input),
 				},
 			)
-			msgs, _ := jSet.ProcessMessage(inMsg)
+			msgs, _ := jSet.ProcessBatch(context.Background(), inMsg)
 			require.Len(t, msgs, 1)
 			assert.Equal(t, test.output, string(message.GetAllBytes(msgs[0])[0]))
 		})

@@ -16,22 +16,21 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/amqp1/shared"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	itls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		a, err := newAMQP1Reader(c.AMQP1, nm.Logger())
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
+		a, err := newAMQP1Reader(c.AMQP1, nm)
 		if err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader("amqp_1", true, a, nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("amqp_1", true, a, nm)
 	}), docs.ComponentSpec{
 		Name:    "amqp_1",
 		Status:  docs.StatusBeta,
@@ -114,28 +113,28 @@ func (c *amqp1Conn) Close(ctx context.Context) {
 type amqp1Reader struct {
 	tlsConf *tls.Config
 
-	conf oinput.AMQP1Config
+	conf input.AMQP1Config
 	log  log.Modular
 
 	m    sync.RWMutex
 	conn *amqp1Conn
 }
 
-func newAMQP1Reader(conf oinput.AMQP1Config, log log.Modular) (*amqp1Reader, error) {
+func newAMQP1Reader(conf input.AMQP1Config, mgr bundle.NewManagement) (*amqp1Reader, error) {
 	a := amqp1Reader{
 		conf: conf,
-		log:  log,
+		log:  mgr.Logger(),
 	}
 	if conf.TLS.Enabled {
 		var err error
-		if a.tlsConf, err = conf.TLS.Get(); err != nil {
+		if a.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
 	return &a, nil
 }
 
-func (a *amqp1Reader) ConnectWithContext(ctx context.Context) error {
+func (a *amqp1Reader) Connect(ctx context.Context) error {
 	a.m.Lock()
 	defer a.m.Unlock()
 
@@ -148,7 +147,7 @@ func (a *amqp1Reader) ConnectWithContext(ctx context.Context) error {
 		lockRenewAddressPrefix: randomString(15),
 	}
 
-	opts, err := a.conf.SASL.ToOptFns()
+	opts, err := saslToOptFns(a.conf.SASL)
 	if err != nil {
 		return err
 	}
@@ -213,7 +212,7 @@ func (a *amqp1Reader) disconnect(ctx context.Context) error {
 	return nil
 }
 
-func (a *amqp1Reader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (a *amqp1Reader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	a.m.RLock()
 	conn := a.conn
 	a.m.RUnlock()
@@ -225,7 +224,7 @@ func (a *amqp1Reader) ReadWithContext(ctx context.Context) (*message.Batch, read
 	// Receive next message
 	amqpMsg, err := conn.receiver.Receive(ctx)
 	if err != nil {
-		if err == amqp.ErrTimeout {
+		if err == amqp.ErrTimeout || ctx.Err() != nil {
 			err = component.ErrTimeout
 		} else {
 			if dErr, isDetachError := err.(*amqp.DetachError); isDetachError && dErr.RemoteError != nil {
@@ -239,10 +238,7 @@ func (a *amqp1Reader) ReadWithContext(ctx context.Context) (*message.Batch, read
 		return nil, nil, err
 	}
 
-	msg := message.QuickBatch(nil)
-
 	part := message.NewPart(amqpMsg.GetData())
-
 	if amqpMsg.Properties != nil {
 		amqpSetMetadata(part, "amqp_content_type", amqpMsg.Properties.ContentType)
 		amqpSetMetadata(part, "amqp_content_encoding", amqpMsg.Properties.ContentEncoding)
@@ -258,14 +254,12 @@ func (a *amqp1Reader) ReadWithContext(ctx context.Context) (*message.Batch, read
 		}
 	}
 
-	msg.Append(part)
-
 	var done chan struct{}
 	if a.conf.AzureRenewLock {
 		done = a.startRenewJob(amqpMsg)
 	}
 
-	return msg, func(ctx context.Context, res error) error {
+	return message.Batch{part}, func(ctx context.Context, res error) error {
 		if done != nil {
 			close(done)
 			done = nil
@@ -280,14 +274,8 @@ func (a *amqp1Reader) ReadWithContext(ctx context.Context) (*message.Batch, read
 	}, nil
 }
 
-// CloseAsync shuts down the AMQP1 input and stops processing requests.
-func (a *amqp1Reader) CloseAsync() {
-	_ = a.disconnect(context.Background())
-}
-
-// WaitForClose blocks until the AMQP1 input has closed down.
-func (a *amqp1Reader) WaitForClose(timeout time.Duration) error {
-	return nil
+func (a *amqp1Reader) Close(ctx context.Context) error {
+	return a.disconnect(ctx)
 }
 
 const (
@@ -342,7 +330,7 @@ func uuidFromLockTokenBytes(bytes []byte) (*amqp.UUID, error) {
 		return nil, fmt.Errorf("invalid lock token, token was not 16 bytes long")
 	}
 
-	var swapIndex = func(indexOne, indexTwo int, array *[16]byte) {
+	swapIndex := func(indexOne, indexTwo int, array *[16]byte) {
 		array[indexOne], array[indexTwo] = array[indexTwo], array[indexOne]
 	}
 
@@ -379,10 +367,10 @@ func (a *amqp1Reader) renewWithContext(ctx context.Context, msg *amqp.Message) (
 			MessageID: msg.Properties.MessageID,
 			ReplyTo:   &replyTo,
 		},
-		ApplicationProperties: map[string]interface{}{
+		ApplicationProperties: map[string]any{
 			"operation": "com.microsoft:renew-lock",
 		},
-		Value: map[string]interface{}{
+		Value: map[string]any{
 			"lock-tokens": []amqp.UUID{*lockToken},
 		},
 	}
@@ -400,7 +388,7 @@ func (a *amqp1Reader) renewWithContext(ctx context.Context, msg *amqp.Message) (
 		return time.Time{}, fmt.Errorf("unsuccessful status code %d, message %s", statusCode, result.ApplicationProperties["statusDescription"])
 	}
 
-	values, ok := result.Value.(map[string]interface{})
+	values, ok := result.Value.(map[string]any)
 	if !ok {
 		return time.Time{}, errors.New("missing value in response message")
 	}
@@ -413,9 +401,9 @@ func (a *amqp1Reader) renewWithContext(ctx context.Context, msg *amqp.Message) (
 	return expirations[0], nil
 }
 
-func amqpSetMetadata(p *message.Part, k string, v interface{}) {
+func amqpSetMetadata(p *message.Part, k string, v any) {
 	var metaValue string
-	var metaKey = strings.ReplaceAll(k, "-", "_")
+	metaKey := strings.ReplaceAll(k, "-", "_")
 
 	switch v := v.(type) {
 	case bool:
@@ -445,6 +433,6 @@ func amqpSetMetadata(p *message.Part, k string, v interface{}) {
 	}
 
 	if metaValue != "" {
-		p.MetaSet(metaKey, metaValue)
+		p.MetaSetMut(metaKey, metaValue)
 	}
 }

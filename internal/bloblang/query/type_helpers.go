@@ -30,17 +30,18 @@ type ValueType string
 
 // ValueType variants.
 var (
-	ValueString  ValueType = "string"
-	ValueBytes   ValueType = "bytes"
-	ValueNumber  ValueType = "number"
-	ValueBool    ValueType = "bool"
-	ValueArray   ValueType = "array"
-	ValueObject  ValueType = "object"
-	ValueNull    ValueType = "null"
-	ValueDelete  ValueType = "delete"
-	ValueNothing ValueType = "nothing"
-	ValueQuery   ValueType = "query expression"
-	ValueUnknown ValueType = "unknown"
+	ValueString    ValueType = "string"
+	ValueBytes     ValueType = "bytes"
+	ValueNumber    ValueType = "number"
+	ValueBool      ValueType = "bool"
+	ValueTimestamp ValueType = "timestamp"
+	ValueArray     ValueType = "array"
+	ValueObject    ValueType = "object"
+	ValueNull      ValueType = "null"
+	ValueDelete    ValueType = "delete"
+	ValueNothing   ValueType = "nothing"
+	ValueQuery     ValueType = "query expression"
+	ValueUnknown   ValueType = "unknown"
 
 	// Specialised and not generally known over ValueNumber.
 	ValueInt   ValueType = "integer"
@@ -49,7 +50,7 @@ var (
 
 // ITypeOf returns the type of a boxed value as a discrete ValueType. If the
 // type of the value is unknown then ValueUnknown is returned.
-func ITypeOf(i interface{}) ValueType {
+func ITypeOf(i any) ValueType {
 	switch i.(type) {
 	case string:
 		return ValueString
@@ -59,9 +60,11 @@ func ITypeOf(i interface{}) ValueType {
 		return ValueNumber
 	case bool:
 		return ValueBool
-	case []interface{}:
+	case time.Time:
+		return ValueTimestamp
+	case []any:
 		return ValueArray
-	case map[string]interface{}:
+	case map[string]any:
 		return ValueObject
 	case Delete:
 		return ValueDelete
@@ -88,7 +91,7 @@ type Nothing *struct{}
 
 // IGetNumber takes a boxed value and attempts to extract a number (float64)
 // from it.
-func IGetNumber(v interface{}) (float64, error) {
+func IGetNumber(v any) (float64, error) {
 	switch t := v.(type) {
 	case int:
 		return float64(t), nil
@@ -106,7 +109,7 @@ func IGetNumber(v interface{}) (float64, error) {
 
 // IGetFloat32 takes a boxed value and attempts to extract a number (float32)
 // from it.
-func IGetFloat32(v interface{}) (float32, error) {
+func IGetFloat32(v any) (float32, error) {
 	switch t := v.(type) {
 	case int:
 		return float32(t), nil
@@ -127,7 +130,7 @@ func IGetFloat32(v interface{}) (float32, error) {
 
 // IGetInt takes a boxed value and attempts to extract an integer (int64) from
 // it.
-func IGetInt(v interface{}) (int64, error) {
+func IGetInt(v any) (int64, error) {
 	switch t := v.(type) {
 	case int:
 		return int64(t), nil
@@ -151,7 +154,7 @@ func IGetInt(v interface{}) (int64, error) {
 }
 
 // IGetBool takes a boxed value and attempts to extract a boolean from it.
-func IGetBool(v interface{}) (bool, error) {
+func IGetBool(v any) (bool, error) {
 	switch t := v.(type) {
 	case bool:
 		return t, nil
@@ -171,24 +174,28 @@ func IGetBool(v interface{}) (bool, error) {
 
 // IGetString takes a boxed value and attempts to return a string value. Returns
 // an error if the value is not a string or byte slice.
-func IGetString(v interface{}) (string, error) {
+func IGetString(v any) (string, error) {
 	switch t := v.(type) {
 	case string:
 		return t, nil
 	case []byte:
 		return string(t), nil
+	case time.Time:
+		return t.Format(time.RFC3339Nano), nil
 	}
 	return "", NewTypeError(v, ValueString)
 }
 
 // IGetBytes takes a boxed value and attempts to return a byte slice value.
 // Returns an error if the value is not a string or byte slice.
-func IGetBytes(v interface{}) ([]byte, error) {
+func IGetBytes(v any) ([]byte, error) {
 	switch t := v.(type) {
 	case string:
 		return []byte(t), nil
 	case []byte:
 		return t, nil
+	case time.Time:
+		return t.AppendFormat(nil, time.RFC3339Nano), nil
 	}
 	return nil, NewTypeError(v, ValueBytes)
 }
@@ -196,7 +203,10 @@ func IGetBytes(v interface{}) ([]byte, error) {
 // IGetTimestamp takes a boxed value and attempts to coerce it into a timestamp,
 // either by interpretting a numerical value as a unix timestamp, or by parsing
 // a string value as RFC3339Nano.
-func IGetTimestamp(v interface{}) (time.Time, error) {
+func IGetTimestamp(v any) (time.Time, error) {
+	if tVal, ok := v.(time.Time); ok {
+		return tVal, nil
+	}
 	switch t := ISanitize(v).(type) {
 	case int64:
 		return time.Unix(t, 0), nil
@@ -226,7 +236,7 @@ func IGetTimestamp(v interface{}) (time.Time, error) {
 
 // IIsNull returns whether a bloblang type is null, this includes Delete and
 // Nothing types.
-func IIsNull(i interface{}) bool {
+func IIsNull(i any) bool {
 	if i == nil {
 		return true
 	}
@@ -237,7 +247,7 @@ func IIsNull(i interface{}) bool {
 	return false
 }
 
-func restrictForComparison(v interface{}) interface{} {
+func restrictForComparison(v any) any {
 	v = ISanitize(v)
 	switch t := v.(type) {
 	case int64:
@@ -257,9 +267,9 @@ func restrictForComparison(v interface{}) interface{} {
 // ISanitize takes a boxed value of any type and attempts to convert it into one
 // of the following types: string, []byte, int64, uint64, float64, bool,
 // []interface{}, map[string]interface{}, Delete, Nothing.
-func ISanitize(i interface{}) interface{} {
+func ISanitize(i any) any {
 	switch t := i.(type) {
-	case string, []byte, int64, uint64, float64, bool, []interface{}, map[string]interface{}, Delete, Nothing:
+	case string, []byte, int64, uint64, float64, bool, []any, map[string]any, Delete, Nothing:
 		return i
 	case json.RawMessage:
 		return []byte(t)
@@ -290,7 +300,7 @@ func ISanitize(i interface{}) interface{} {
 
 // IToBytes takes a boxed value of any type and attempts to convert it into a
 // byte slice.
-func IToBytes(i interface{}) []byte {
+func IToBytes(i any) []byte {
 	switch t := i.(type) {
 	case string:
 		return []byte(t)
@@ -298,13 +308,19 @@ func IToBytes(i interface{}) []byte {
 		return t
 	case json.Number:
 		return []byte(t.String())
-	case int64, uint64, float64:
-		return []byte(fmt.Sprintf("%v", t)) // TODO
+	case int64:
+		return strconv.AppendInt(nil, t, 10)
+	case uint64:
+		return strconv.AppendUint(nil, t, 10)
+	case float64:
+		return strconv.AppendFloat(nil, t, 'g', -1, 64)
 	case bool:
 		if t {
 			return []byte("true")
 		}
 		return []byte("false")
+	case time.Time:
+		return t.AppendFormat(nil, time.RFC3339Nano)
 	case nil:
 		return []byte(`null`)
 	}
@@ -314,14 +330,18 @@ func IToBytes(i interface{}) []byte {
 
 // IToString takes a boxed value of any type and attempts to convert it into a
 // string.
-func IToString(i interface{}) string {
+func IToString(i any) string {
 	switch t := i.(type) {
 	case string:
 		return t
 	case []byte:
 		return string(t)
-	case int64, uint64, float64:
-		return fmt.Sprintf("%v", t) // TODO
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case uint64:
+		return strconv.FormatUint(t, 10)
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
 	case json.Number:
 		return t.String()
 	case bool:
@@ -329,6 +349,8 @@ func IToString(i interface{}) string {
 			return "true"
 		}
 		return "false"
+	case time.Time:
+		return t.Format(time.RFC3339Nano)
 	case nil:
 		return `null`
 	}
@@ -338,7 +360,7 @@ func IToString(i interface{}) string {
 
 // IToNumber takes a boxed value and attempts to extract a number (float64)
 // from it or parse one.
-func IToNumber(v interface{}) (float64, error) {
+func IToNumber(v any) (float64, error) {
 	switch t := v.(type) {
 	case int:
 		return float64(t), nil
@@ -358,12 +380,14 @@ func IToNumber(v interface{}) (float64, error) {
 	return 0, NewTypeError(v, ValueNumber)
 }
 
-const maxUint = ^uint64(0)
-const maxInt = maxUint >> 1
+const (
+	maxUint = ^uint64(0)
+	maxInt  = maxUint >> 1
+)
 
 // IToInt takes a boxed value and attempts to extract a number (int64) from it
 // or parse one.
-func IToInt(v interface{}) (int64, error) {
+func IToInt(v any) (int64, error) {
 	switch t := v.(type) {
 	case int:
 		return int64(t), nil
@@ -388,7 +412,7 @@ func IToInt(v interface{}) (int64, error) {
 
 // IToBool takes a boxed value and attempts to extract a boolean from it or
 // parse it into a bool.
-func IToBool(v interface{}) (bool, error) {
+func IToBool(v any) (bool, error) {
 	switch t := v.(type) {
 	case bool:
 		return t, nil
@@ -415,16 +439,16 @@ func IToBool(v interface{}) (bool, error) {
 }
 
 // IClone performs a deep copy of a generic value.
-func IClone(root interface{}) interface{} {
+func IClone(root any) any {
 	switch t := root.(type) {
-	case map[string]interface{}:
-		newMap := make(map[string]interface{}, len(t))
+	case map[string]any:
+		newMap := make(map[string]any, len(t))
 		for k, v := range t {
 			newMap[k] = IClone(v)
 		}
 		return newMap
-	case []interface{}:
-		newSlice := make([]interface{}, len(t))
+	case []any:
+		newSlice := make([]any, len(t))
 		for i, v := range t {
 			newSlice[i] = IClone(v)
 		}
@@ -437,12 +461,10 @@ func IClone(root interface{}) interface{} {
 // of the following conditions:
 //
 // - The types exactly match and have the same value
-// - The types are both either a string or byte slice and the underlying data is
-//   the same
+// - The types are both either a string or byte slice and the underlying data is the same
 // - The types are both numerical and have the same value
-// - Both types are a matching slice or map containing values matching these
-//   same conditions
-func ICompare(left, right interface{}) bool {
+// - Both types are a matching slice or map containing values matching these same conditions.
+func ICompare(left, right any) bool {
 	if left == nil && right == nil {
 		return true
 	}
@@ -465,8 +487,8 @@ func ICompare(left, right interface{}) bool {
 			return false
 		}
 		return lhs == rhs
-	case []interface{}:
-		rhs, matches := right.([]interface{})
+	case []any:
+		rhs, matches := right.([]any)
 		if !matches {
 			return false
 		}
@@ -479,8 +501,8 @@ func ICompare(left, right interface{}) bool {
 			}
 		}
 		return true
-	case map[string]interface{}:
-		rhs, matches := right.(map[string]interface{})
+	case map[string]any:
+		rhs, matches := right.(map[string]any)
 		if !matches {
 			return false
 		}

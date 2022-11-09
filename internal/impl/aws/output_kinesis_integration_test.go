@@ -16,12 +16,12 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/ory/dockertest/v3"
+	"github.com/stretchr/testify/require"
 
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func TestKinesisIntegration(t *testing.T) {
@@ -61,7 +61,7 @@ func TestKinesisIntegration(t *testing.T) {
 	}
 
 	endpoint := fmt.Sprintf("http://localhost:%d", port)
-	config := ooutput.KinesisConfig{
+	config := output.KinesisConfig{
 		Stream:       "foo",
 		PartitionKey: "${!json(\"id\")}",
 	}
@@ -94,21 +94,17 @@ func TestKinesisIntegration(t *testing.T) {
 	})
 }
 
-func testKinesisConnect(t *testing.T, c ooutput.KinesisConfig, client *kinesis.Kinesis) {
-	log := log.Noop()
-	r, err := newKinesisWriter(c, mock.NewManager(), log)
+func testKinesisConnect(t *testing.T, c output.KinesisConfig, client *kinesis.Kinesis) {
+	r, err := newKinesisWriter(c, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := r.ConnectWithContext(context.Background()); err != nil {
+	if err := r.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		r.CloseAsync()
-		if err := r.WaitForClose(time.Millisecond); err != nil {
-			t.Error(err)
-		}
+		require.NoError(t, r.Close(context.Background()))
 	}()
 
 	records := [][]byte{
@@ -119,10 +115,10 @@ func testKinesisConnect(t *testing.T, c ooutput.KinesisConfig, client *kinesis.K
 
 	msg := message.QuickBatch(nil)
 	for _, record := range records {
-		msg.Append(message.NewPart(record))
+		msg = append(msg, message.NewPart(record))
 	}
 
-	if err := r.WriteWithContext(context.Background(), msg); err != nil {
+	if err := r.WriteBatch(context.Background(), msg); err != nil {
 		t.Fatal(err)
 	}
 

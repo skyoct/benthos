@@ -51,7 +51,9 @@ type Statement struct {
 // parsed expression that created the statement.
 func NewStatement(input []rune, assignment Assignment, query query.Function) Statement {
 	return Statement{
-		input, assignment, query,
+		input:      input,
+		assignment: assignment,
+		query:      query,
 	}
 }
 
@@ -75,7 +77,13 @@ const defaultMaxMapStacks = 5000
 // is an optional slice pointing to the parsed expression that created the
 // executor.
 func NewExecutor(annotation string, input []rune, maps map[string]query.Function, statements ...Statement) *Executor {
-	return &Executor{annotation, input, maps, statements, defaultMaxMapStacks}
+	return &Executor{
+		annotation:   annotation,
+		input:        input,
+		maps:         maps,
+		statements:   statements,
+		maxMapStacks: defaultMaxMapStacks,
+	}
 }
 
 // SetMaxMapRecursion configures the maximum recursion allowed for maps, if the
@@ -105,7 +113,10 @@ func (e *Executor) QueryPart(index int, msg Message) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	newValue, err := newPart.JSON()
+	if newPart == nil {
+		return false, errors.New("query mapping resulted in deleted message, expected a boolean value")
+	}
+	newValue, err := newPart.AsStructured()
 	if err != nil {
 		return false, err
 	}
@@ -134,12 +145,12 @@ func (e *Executor) MapOnto(part *message.Part, index int, msg Message) (*message
 }
 
 func (e *Executor) mapPart(appendTo *message.Part, index int, reference Message) (*message.Part, error) {
-	var valuePtr *interface{}
+	var valuePtr *any
 	var parseErr error
 
-	lazyValue := func() *interface{} {
+	lazyValue := func() *any {
 		if valuePtr == nil && parseErr == nil {
-			if jObj, err := reference.Get(index).JSON(); err == nil {
+			if jObj, err := reference.Get(index).AsStructured(); err == nil {
 				valuePtr = &jObj
 			} else {
 				if errors.Is(err, message.ErrMessagePartNotExist) {
@@ -153,18 +164,18 @@ func (e *Executor) mapPart(appendTo *message.Part, index int, reference Message)
 	}
 
 	var newPart *message.Part
-	var newValue interface{} = query.Nothing(nil)
+	var newValue any = query.Nothing(nil)
 
 	if appendTo == nil {
-		newPart = reference.Get(index).Copy()
+		newPart = reference.Get(index).ShallowCopy()
 	} else {
 		newPart = appendTo
-		if appendObj, err := appendTo.JSON(); err == nil {
+		if appendObj, err := appendTo.AsStructuredMut(); err == nil {
 			newValue = appendObj
 		}
 	}
 
-	vars := map[string]interface{}{}
+	vars := map[string]any{}
 
 	for _, stmt := range e.statements {
 		res, err := stmt.query.Exec(query.FunctionContext{
@@ -216,11 +227,11 @@ func (e *Executor) mapPart(appendTo *message.Part, index int, reference Message)
 	default:
 		switch t := newValue.(type) {
 		case string:
-			newPart.Set([]byte(t))
+			newPart.SetBytes([]byte(t))
 		case []byte:
-			newPart.Set(t)
+			newPart.SetBytes(t)
 		default:
-			newPart.SetJSON(newValue)
+			newPart.SetStructuredMut(newValue)
 		}
 	}
 	return newPart, nil
@@ -253,13 +264,13 @@ func (e *Executor) AssignmentTargets() []TargetPath {
 }
 
 // Exec this function with a context struct.
-func (e *Executor) Exec(ctx query.FunctionContext) (interface{}, error) {
+func (e *Executor) Exec(ctx query.FunctionContext) (any, error) {
 	ctx, stackCount := ctx.IncrStackCount()
 	if stackCount > e.maxMapStacks {
 		return nil, &errStacks{annotation: e.annotation, maxStacks: e.maxMapStacks}
 	}
 
-	var newObj interface{} = query.Nothing(nil)
+	var newObj any = query.Nothing(nil)
 	ctx.NewValue = &newObj
 
 	for _, stmt := range e.statements {

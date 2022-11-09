@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	_ "github.com/benthosdev/benthos/v4/internal/impl/pure"
 )
@@ -40,7 +41,7 @@ func TestParallelBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := h.ProcessMessage(message.QuickBatch([][]byte{
+	msgs, res := h.ProcessBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte("foo"),
 		[]byte("bar"),
 		[]byte("baz"),
@@ -88,7 +89,7 @@ func TestParallelError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := h.ProcessMessage(message.QuickBatch([][]byte{
+	msgs, res := h.ProcessBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte("foo"),
 		[]byte("bar"),
 		[]byte("baz"),
@@ -101,12 +102,12 @@ func TestParallelError(t *testing.T) {
 	if expC, actC := 5, msgs[0].Len(); actC != expC {
 		t.Fatalf("Wrong result count: %v != %v", actC, expC)
 	}
-	if exp, act := "baz", string(msgs[0].Get(2).Get()); act != exp {
+	if exp, act := "baz", string(msgs[0].Get(2).AsBytes()); act != exp {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	assert.Error(t, msgs[0].Get(2).ErrorGet())
 	for _, i := range []int{0, 1, 3, 4} {
-		if exp, act := "foobar", string(msgs[0].Get(i).Get()); act != exp {
+		if exp, act := "foobar", string(msgs[0].Get(i).AsBytes()); act != exp {
 			t.Errorf("Wrong result: %v != %v", act, exp)
 		}
 		assert.NoError(t, msgs[0].Get(i).ErrorGet())
@@ -139,7 +140,7 @@ func TestParallelCapped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := h.ProcessMessage(message.QuickBatch([][]byte{
+	msgs, res := h.ProcessBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte("foo"),
 		[]byte("bar"),
 		[]byte("baz"),

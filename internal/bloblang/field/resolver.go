@@ -10,23 +10,23 @@ import (
 // Resolver is an interface for resolving a string containing Bloblang function
 // interpolations into either a string or bytes.
 type Resolver interface {
-	ResolveString(index int, msg Message, escaped, legacy bool) string
-	ResolveBytes(index int, msg Message, escaped, legacy bool) []byte
+	ResolveString(index int, msg Message, escaped bool) string
+	ResolveBytes(index int, msg Message, escaped bool) []byte
 }
 
 //------------------------------------------------------------------------------
 
 // StaticResolver is a Resolver implementation that simply returns a static
-// string
+// string.
 type StaticResolver string
 
 // ResolveString returns a string.
-func (s StaticResolver) ResolveString(index int, msg Message, escaped, legacy bool) string {
+func (s StaticResolver) ResolveString(index int, msg Message, escaped bool) string {
 	return string(s)
 }
 
 // ResolveBytes returns a byte slice.
-func (s StaticResolver) ResolveBytes(index int, msg Message, escaped, legacy bool) []byte {
+func (s StaticResolver) ResolveBytes(index int, msg Message, escaped bool) []byte {
 	return []byte(s)
 }
 
@@ -45,17 +45,16 @@ func NewQueryResolver(fn query.Function) *QueryResolver {
 }
 
 // ResolveString returns a string.
-func (q QueryResolver) ResolveString(index int, msg Message, escaped, legacy bool) string {
+func (q QueryResolver) ResolveString(index int, msg Message, escaped bool) string {
 	if msg == nil {
 		msg = message.QuickBatch(nil)
 	}
 	return query.ExecToString(q.fn, query.FunctionContext{
 		Index:    index,
 		MsgBatch: msg,
-		Legacy:   legacy,
 		NewMeta:  msg.Get(index),
-	}.WithValueFunc(func() *interface{} {
-		if jObj, err := msg.Get(index).JSON(); err == nil {
+	}.WithValueFunc(func() *any {
+		if jObj, err := msg.Get(index).AsStructured(); err == nil {
 			return &jObj
 		}
 		return nil
@@ -63,17 +62,16 @@ func (q QueryResolver) ResolveString(index int, msg Message, escaped, legacy boo
 }
 
 // ResolveBytes returns a byte slice.
-func (q QueryResolver) ResolveBytes(index int, msg Message, escaped, legacy bool) []byte {
+func (q QueryResolver) ResolveBytes(index int, msg Message, escaped bool) []byte {
 	if msg == nil {
 		msg = message.QuickBatch(nil)
 	}
 	bs := query.ExecToBytes(q.fn, query.FunctionContext{
 		Index:    index,
 		MsgBatch: msg,
-		Legacy:   legacy,
 		NewMeta:  msg.Get(index),
-	}.WithValueFunc(func() *interface{} {
-		if jObj, err := msg.Get(index).JSON(); err == nil {
+	}.WithValueFunc(func() *any {
+		if jObj, err := msg.Get(index).AsStructured(); err == nil {
 			return &jObj
 		}
 		return nil

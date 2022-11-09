@@ -11,20 +11,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newSleep(conf.Sleep, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("sleep", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("sleep", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "sleep",
 		Categories: []string{
@@ -47,7 +45,7 @@ type sleepProc struct {
 	log         log.Modular
 }
 
-func newSleep(conf oprocessor.SleepConfig, mgr interop.Manager) (*sleepProc, error) {
+func newSleep(conf processor.SleepConfig, mgr bundle.NewManagement) (*sleepProc, error) {
 	durationStr, err := mgr.BloblEnvironment().NewField(conf.Duration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse duration expression: %v", err)
@@ -60,7 +58,7 @@ func newSleep(conf oprocessor.SleepConfig, mgr interop.Manager) (*sleepProc, err
 	return t, nil
 }
 
-func (s *sleepProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (s *sleepProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	_ = msg.Iter(func(i int, p *message.Part) error {
 		period, err := time.ParseDuration(s.durationStr.String(i, msg))
 		if err != nil {
@@ -76,7 +74,7 @@ func (s *sleepProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg
 		}
 		return nil
 	})
-	return []*message.Batch{msg}, nil
+	return []message.Batch{msg}, nil
 }
 
 func (s *sleepProc) Close(ctx context.Context) error {

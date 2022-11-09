@@ -3,7 +3,8 @@ package pure
 import (
 	"context"
 	"testing"
-	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/transaction"
@@ -14,7 +15,7 @@ func TestSyncResponseWriter(t *testing.T) {
 
 	impl := transaction.NewResultStore()
 	w := SyncResponseWriter{}
-	if err := w.ConnectWithContext(wctx); err != nil {
+	if err := w.Connect(wctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -23,10 +24,9 @@ func TestSyncResponseWriter(t *testing.T) {
 	msg := message.QuickBatch(nil)
 	p := message.NewPart([]byte("foo"))
 	p = message.WithContext(ctx, p)
-	msg.Append(p)
-	msg.Append(message.NewPart([]byte("bar")))
+	msg = append(msg, p, message.NewPart([]byte("bar")))
 
-	if err := w.WriteWithContext(wctx, msg); err != nil {
+	if err := w.WriteBatch(wctx, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -38,18 +38,15 @@ func TestSyncResponseWriter(t *testing.T) {
 	if results[0].Len() != 2 {
 		t.Fatalf("Wrong count of messages: %v", results[0].Len())
 	}
-	if exp, act := "foo", string(results[0].Get(0).Get()); exp != act {
+	if exp, act := "foo", string(results[0].Get(0).AsBytes()); exp != act {
 		t.Errorf("Wrong message contents: %v != %v", act, exp)
 	}
-	if exp, act := "bar", string(results[0].Get(1).Get()); exp != act {
+	if exp, act := "bar", string(results[0].Get(1).AsBytes()); exp != act {
 		t.Errorf("Wrong message contents: %v != %v", act, exp)
 	}
 	if store := message.GetContext(results[0].Get(0)).Value(transaction.ResultStoreKey); store != nil {
 		t.Error("Unexpected nested result store")
 	}
 
-	w.CloseAsync()
-	if err := w.WaitForClose(time.Second); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, w.Close(ctx))
 }

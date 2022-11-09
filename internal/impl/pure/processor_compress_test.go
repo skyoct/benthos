@@ -5,15 +5,16 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"context"
 	"reflect"
 	"testing"
 
 	"github.com/golang/snappy"
 	"github.com/pierrec/lz4/v4"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestCompressBadAlgo(t *testing.T) {
@@ -61,7 +62,7 @@ func TestCompressGZIP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := proc.ProcessMessage(message.QuickBatch(input))
+	msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(input))
 	if len(msgs) != 1 {
 		t.Error("Compress failed")
 	} else if res != nil {
@@ -106,7 +107,7 @@ func TestCompressZLIB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := proc.ProcessMessage(message.QuickBatch(input))
+	msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(input))
 	if len(msgs) != 1 {
 		t.Error("Compress failed")
 	} else if res != nil {
@@ -154,7 +155,7 @@ func TestCompressFlate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := proc.ProcessMessage(message.QuickBatch(input))
+	msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(input))
 	if len(msgs) != 1 {
 		t.Error("Compress failed")
 	} else if res != nil {
@@ -194,7 +195,7 @@ func TestCompressSnappy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := proc.ProcessMessage(message.QuickBatch(input))
+	msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(input))
 	if len(msgs) != 1 {
 		t.Error("Compress failed")
 	} else if res != nil {
@@ -242,7 +243,7 @@ func TestCompressLZ4(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs, res := proc.ProcessMessage(message.QuickBatch(input))
+	msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(input))
 	if len(msgs) != 1 {
 		t.Error("Compress failed")
 	} else if res != nil {

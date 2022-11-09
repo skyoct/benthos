@@ -4,20 +4,18 @@ import (
 	"context"
 	"errors"
 	"strconv"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
-	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(newFallback, docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newFallback), docs.ComponentSpec{
 		Name:    "fallback",
 		Version: "3.58.0",
 		Summary: `
@@ -37,10 +35,14 @@ output:
         retries: 3
         retry_period: 1s
       processors:
-        - bloblang: 'root = "failed to send this message to foo: " + content()'
+        - mapping: 'root = "failed to send this message to foo: " + content()'
     - file:
         path: /usr/local/benthos/everything_failed.jsonl
 ` + "```" + `
+
+### Metadata
+
+When a given output fails the message routed to the following output will have a metadata value named ` + "`fallback_error`" + ` containing a string error message outlining the cause of the failure. The content of this string will depend on the particular output and can be used to enrich the message or provide information used to broker the data to an appropriate output using something like a ` + "`switch`" + ` output.
 
 ### Batching
 
@@ -76,11 +78,8 @@ However, depending on the output and the error returned it is sometimes not poss
 
 //------------------------------------------------------------------------------
 
-func newFallback(conf ooutput.Config, mgr bundle.NewManagement, pipelines ...processor.PipelineConstructorFunc) (output.Streamed, error) {
-	pipelines = ooutput.AppendProcessorsFromConfig(conf, mgr, pipelines...)
-
+func newFallback(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
 	outputConfs := conf.Fallback
-
 	if len(outputConfs) == 0 {
 		return nil, ErrBrokerNoOutputs
 	}
@@ -88,7 +87,7 @@ func newFallback(conf ooutput.Config, mgr bundle.NewManagement, pipelines ...pro
 
 	var err error
 	for i, oConf := range outputConfs {
-		oMgr := mgr.IntoPath("fallback", strconv.Itoa(i)).(bundle.NewManagement)
+		oMgr := mgr.IntoPath("fallback", strconv.Itoa(i))
 		if outputs[i], err = oMgr.NewOutput(oConf); err != nil {
 			return nil, err
 		}
@@ -98,7 +97,7 @@ func newFallback(conf ooutput.Config, mgr bundle.NewManagement, pipelines ...pro
 	if t, err = newFallbackBroker(outputs); err != nil {
 		return nil, err
 	}
-	return ooutput.WrapWithPipelines(t, pipelines...)
+	return t, nil
 }
 
 type fallbackBroker struct {
@@ -161,7 +160,7 @@ func (t *fallbackBroker) loop() {
 		for _, c := range t.outputTSChans {
 			close(c)
 		}
-		closeAllOutputs(t.outputs)
+		_ = closeAllOutputs(context.Background(), t.outputs)
 		t.shutSig.ShutdownComplete()
 	}()
 
@@ -185,8 +184,13 @@ func (t *fallbackBroker) loop() {
 			if err == nil || len(t.outputTSChans) <= i {
 				return tran.Ack(ctx, err)
 			}
+			newPayload := tran.Payload.ShallowCopy()
+			_ = newPayload.Iter(func(i int, p *message.Part) error {
+				p.MetaSetMut("fallback_error", err.Error())
+				return nil
+			})
 			select {
-			case t.outputTSChans[i] <- message.NewTransactionFunc(tran.Payload, ackFn):
+			case t.outputTSChans[i] <- message.NewTransactionFunc(newPayload, ackFn):
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -194,37 +198,34 @@ func (t *fallbackBroker) loop() {
 		}
 
 		select {
-		case t.outputTSChans[i] <- message.NewTransactionFunc(tran.Payload, ackFn):
+		case t.outputTSChans[i] <- message.NewTransactionFunc(tran.Payload.ShallowCopy(), ackFn):
 		case <-t.shutSig.CloseAtLeisureChan():
 			return
 		}
 	}
 }
 
-// CloseAsync shuts down the fallbackBroker broker and stops processing requests.
-func (t *fallbackBroker) CloseAsync() {
-	t.shutSig.CloseAtLeisure()
+func (t *fallbackBroker) TriggerCloseNow() {
+	t.shutSig.CloseNow()
 }
 
-// WaitForClose blocks until the fallbackBroker broker has closed down.
-func (t *fallbackBroker) WaitForClose(timeout time.Duration) error {
+func (t *fallbackBroker) WaitForClose(ctx context.Context) error {
 	select {
 	case <-t.shutSig.HasClosedChan():
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }
 
-func closeAllOutputs(outputs []output.Streamed) {
+func closeAllOutputs(ctx context.Context, outputs []output.Streamed) error {
 	for _, o := range outputs {
-		o.CloseAsync()
+		o.TriggerCloseNow()
 	}
 	for _, o := range outputs {
-		for {
-			if err := o.WaitForClose(time.Second); err == nil {
-				break
-			}
+		if err := o.WaitForClose(ctx); err != nil {
+			return err
 		}
 	}
+	return nil
 }

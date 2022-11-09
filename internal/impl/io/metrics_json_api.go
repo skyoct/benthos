@@ -19,7 +19,7 @@ func init() {
 			Summary: `Serves metrics as JSON object with the service wide HTTP service at the endpoints ` + "`/stats` and `/metrics`" + `.`,
 			Description: `
 This metrics type is useful for debugging as it provides a human readable format that you can parse with tools such as ` + "`jq`" + ``,
-			Config: docs.FieldObject("", ""),
+			Config: docs.FieldObject("", "").HasDefault(struct{}{}),
 		})
 }
 
@@ -31,11 +31,11 @@ type jsonAPIMetrics struct {
 	timestamp time.Time
 }
 
-func newJSONAPI(config metrics.Config, log log.Modular) (metrics.Type, error) {
+func newJSONAPI(config metrics.Config, nm bundle.NewManagement) (metrics.Type, error) {
 	t := &jsonAPIMetrics{
 		local:     metrics.NewLocal(),
 		timestamp: time.Now(),
-		log:       log,
+		log:       nm.Logger(),
 	}
 	return t, nil
 }
@@ -44,7 +44,7 @@ func newJSONAPI(config metrics.Config, log log.Modular) (metrics.Type, error) {
 
 func (h *jsonAPIMetrics) HandlerFunc() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		values := map[string]interface{}{}
+		values := map[string]any{}
 		for k, v := range h.local.GetCounters() {
 			values[k] = v
 		}

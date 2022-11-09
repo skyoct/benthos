@@ -12,13 +12,14 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	tdocs "github.com/benthosdev/benthos/v4/internal/cli/test/docs"
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/component/ratelimit"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	ifilepath "github.com/benthosdev/benthos/v4/internal/filepath"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/manager"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 type resourceFileInfo struct {
@@ -66,7 +67,7 @@ func resInfoFromConfig(conf *manager.ResourceConfig) resourceFileInfo {
 }
 
 func (r *Reader) resourcePathsExpanded() ([]string, error) {
-	resourcePaths, err := ifilepath.Globs(r.resourcePaths)
+	resourcePaths, err := ifilepath.Globs(ifs.OS(), r.resourcePaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve resource glob pattern: %w", err)
 	}
@@ -103,8 +104,12 @@ func readResource(path string, conf *manager.ResourceConfig) (lints []string, er
 	}()
 
 	var confBytes []byte
-	if confBytes, lints, err = ReadFileEnvSwap(path); err != nil {
+	var dLints []docs.Lint
+	if confBytes, dLints, err = ReadFileEnvSwap(path); err != nil {
 		return
+	}
+	for _, l := range dLints {
+		lints = append(lints, l.Error())
 	}
 
 	var rawNode yaml.Node
@@ -116,7 +121,7 @@ func readResource(path string, conf *manager.ResourceConfig) (lints []string, er
 			tdocs.ConfigSpec(),
 		}, manager.Spec()...)
 		for _, lint := range allowTest.LintYAML(docs.NewLintContext(), &rawNode) {
-			lints = append(lints, fmt.Sprintf("resource file %v: line %v: %v", path, lint.Line, lint.What))
+			lints = append(lints, fmt.Sprintf("%v%v", path, lint.Error()))
 		}
 	}
 

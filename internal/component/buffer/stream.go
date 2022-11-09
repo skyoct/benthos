@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/log"
@@ -27,10 +29,10 @@ type ReaderWriter interface {
 	// the message is preserved until the returned AckFunc is called. Some
 	// temporal buffer implementations such as windowers will ignore the ack
 	// func.
-	Read(context.Context) (*message.Batch, AckFunc, error)
+	Read(context.Context) (message.Batch, AckFunc, error)
 
 	// Write a new message batch to the stack.
-	Write(context.Context, *message.Batch, AckFunc) error
+	Write(context.Context, message.Batch, AckFunc) error
 
 	// EndOfInput indicates to the buffer that the input has ended and that once
 	// the buffer is depleted it should return component.ErrTypeClosed from Read in
@@ -51,6 +53,7 @@ type ReaderWriter interface {
 type Stream struct {
 	stats   metrics.Type
 	log     log.Modular
+	tracer  trace.TracerProvider
 	typeStr string
 
 	buffer ReaderWriter
@@ -65,11 +68,12 @@ type Stream struct {
 }
 
 // NewStream creates a new Producer/Consumer around a buffer.
-func NewStream(typeStr string, buffer ReaderWriter, log log.Modular, stats metrics.Type) Streamed {
+func NewStream(typeStr string, buffer ReaderWriter, mgr component.Observability) Streamed {
 	m := Stream{
 		typeStr:     typeStr,
-		stats:       stats,
-		log:         log,
+		stats:       mgr.Metrics(),
+		log:         mgr.Logger(),
+		tracer:      mgr.Tracer(),
 		buffer:      buffer,
 		shutSig:     shutdown.NewSignaller(),
 		messagesOut: make(chan message.Transaction),
@@ -124,7 +128,9 @@ func (m *Stream) inputLoop() {
 		}
 
 		batchLen := tr.Payload.Len()
-		err := m.buffer.Write(closeAtLeisureCtx, tracing.WithSiblingSpans(m.typeStr, tr.Payload), ackFunc)
+
+		writeBatch, _ := tracing.WithSiblingSpans(m.tracer, m.typeStr, tr.Payload)
+		err := m.buffer.Write(closeAtLeisureCtx, writeBatch, ackFunc)
 		if err == nil {
 			mReceivedCount.Incr(int64(batchLen))
 			mReceivedBatchCount.Incr(1)
@@ -170,7 +176,7 @@ func (m *Stream) outputLoop() {
 		}
 
 		// It's possible that the buffer wiped our previous root span.
-		tracing.InitSpans(m.typeStr, msg)
+		tracing.InitSpans(m.tracer, m.typeStr, msg)
 
 		batchLen := msg.Len()
 
@@ -232,23 +238,23 @@ func (m *Stream) TransactionChan() <-chan message.Transaction {
 	return m.messagesOut
 }
 
-// CloseAsync shuts down the Stream and stops processing messages.
-func (m *Stream) CloseAsync() {
-	m.shutSig.CloseNow()
-}
-
-// StopConsuming instructs the buffer to stop consuming messages and close once
-// the buffer is empty.
-func (m *Stream) StopConsuming() {
+// TriggerStopConsuming instructs the buffer to stop consuming messages and
+// close once the buffer is empty.
+func (m *Stream) TriggerStopConsuming() {
 	m.shutSig.CloseAtLeisure()
 }
 
+// TriggerCloseNow shuts down the Stream and stops processing messages.
+func (m *Stream) TriggerCloseNow() {
+	m.shutSig.CloseNow()
+}
+
 // WaitForClose blocks until the Stream output has closed down.
-func (m *Stream) WaitForClose(timeout time.Duration) error {
+func (m *Stream) WaitForClose(ctx context.Context) error {
 	select {
 	case <-m.shutSig.HasClosedChan():
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }

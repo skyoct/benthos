@@ -11,18 +11,16 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/component/ratelimit"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newRateLimitProc(conf.RateLimit, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("rate_limit", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("rate_limit", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "rate_limit",
 		Categories: []string{
@@ -44,13 +42,13 @@ pipelines.`,
 
 type rateLimitProc struct {
 	rlName string
-	mgr    interop.Manager
+	mgr    bundle.NewManagement
 
 	closeChan chan struct{}
 	closeOnce sync.Once
 }
 
-func newRateLimitProc(conf oprocessor.RateLimitConfig, mgr interop.Manager) (*rateLimitProc, error) {
+func newRateLimitProc(conf processor.RateLimitConfig, mgr bundle.NewManagement) (*rateLimitProc, error) {
 	if !mgr.ProbeRateLimit(conf.Resource) {
 		return nil, fmt.Errorf("rate limit resource '%v' was not found", conf.Resource)
 	}

@@ -1,13 +1,14 @@
 package xml_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestXMLCases(t *testing.T) {
@@ -100,14 +101,14 @@ func TestXMLCases(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(tt *testing.T) {
-			msgsOut, res := proc.ProcessMessage(message.QuickBatch([][]byte{[]byte(test.input)}))
+			msgsOut, res := proc.ProcessBatch(context.Background(), message.QuickBatch([][]byte{[]byte(test.input)}))
 			if res != nil {
 				tt.Fatal(res)
 			}
 			if len(msgsOut) != 1 {
 				tt.Fatalf("Wrong count of result messages: %v != 1", len(msgsOut))
 			}
-			if exp, act := test.output, string(msgsOut[0].Get(0).Get()); exp != act {
+			if exp, act := test.output, string(msgsOut[0].Get(0).AsBytes()); exp != act {
 				tt.Errorf("Wrong result: %v != %v", act, exp)
 			}
 			assert.NoError(t, msgsOut[0].Get(0).ErrorGet())
@@ -128,14 +129,14 @@ func TestXMLWithCast(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgsOut, res := proc.ProcessMessage(message.QuickBatch([][]byte{[]byte(testString)}))
+	msgsOut, res := proc.ProcessBatch(context.Background(), message.QuickBatch([][]byte{[]byte(testString)}))
 	if res != nil {
 		t.Fatal(res.Error())
 	}
 	if len(msgsOut) != 1 {
 		t.Fatalf("Wrong count of result messages: %v != 1", len(msgsOut))
 	}
-	if exp, act := `{"root":{"bool":true,"number":{"#text":123,"-id":99},"title":"This is a title"}}`, string(msgsOut[0].Get(0).Get()); exp != act {
+	if exp, act := `{"root":{"bool":true,"number":{"#text":123,"-id":99},"title":"This is a title"}}`, string(msgsOut[0].Get(0).AsBytes()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	assert.NoError(t, msgsOut[0].Get(0).ErrorGet())

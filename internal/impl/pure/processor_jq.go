@@ -11,19 +11,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newJQ(conf.JQ, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("jq", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("jq", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name:   "jq",
 		Status: docs.StatusStable,
@@ -34,7 +32,7 @@ func init() {
 Transforms and filters messages using jq queries.`,
 		Description: `
 :::note Try out Bloblang
-For better performance and improved capabilities try out native Benthos mapping with the [bloblang processor](/docs/components/processors/bloblang).
+For better performance and improved capabilities try out native Benthos mapping with the [` + "`mapping`" + ` processor](/docs/components/processors/mapping).
 :::
 
 The provided query is executed on each message, targeting either the contents
@@ -100,7 +98,7 @@ pipeline:
 			docs.FieldString("query", "The jq query to filter and transform messages with."),
 			docs.FieldBool("raw", "Whether to process the input as a raw string instead of as JSON.").Advanced(),
 			docs.FieldBool("output_raw", "Whether to output raw text (unquoted) instead of JSON strings when the emitted values are string types.").Advanced(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewJQConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewJQConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -118,7 +116,7 @@ type jqProc struct {
 	code   *gojq.Code
 }
 
-func newJQ(conf oprocessor.JQConfig, mgr interop.Manager) (*jqProc, error) {
+func newJQ(conf processor.JQConfig, mgr bundle.NewManagement) (*jqProc, error) {
 	j := &jqProc{
 		inRaw:  conf.Raw,
 		outRaw: conf.OutputRaw,
@@ -138,24 +136,20 @@ func newJQ(conf oprocessor.JQConfig, mgr interop.Manager) (*jqProc, error) {
 	return j, nil
 }
 
-func (j *jqProc) getPartMetadata(part *message.Part) map[string]interface{} {
-	metadata := map[string]interface{}{}
-	_ = part.MetaIter(func(k, v string) error {
+func (j *jqProc) getPartMetadata(part *message.Part) map[string]any {
+	metadata := map[string]any{}
+	_ = part.MetaIterMut(func(k string, v any) error {
 		metadata[k] = v
 		return nil
 	})
 	return metadata
 }
 
-func (j *jqProc) getPartValue(part *message.Part, raw bool) (obj interface{}, err error) {
+func (j *jqProc) getPartValue(part *message.Part, raw bool) (obj any, err error) {
 	if raw {
-		return string(part.Get()), nil
+		return string(part.AsBytes()), nil
 	}
-	obj, err = part.JSON()
-	if err == nil {
-		obj, err = message.CopyJSON(obj)
-	}
-	if err != nil {
+	if obj, err = part.AsStructured(); err != nil {
 		j.log.Debugf("Failed to parse part into json: %v\n", err)
 		return nil, err
 	}
@@ -163,15 +157,13 @@ func (j *jqProc) getPartValue(part *message.Part, raw bool) (obj interface{}, er
 }
 
 func (j *jqProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	part := msg.Copy()
-
-	in, err := j.getPartValue(part, j.inRaw)
+	in, err := j.getPartValue(msg, j.inRaw)
 	if err != nil {
 		return nil, err
 	}
-	metadata := j.getPartMetadata(part)
+	metadata := j.getPartMetadata(msg)
 
-	var emitted []interface{}
+	var emitted []any
 	iter := j.code.Run(in, metadata)
 	for {
 		out, ok := iter.Next()
@@ -200,23 +192,23 @@ func (j *jqProc) Process(ctx context.Context, msg *message.Part) ([]*message.Par
 			return nil, nil
 		}
 
-		part.Set(raw)
-		return []*message.Part{part}, nil
+		msg.SetBytes(raw)
+		return []*message.Part{msg}, nil
 	} else if len(emitted) > 1 {
-		part.SetJSON(emitted)
+		msg.SetStructuredMut(emitted)
 	} else if len(emitted) == 1 {
-		part.SetJSON(emitted[0])
+		msg.SetStructuredMut(emitted[0])
 	} else {
 		return nil, nil
 	}
-	return []*message.Part{part}, nil
+	return []*message.Part{msg}, nil
 }
 
 func (*jqProc) Close(ctx context.Context) error {
 	return nil
 }
 
-func (j *jqProc) marshalRaw(values []interface{}) ([]byte, error) {
+func (j *jqProc) marshalRaw(values []any) ([]byte, error) {
 	buf := bytes.NewBufferString("")
 
 	for index, el := range values {

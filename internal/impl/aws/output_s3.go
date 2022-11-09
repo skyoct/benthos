@@ -15,30 +15,30 @@ import (
 
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
+	"github.com/benthosdev/benthos/v4/internal/bloblang/query"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/metadata"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		sthree, err := newAmazonS3Writer(c.AWSS3, nm)
 		if err != nil {
 			return nil, err
 		}
-		w, err := ooutput.NewAsyncWriter("aws_s3", c.AWSS3.MaxInFlight, sthree, nm.Logger(), nm.Metrics())
+		w, err := output.NewAsyncWriter("aws_s3", c.AWSS3.MaxInFlight, sthree, nm)
 		if err != nil {
 			return nil, err
 		}
-		return ooutput.NewBatcherFromConfig(c.AWSS3.Batching, w, nm, nm.Logger(), nm.Metrics())
+		return batcher.NewFromConfig(c.AWSS3.Batching, w, nm)
 	}), docs.ComponentSpec{
 		Name:    "aws_s3",
 		Version: "3.36.0",
@@ -144,10 +144,10 @@ output:
 			docs.FieldString("kms_key_id", "An optional server side encryption key.").Advanced(),
 			docs.FieldString("server_side_encryption", "An optional server side encryption algorithm.").AtVersion("3.63.0").Advanced(),
 			docs.FieldBool("force_path_style_urls", "Forces the client API to use path style URLs, which helps when connecting to custom endpoints.").Advanced(),
-			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
+			docs.FieldInt("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time."),
 			docs.FieldString("timeout", "The maximum period to wait on an upload before abandoning it and reattempting.").Advanced(),
 			policy.FieldSpec(),
-		).WithChildren(sess.FieldSpecs()...).ChildDefaultAndTypesFromStruct(ooutput.NewAmazonS3Config()),
+		).WithChildren(sess.FieldSpecs()...).ChildDefaultAndTypesFromStruct(output.NewAmazonS3Config()),
 		Categories: []string{
 			"Services",
 			"AWS",
@@ -164,7 +164,7 @@ type s3TagPair struct {
 }
 
 type amazonS3Writer struct {
-	conf ooutput.AmazonS3Config
+	conf output.AmazonS3Config
 
 	path                    *field.Expression
 	tags                    []s3TagPair
@@ -184,7 +184,7 @@ type amazonS3Writer struct {
 	log log.Modular
 }
 
-func newAmazonS3Writer(conf ooutput.AmazonS3Config, mgr interop.Manager) (*amazonS3Writer, error) {
+func newAmazonS3Writer(conf output.AmazonS3Config, mgr bundle.NewManagement) (*amazonS3Writer, error) {
 	var timeout time.Duration
 	if tout := conf.Timeout; len(tout) > 0 {
 		var err error
@@ -245,7 +245,7 @@ func newAmazonS3Writer(conf ooutput.AmazonS3Config, mgr interop.Manager) (*amazo
 	return a, nil
 }
 
-func (a *amazonS3Writer) ConnectWithContext(ctx context.Context) error {
+func (a *amazonS3Writer) Connect(ctx context.Context) error {
 	if a.session != nil {
 		return nil
 	}
@@ -264,7 +264,7 @@ func (a *amazonS3Writer) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func (a *amazonS3Writer) WriteWithContext(wctx context.Context, msg *message.Batch) error {
+func (a *amazonS3Writer) WriteBatch(wctx context.Context, msg message.Batch) error {
 	if a.session == nil {
 		return component.ErrNotConnected
 	}
@@ -274,10 +274,10 @@ func (a *amazonS3Writer) WriteWithContext(wctx context.Context, msg *message.Bat
 	)
 	defer cancel()
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
 		metadata := map[string]*string{}
-		_ = a.metaFilter.Iter(p, func(k, v string) error {
-			metadata[k] = aws.String(v)
+		_ = a.metaFilter.Iter(p, func(k string, v any) error {
+			metadata[k] = aws.String(query.IToString(v))
 			return nil
 		})
 
@@ -305,7 +305,7 @@ func (a *amazonS3Writer) WriteWithContext(wctx context.Context, msg *message.Bat
 		uploadInput := &s3manager.UploadInput{
 			Bucket:                  &a.conf.Bucket,
 			Key:                     aws.String(a.path.String(i, msg)),
-			Body:                    bytes.NewReader(p.Get()),
+			Body:                    bytes.NewReader(p.AsBytes()),
 			ContentType:             aws.String(a.contentType.String(i, msg)),
 			ContentEncoding:         contentEncoding,
 			CacheControl:            cacheControl,
@@ -344,9 +344,6 @@ func (a *amazonS3Writer) WriteWithContext(wctx context.Context, msg *message.Bat
 	})
 }
 
-func (a *amazonS3Writer) CloseAsync() {
-}
-
-func (a *amazonS3Writer) WaitForClose(time.Duration) error {
+func (a *amazonS3Writer) Close(context.Context) error {
 	return nil
 }

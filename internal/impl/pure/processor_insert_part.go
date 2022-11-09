@@ -8,19 +8,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newInsertPart(conf.InsertPart, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("insert_part", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("insert_part", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "insert_part",
 		Categories: []string{
@@ -44,7 +42,7 @@ find a list of functions [here](/docs/configuration/interpolation#bloblang-queri
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldInt("index", "The index within the batch to insert the message at."),
 			docs.FieldString("content", "The content of the message being inserted.").IsInterpolated(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewInsertPartConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewInsertPartConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -56,7 +54,7 @@ type insertPart struct {
 	part  *field.Expression
 }
 
-func newInsertPart(conf oprocessor.InsertPartConfig, mgr interop.Manager) (processor.V2Batched, error) {
+func newInsertPart(conf processor.InsertPartConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	part, err := mgr.BloblEnvironment().NewField(conf.Content)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse content expression: %v", err)
@@ -67,7 +65,7 @@ func newInsertPart(conf oprocessor.InsertPartConfig, mgr interop.Manager) (proce
 	}, nil
 }
 
-func (p *insertPart) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (p *insertPart) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	newPartBytes := p.part.Bytes(0, msg)
 
 	index := p.index
@@ -82,20 +80,20 @@ func (p *insertPart) ProcessBatch(ctx context.Context, spans []*tracing.Span, ms
 	}
 
 	newMsg := message.QuickBatch(nil)
-	newPart := msg.Get(0).Copy()
-	newPart.Set(newPartBytes)
+	newPart := msg.Get(0).ShallowCopy()
+	newPart.SetBytes(newPartBytes)
 	_ = msg.Iter(func(i int, p *message.Part) error {
 		if i == index {
-			newMsg.Append(newPart)
+			newMsg = append(newMsg, newPart)
 		}
-		newMsg.Append(p.Copy())
+		newMsg = append(newMsg, p.ShallowCopy())
 		return nil
 	})
 	if index == msg.Len() {
-		newMsg.Append(newPart)
+		newMsg = append(newMsg, newPart)
 	}
 
-	return []*message.Batch{newMsg}, nil
+	return []message.Batch{newMsg}, nil
 }
 
 func (p *insertPart) Close(context.Context) error {

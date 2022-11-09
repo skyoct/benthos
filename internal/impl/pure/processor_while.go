@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/mapping"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
@@ -14,18 +13,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newWhile(conf.While, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("while", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("while", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "while",
 		Categories: []string{
@@ -51,7 +49,7 @@ The conditions of this processor are applied across entire message batches. You 
 				`this.urls.unprocessed.length() > 0`,
 			).HasDefault(""),
 			docs.FieldProcessor("processors", "A list of child processors to execute on each loop.").Array(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewWhileConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewWhileConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -68,7 +66,7 @@ type whileProc struct {
 	shutSig *shutdown.Signaller
 }
 
-func newWhile(conf oprocessor.WhileConfig, mgr bundle.NewManagement) (*whileProc, error) {
+func newWhile(conf processor.WhileConfig, mgr bundle.NewManagement) (*whileProc, error) {
 	var check *mapping.Executor
 	var err error
 
@@ -82,7 +80,7 @@ func newWhile(conf oprocessor.WhileConfig, mgr bundle.NewManagement) (*whileProc
 
 	var children []processor.V1
 	for i, pconf := range conf.Processors {
-		pMgr := mgr.IntoPath("while", "processors", strconv.Itoa(i)).(bundle.NewManagement)
+		pMgr := mgr.IntoPath("while", "processors", strconv.Itoa(i))
 		proc, err := pMgr.NewProcessor(pconf)
 		if err != nil {
 			return nil, err
@@ -100,7 +98,7 @@ func newWhile(conf oprocessor.WhileConfig, mgr bundle.NewManagement) (*whileProc
 	}, nil
 }
 
-func (w *whileProc) checkMsg(msg *message.Batch) bool {
+func (w *whileProc) checkMsg(msg message.Batch) bool {
 	c, err := w.check.QueryPart(0, msg)
 	if err != nil {
 		c = false
@@ -109,8 +107,8 @@ func (w *whileProc) checkMsg(msg *message.Batch) bool {
 	return c
 }
 
-func (w *whileProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) (msgs []*message.Batch, res error) {
-	msgs = []*message.Batch{msg}
+func (w *whileProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) (msgs []message.Batch, res error) {
+	msgs = []message.Batch{msg}
 
 	loops := 0
 	condResult := w.atLeastOnce || w.checkMsg(msg)
@@ -128,7 +126,7 @@ func (w *whileProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg
 			s.LogKV("event", "loop")
 		}
 
-		msgs, res = oprocessor.ExecuteAll(w.children, msgs...)
+		msgs, res = processor.ExecuteAll(ctx, w.children, msgs...)
 		if len(msgs) == 0 {
 			return
 		}
@@ -150,14 +148,7 @@ func (w *whileProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg
 func (w *whileProc) Close(ctx context.Context) error {
 	w.shutSig.CloseNow()
 	for _, p := range w.children {
-		p.CloseAsync()
-	}
-	deadline, exists := ctx.Deadline()
-	if !exists {
-		deadline = time.Now().Add(time.Second * 5)
-	}
-	for _, p := range w.children {
-		if err := p.WaitForClose(time.Until(deadline)); err != nil {
+		if err := p.Close(ctx); err != nil {
 			return err
 		}
 	}

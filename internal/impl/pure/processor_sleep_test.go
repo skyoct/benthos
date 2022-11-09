@@ -1,14 +1,16 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestSleep(t *testing.T) {
@@ -22,14 +24,11 @@ func TestSleep(t *testing.T) {
 	}
 
 	msgIn := message.QuickBatch([][]byte{[]byte("hello world")})
-	msgsOut, res := slp.ProcessMessage(msgIn)
-	if res != nil {
-		t.Fatal(res)
-	}
-
-	if exp, act := msgIn, msgsOut[0]; exp != act {
-		t.Errorf("Wrong message returned: %v != %v", act, exp)
-	}
+	msgsOut, err := slp.ProcessBatch(context.Background(), msgIn)
+	require.NoError(t, err)
+	require.Len(t, msgsOut, 1)
+	require.Len(t, msgsOut[0], 1)
+	assert.Equal(t, "hello world", string(msgsOut[0][0].AsBytes()))
 }
 
 func TestSleepExit(t *testing.T) {
@@ -44,12 +43,14 @@ func TestSleepExit(t *testing.T) {
 
 	doneChan := make(chan struct{})
 	go func() {
-		_, _ = slp.ProcessMessage(message.QuickBatch([][]byte{[]byte("hello world")}))
+		_, _ = slp.ProcessBatch(context.Background(), message.QuickBatch([][]byte{[]byte("hello world")}))
 		close(doneChan)
 	}()
 
-	slp.CloseAsync()
-	slp.CloseAsync()
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+	assert.NoError(t, slp.Close(ctx))
+
 	select {
 	case <-doneChan:
 	case <-time.After(time.Second):
@@ -68,7 +69,7 @@ func TestSleep200Millisecond(t *testing.T) {
 	}
 
 	tBefore := time.Now()
-	batches, err := slp.ProcessMessage(message.QuickBatch([][]byte{[]byte("hello world")}))
+	batches, err := slp.ProcessBatch(context.Background(), message.QuickBatch([][]byte{[]byte("hello world")}))
 	tAfter := time.Now()
 	require.NoError(t, err)
 	require.Len(t, batches, 1)
@@ -89,7 +90,7 @@ func TestSleepInterpolated(t *testing.T) {
 	}
 
 	tBefore := time.Now()
-	batches, err := slp.ProcessMessage(message.QuickBatch([][]byte{
+	batches, err := slp.ProcessBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte(`{"foo":200}`),
 	}))
 	tAfter := time.Now()

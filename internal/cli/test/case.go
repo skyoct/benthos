@@ -1,21 +1,21 @@
 package test
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	yaml "gopkg.in/yaml.v3"
 
 	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 // InputPart defines an input part for a test case.
 type InputPart struct {
-	Content  string            `yaml:"content"`
-	Metadata map[string]string `yaml:"metadata"`
+	Content  string         `yaml:"content"`
+	Metadata map[string]any `yaml:"metadata"`
 	filePath string
 }
 
@@ -24,7 +24,7 @@ func (i *InputPart) getContent(dir string) (string, error) {
 		return i.Content, nil
 	}
 	relPath := filepath.Join(dir, i.filePath)
-	rawBytes, err := os.ReadFile(relPath)
+	rawBytes, err := ifs.ReadFile(ifs.OS(), relPath)
 	if err != nil {
 		return "", err
 	}
@@ -70,6 +70,7 @@ type Case struct {
 	TargetMapping    string               `yaml:"target_mapping"`
 	Mocks            map[string]yaml.Node `yaml:"mocks"`
 	InputBatch       []InputPart          `yaml:"input_batch"`
+	InputBatches     [][]InputPart        `yaml:"input_batches"`
 	OutputBatches    [][]ConditionsMap    `yaml:"output_batches"`
 
 	line int
@@ -90,6 +91,7 @@ func NewCase() Case {
 		TargetMapping:    "",
 		Mocks:            map[string]yaml.Node{},
 		InputBatch:       []InputPart{},
+		InputBatches:     [][]InputPart{},
 		OutputBatches:    [][]ConditionsMap{},
 	}
 }
@@ -151,23 +153,33 @@ func (c *Case) ExecuteFrom(dir string, provider ProcProvider) (failures []CaseFa
 		})
 	}
 
-	parts := make([]*message.Part, len(c.InputBatch))
-	for i, v := range c.InputBatch {
-		var content string
-		if content, err = v.getContent(dir); err != nil {
-			err = fmt.Errorf("failed to create mock input %v: %w", i, err)
-			return
-		}
-		part := message.NewPart([]byte(content))
-		for k, v := range v.Metadata {
-			part.MetaSet(k, v)
-		}
-		parts[i] = part
+	// append old batch to new batch array.
+	if len(c.InputBatch) > 0 {
+		c.InputBatches = append(c.InputBatches, c.InputBatch)
 	}
 
-	inputMsg := message.QuickBatch(nil)
-	inputMsg.SetAll(parts)
-	outputBatches, result := processor.ExecuteAll(procSet, inputMsg)
+	var inputMsg []message.Batch
+
+	for _, inputBatch := range c.InputBatches {
+		parts := make([]*message.Part, len(inputBatch))
+		for i, v := range inputBatch {
+			var content string
+			if content, err = v.getContent(dir); err != nil {
+				err = fmt.Errorf("failed to create mock input %v: %w", i, err)
+				return
+			}
+			part := message.NewPart([]byte(content))
+			for k, v := range v.Metadata {
+				part.MetaSetMut(k, v)
+			}
+			parts[i] = part
+		}
+
+		currentBatch := message.Batch(parts)
+		inputMsg = append(inputMsg, currentBatch)
+	}
+
+	outputBatches, result := iprocessor.ExecuteAll(context.Background(), procSet, inputMsg...)
 	if result != nil {
 		reportFailure(fmt.Sprintf("processors resulted in error: %v", result))
 	}
@@ -187,7 +199,7 @@ func (c *Case) ExecuteFrom(dir string, provider ProcProvider) (failures []CaseFa
 		}
 		_ = v.Iter(func(i2 int, part *message.Part) error {
 			if len(expectedBatch) <= i2 {
-				reportFailure(fmt.Sprintf("unexpected message from batch %v: %s", i, part.Get()))
+				reportFailure(fmt.Sprintf("unexpected message from batch %v: %s", i, part.AsBytes()))
 				return nil
 			}
 			condErrs := expectedBatch[i2].CheckAll(dir, part)

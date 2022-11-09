@@ -7,9 +7,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 // NewOutputField defines a new output field, it is then possible to extract an
@@ -39,7 +38,7 @@ func (p *ParsedConfig) FieldOutput(path ...string) (*OwnedOutput, error) {
 		return nil, err
 	}
 
-	iproc, err := p.mgr.IntoPath(path...).(bundle.NewManagement).NewOutput(conf)
+	iproc, err := p.mgr.IntoPath(path...).NewOutput(conf)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +63,7 @@ func (p *ParsedConfig) FieldOutputList(path ...string) ([]*OwnedOutput, error) {
 		return nil, fmt.Errorf("field '%v' was not found in the config", strings.Join(path, "."))
 	}
 
-	fieldArray, ok := field.([]interface{})
+	fieldArray, ok := field.([]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected value, expected array, got %T", field)
 	}
@@ -83,10 +82,10 @@ func (p *ParsedConfig) FieldOutputList(path ...string) ([]*OwnedOutput, error) {
 		configs = append(configs, conf)
 	}
 
-	tmpMgr := p.mgr.IntoPath(path...).(bundle.NewManagement)
+	tmpMgr := p.mgr.IntoPath(path...)
 	ins := make([]*OwnedOutput, len(configs))
 	for i, c := range configs {
-		iproc, err := tmpMgr.IntoPath(strconv.Itoa(i)).(bundle.NewManagement).NewOutput(c)
+		iproc, err := tmpMgr.IntoPath(strconv.Itoa(i)).NewOutput(c)
 		if err != nil {
 			return nil, fmt.Errorf("output %v: %w", i, err)
 		}

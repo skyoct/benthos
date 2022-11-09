@@ -15,7 +15,6 @@ categories: ["Network"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-
 Receive messages POSTed over HTTP(S). HTTP 2.0 is supported when using TLS, which is enabled when key and cert files are specified.
 
 
@@ -110,12 +109,18 @@ This input adds the following metadata fields to each message:
 - http_server_user_agent
 - http_server_request_path
 - http_server_verb
+- http_server_remote_ip
 - All headers (only first values are taken)
 - All query parameters
 - All path parameters
 - All cookies
 ```
-
+If HTTPS is enabled, the following fields are added as well:
+``` text
+- http_server_tls_version
+- http_server_tls_subject
+- http_server_tls_cipher_suite
+```
 You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata).
 
 ## Fields

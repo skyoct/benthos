@@ -3,19 +3,16 @@ package pure
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		return newResourceProcessor(conf, mgr, mgr.Logger())
 	}, docs.ComponentSpec{
 		Name: "resource",
@@ -30,7 +27,7 @@ This processor allows you to reference the same configured processor resource in
 ` + "```yaml" + `
 pipeline:
   processors:
-    - bloblang: |
+    - mapping: |
         root.message = this
         root.meta.link_count = this.links.length()
         root.user.age = this.user.age.number()
@@ -45,7 +42,7 @@ pipeline:
 
 processor_resources:
   - label: foo_proc
-    bloblang: |
+    mapping: |
       root.message = this
       root.meta.link_count = this.links.length()
       root.user.age = this.user.age.number()
@@ -60,12 +57,12 @@ You can find out more about resources [in this document.](/docs/configuration/re
 }
 
 type resourceProcessor struct {
-	mgr  interop.Manager
+	mgr  bundle.NewManagement
 	name string
 	log  log.Modular
 }
 
-func newResourceProcessor(conf oprocessor.Config, mgr interop.Manager, log log.Modular) (*resourceProcessor, error) {
+func newResourceProcessor(conf processor.Config, mgr bundle.NewManagement, log log.Modular) (*resourceProcessor, error) {
 	if !mgr.ProbeProcessor(conf.Resource) {
 		return nil, fmt.Errorf("processor resource '%v' was not found", conf.Resource)
 	}
@@ -76,9 +73,9 @@ func newResourceProcessor(conf oprocessor.Config, mgr interop.Manager, log log.M
 	}, nil
 }
 
-func (r *resourceProcessor) ProcessMessage(msg *message.Batch) (msgs []*message.Batch, res error) {
-	if err := r.mgr.AccessProcessor(context.Background(), r.name, func(p processor.V1) {
-		msgs, res = p.ProcessMessage(msg)
+func (r *resourceProcessor) ProcessBatch(ctx context.Context, msg message.Batch) (msgs []message.Batch, res error) {
+	if err := r.mgr.AccessProcessor(ctx, r.name, func(p processor.V1) {
+		msgs, res = p.ProcessBatch(ctx, msg)
 	}); err != nil {
 		r.log.Errorf("Failed to obtain processor resource '%v': %v", r.name, err)
 		return nil, err
@@ -86,9 +83,6 @@ func (r *resourceProcessor) ProcessMessage(msg *message.Batch) (msgs []*message.
 	return msgs, res
 }
 
-func (r *resourceProcessor) CloseAsync() {
-}
-
-func (r *resourceProcessor) WaitForClose(timeout time.Duration) error {
+func (r *resourceProcessor) Close(ctx context.Context) error {
 	return nil
 }

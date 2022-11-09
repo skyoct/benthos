@@ -1,22 +1,30 @@
-package pure
+package pure_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/benthosdev/benthos/v4/internal/bundle"
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	bmock "github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
+
+	_ "github.com/benthosdev/benthos/v4/public/components/io"
+	"github.com/benthosdev/benthos/v4/public/service"
 )
 
 func TestFanOutBroker(t *testing.T) {
 	dir := t.TempDir()
 
-	outOne, outTwo := ooutput.NewConfig(), ooutput.NewConfig()
+	outOne, outTwo := output.NewConfig(), output.NewConfig()
 	outOne.Type, outTwo.Type = "file", "file"
 	outOne.File.Path = filepath.Join(dir, "one", `foo-${!count("1s")}.txt`)
 	outOne.File.Codec = "all-bytes"
@@ -31,7 +39,7 @@ func TestFanOutBroker(t *testing.T) {
 	outOne.Processors = append(outOne.Processors, procOne)
 	outTwo.Processors = append(outTwo.Processors, procTwo)
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "broker"
 	conf.Broker.Pattern = "fan_out"
 	conf.Broker.Outputs = append(conf.Broker.Outputs, outOne, outTwo)
@@ -48,10 +56,11 @@ func TestFanOutBroker(t *testing.T) {
 	}
 
 	defer func() {
-		s.CloseAsync()
-		if err := s.WaitForClose(time.Second); err != nil {
-			t.Error(err)
-		}
+		s.TriggerCloseNow()
+
+		ctx, done := context.WithTimeout(context.Background(), time.Second*10)
+		assert.NoError(t, s.WaitForClose(ctx))
+		done()
 	}()
 
 	inputs := []string{
@@ -100,7 +109,7 @@ func TestFanOutBroker(t *testing.T) {
 func TestRoundRobinBroker(t *testing.T) {
 	dir := t.TempDir()
 
-	outOne, outTwo := ooutput.NewConfig(), ooutput.NewConfig()
+	outOne, outTwo := output.NewConfig(), output.NewConfig()
 	outOne.Type, outTwo.Type = "file", "file"
 	outOne.File.Path = filepath.Join(dir, "one", `foo-${!count("rrfoo")}.txt`)
 	outOne.File.Codec = "all-bytes"
@@ -115,7 +124,7 @@ func TestRoundRobinBroker(t *testing.T) {
 	outOne.Processors = append(outOne.Processors, procOne)
 	outTwo.Processors = append(outTwo.Processors, procTwo)
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "broker"
 	conf.Broker.Pattern = "round_robin"
 	conf.Broker.Outputs = append(conf.Broker.Outputs, outOne, outTwo)
@@ -132,10 +141,11 @@ func TestRoundRobinBroker(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		s.CloseAsync()
-		if err := s.WaitForClose(time.Second); err != nil {
-			t.Error(err)
-		}
+		s.TriggerCloseNow()
+
+		ctx, done := context.WithTimeout(context.Background(), time.Second*10)
+		assert.NoError(t, s.WaitForClose(ctx))
+		done()
 	})
 
 	inputs := []string{
@@ -182,7 +192,7 @@ func TestRoundRobinBroker(t *testing.T) {
 func TestGreedyBroker(t *testing.T) {
 	dir := t.TempDir()
 
-	outOne, outTwo := ooutput.NewConfig(), ooutput.NewConfig()
+	outOne, outTwo := output.NewConfig(), output.NewConfig()
 	outOne.Type, outTwo.Type = "file", "file"
 	outOne.File.Path = filepath.Join(dir, "one", `foo-${!count("gfoo")}.txt`)
 	outOne.File.Codec = "all-bytes"
@@ -205,7 +215,7 @@ func TestGreedyBroker(t *testing.T) {
 	outOne.Processors = append(outOne.Processors, procOne)
 	outTwo.Processors = append(outTwo.Processors, procTwo)
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "broker"
 	conf.Broker.Pattern = "greedy"
 	conf.Broker.Outputs = append(conf.Broker.Outputs, outOne, outTwo)
@@ -222,10 +232,12 @@ func TestGreedyBroker(t *testing.T) {
 	}
 
 	defer func() {
-		s.CloseAsync()
-		if err := s.WaitForClose(time.Second); err != nil {
-			t.Error(err)
-		}
+		close(sendChan)
+		s.TriggerCloseNow()
+
+		ctx, done := context.WithTimeout(context.Background(), time.Second*10)
+		assert.NoError(t, s.WaitForClose(ctx))
+		done()
 	}()
 
 	inputs := []string{
@@ -266,5 +278,137 @@ func TestGreedyBroker(t *testing.T) {
 		if act := string(fileBytes); exp[0] != act && exp[1] != act {
 			t.Errorf("Wrong contents for file '%v': %v != (%v || %v)", k, act, exp[0], exp[1])
 		}
+	}
+}
+
+type mockOutput struct {
+	outputs map[string]struct{}
+	mut     sync.Mutex
+}
+
+func (m *mockOutput) Connect(context.Context) error {
+	return nil
+}
+
+func (m *mockOutput) Write(ctx context.Context, msg *service.Message) error {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	mBytes, err := msg.AsBytes()
+	m.outputs[string(mBytes)] = struct{}{}
+	return err
+}
+
+func (m *mockOutput) Close(context.Context) error {
+	return nil
+}
+
+func TestOutputBrokerConfigs(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		inputConfig  string
+		outputConfig string
+		output       map[string]struct{}
+	}{
+		{
+			name: "simple inputs",
+			inputConfig: `
+generate:
+  count: 1
+  interval: ""
+  mapping: 'root = "hello world 1"'
+`,
+			outputConfig: `
+broker:
+  outputs:
+    - testmeow: {}
+      processors:
+        - bloblang: '"first " + content()'
+    - testmeow: {}
+      processors:
+        - bloblang: '"second " + content()'
+`,
+			output: map[string]struct{}{
+				"first hello world 1":  {},
+				"second hello world 1": {},
+			},
+		},
+		{
+			name: "single input nested processors",
+			inputConfig: `
+generate:
+  count: 1
+  interval: ""
+  mapping: 'root = "hello world 1"'
+`,
+			outputConfig: `
+broker:
+  outputs:
+    - testmeow: {}
+      processors:
+        - bloblang: 'root = content().uppercase()'
+processors:
+  - bloblang: 'root = "outer: " + content()'
+`,
+			output: map[string]struct{}{
+				"OUTER: HELLO WORLD 1": {},
+			},
+		},
+		{
+			name: "single input nested and batched processors",
+			inputConfig: `
+generate:
+  count: 3
+  interval: ""
+  mapping: 'root = "hello world 1"'
+`,
+			outputConfig: `
+processors:
+  - bloblang: 'root = "outer: " + content()'
+
+broker:
+  batching:
+    count: 3
+    processors:
+      - archive:
+          format: lines
+
+  outputs:
+    - testmeow: {}
+      processors:
+        - bloblang: 'root = "inner: " + content()'
+`,
+			output: map[string]struct{}{
+				"inner: outer: hello world 1\nouter: hello world 1\nouter: hello world 1": {},
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			mOut := &mockOutput{
+				outputs: map[string]struct{}{},
+			}
+
+			env := service.NewEnvironment()
+			require.NoError(t, env.RegisterOutput("testmeow", service.NewConfigSpec(),
+				func(conf *service.ParsedConfig, mgr *service.Resources) (out service.Output, maxInFlight int, err error) {
+					maxInFlight = 1
+					out = mOut
+					return
+				}))
+
+			builder := env.NewStreamBuilder()
+			require.NoError(t, builder.AddInputYAML(test.inputConfig))
+			require.NoError(t, builder.AddOutputYAML(test.outputConfig))
+			require.NoError(t, builder.SetLoggerYAML(`level: none`))
+
+			strm, err := builder.Build()
+			require.NoError(t, err)
+
+			tCtx, done := context.WithTimeout(context.Background(), time.Minute)
+			defer done()
+
+			require.NoError(t, strm.Run(tCtx))
+			assert.Equal(t, test.output, mOut.outputs)
+		})
 	}
 }

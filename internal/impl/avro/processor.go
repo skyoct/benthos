@@ -12,19 +12,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newAvro(conf.Avro, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("avro", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("avro", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "avro",
 		Categories: []string{
@@ -57,7 +55,7 @@ specified encoding.`,
 				"file://path/to/spec.avsc",
 				"http://localhost:8081/path/to/spec/versions/1",
 			),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewAvroConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewAvroConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -72,29 +70,29 @@ func newAvroToJSONOperator(encoding string, codec *goavro.Codec) (avroOperator, 
 	switch encoding {
 	case "textual":
 		return func(part *message.Part) error {
-			jObj, _, err := codec.NativeFromTextual(part.Get())
+			jObj, _, err := codec.NativeFromTextual(part.AsBytes())
 			if err != nil {
 				return fmt.Errorf("failed to convert Avro document to JSON: %v", err)
 			}
-			part.SetJSON(jObj)
+			part.SetStructuredMut(jObj)
 			return nil
 		}, nil
 	case "binary":
 		return func(part *message.Part) error {
-			jObj, _, err := codec.NativeFromBinary(part.Get())
+			jObj, _, err := codec.NativeFromBinary(part.AsBytes())
 			if err != nil {
 				return fmt.Errorf("failed to convert Avro document to JSON: %v", err)
 			}
-			part.SetJSON(jObj)
+			part.SetStructuredMut(jObj)
 			return nil
 		}, nil
 	case "single":
 		return func(part *message.Part) error {
-			jObj, _, err := codec.NativeFromSingle(part.Get())
+			jObj, _, err := codec.NativeFromSingle(part.AsBytes())
 			if err != nil {
 				return fmt.Errorf("failed to convert Avro document to JSON: %v", err)
 			}
-			part.SetJSON(jObj)
+			part.SetStructuredMut(jObj)
 			return nil
 		}, nil
 	}
@@ -105,7 +103,7 @@ func newAvroFromJSONOperator(encoding string, codec *goavro.Codec) (avroOperator
 	switch encoding {
 	case "textual":
 		return func(part *message.Part) error {
-			jObj, err := part.JSON()
+			jObj, err := part.AsStructured()
 			if err != nil {
 				return fmt.Errorf("failed to parse message as JSON: %v", err)
 			}
@@ -113,12 +111,12 @@ func newAvroFromJSONOperator(encoding string, codec *goavro.Codec) (avroOperator
 			if textual, err = codec.TextualFromNative(nil, jObj); err != nil {
 				return fmt.Errorf("failed to convert JSON to Avro schema: %v", err)
 			}
-			part.Set(textual)
+			part.SetBytes(textual)
 			return nil
 		}, nil
 	case "binary":
 		return func(part *message.Part) error {
-			jObj, err := part.JSON()
+			jObj, err := part.AsStructured()
 			if err != nil {
 				return fmt.Errorf("failed to parse message as JSON: %v", err)
 			}
@@ -126,12 +124,12 @@ func newAvroFromJSONOperator(encoding string, codec *goavro.Codec) (avroOperator
 			if binary, err = codec.BinaryFromNative(nil, jObj); err != nil {
 				return fmt.Errorf("failed to convert JSON to Avro schema: %v", err)
 			}
-			part.Set(binary)
+			part.SetBytes(binary)
 			return nil
 		}, nil
 	case "single":
 		return func(part *message.Part) error {
-			jObj, err := part.JSON()
+			jObj, err := part.AsStructured()
 			if err != nil {
 				return fmt.Errorf("failed to parse message as JSON: %v", err)
 			}
@@ -139,7 +137,7 @@ func newAvroFromJSONOperator(encoding string, codec *goavro.Codec) (avroOperator
 			if single, err = codec.SingleFromNative(nil, jObj); err != nil {
 				return fmt.Errorf("failed to convert JSON to Avro schema: %v", err)
 			}
-			part.Set(single)
+			part.SetBytes(single)
 			return nil
 		}, nil
 	}
@@ -162,7 +160,6 @@ func loadSchema(schemaPath string) (string, error) {
 	c := &http.Client{Transport: t}
 
 	response, err := c.Get(schemaPath)
-
 	if err != nil {
 		return "", err
 	}
@@ -170,7 +167,6 @@ func loadSchema(schemaPath string) (string, error) {
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
-
 	if err != nil {
 		return "", err
 	}
@@ -185,7 +181,7 @@ type avro struct {
 	log      log.Modular
 }
 
-func newAvro(conf oprocessor.AvroConfig, mgr interop.Manager) (processor.V2, error) {
+func newAvro(conf processor.AvroConfig, mgr bundle.NewManagement) (processor.V2, error) {
 	a := &avro{log: mgr.Logger()}
 
 	var schema string
@@ -218,7 +214,6 @@ func newAvro(conf oprocessor.AvroConfig, mgr interop.Manager) (processor.V2, err
 //------------------------------------------------------------------------------
 
 func (p *avro) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	msg = msg.Copy()
 	err := p.operator(msg)
 	if err != nil {
 		p.log.Debugf("Operator failed: %v\n", err)

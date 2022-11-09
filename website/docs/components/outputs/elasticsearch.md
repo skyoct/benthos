@@ -35,6 +35,7 @@ output:
     urls: []
     index: ""
     id: ${!count("elastic_ids")}-${!timestamp_unix()}
+    type: ""
     max_in_flight: 64
     batching:
       count: 0
@@ -56,6 +57,7 @@ output:
     action: index
     pipeline: ""
     id: ${!count("elastic_ids")}-${!timestamp_unix()}
+    type: ""
     routing: ""
     sniff: true
     healthcheck: true
@@ -92,6 +94,7 @@ output:
         id: ""
         secret: ""
         token: ""
+        from_ec2_role: false
         role: ""
         role_external_id: ""
     gzip_compression: false
@@ -113,8 +116,8 @@ false for connections to succeed.
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 This output benefits from sending messages as a batch for improved performance.
 Batches can be formed at both the input and output level. You can find out more
@@ -148,13 +151,12 @@ Default: `""`
 
 ### `action`
 
-The action to take on the document.
+The action to take on the document. This field must resolve to one of the following action types: `create`, `index`, `update`, `upsert` or `delete`.
 This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
 
 
 Type: `string`  
 Default: `"index"`  
-Options: `index`, `update`, `delete`.
 
 ### `pipeline`
 
@@ -173,6 +175,15 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 Type: `string`  
 Default: `"${!count(\"elastic_ids\")}-${!timestamp_unix()}"`  
+
+### `type`
+
+The document mapping type. This field is required for versions of elasticsearch earlier than 6.0.0, but are invalid for versions 7.0.0 or later.
+This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
+
+
+Type: `string`  
+Default: `""`  
 
 ### `routing`
 
@@ -242,6 +253,9 @@ Requires version 3.45.0 or newer
 ### `tls.root_cas`
 
 An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -301,6 +315,9 @@ Default: `""`
 ### `tls.client_certs[].key`
 
 A plain text certificate key to use.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -308,7 +325,7 @@ Default: `""`
 
 ### `tls.client_certs[].cert_file`
 
-The path to a certificate to use.
+The path of a certificate to use.
 
 
 Type: `string`  
@@ -322,9 +339,28 @@ The path of a certificate key to use.
 Type: `string`  
 Default: `""`  
 
+### `tls.client_certs[].password`
+
+A plain text password for when the private key is a password encrypted PEM block according to RFC 1423. Warning: Since it does not authenticate the ciphertext, it is vulnerable to padding oracle attacks that can let an attacker recover the plaintext.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+password: foo
+
+password: ${KEY_PASSWORD}
+```
+
 ### `max_in_flight`
 
-The maximum number of messages to have in flight at a given time. Increase this to improve throughput.
+The maximum number of parallel message batches to have in flight at any given time.
 
 
 Type: `int`  
@@ -395,6 +431,9 @@ Default: `""`
 ### `basic_auth.password`
 
 A password to authenticate with.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -566,6 +605,15 @@ The token for the credentials being used, required when using short term credent
 
 Type: `string`  
 Default: `""`  
+
+### `aws.credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
 
 ### `aws.credentials.role`
 

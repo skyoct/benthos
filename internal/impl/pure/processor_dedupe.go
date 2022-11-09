@@ -11,20 +11,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newDedupe(conf.Dedupe, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("dedupe", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("dedupe", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "dedupe",
 		Categories: []string{
@@ -49,7 +47,7 @@ This problem can be mitigated by using an in-memory cache and distributing messa
 			docs.FieldString("cache", "The [`cache` resource](/docs/components/caches/about) to target with this processor."),
 			docs.FieldString("key", "An interpolated string yielding the key to deduplicate by for each message.", `${! meta("kafka_key") }`, `${! content().hash("xxhash64") }`).IsInterpolated(),
 			docs.FieldBool("drop_on_err", "Whether messages should be dropped when the cache returns a general error such as a network issue."),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewDedupeConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewDedupeConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title:   "Deduplicate based on Kafka key",
@@ -79,11 +77,11 @@ type dedupeProc struct {
 
 	dropOnErr bool
 	key       *field.Expression
-	mgr       interop.Manager
+	mgr       bundle.NewManagement
 	cacheName string
 }
 
-func newDedupe(conf oprocessor.DedupeConfig, mgr interop.Manager) (*dedupeProc, error) {
+func newDedupe(conf processor.DedupeConfig, mgr bundle.NewManagement) (*dedupeProc, error) {
 	if conf.Key == "" {
 		return nil, errors.New("dedupe key must not be empty")
 	}
@@ -107,7 +105,7 @@ func newDedupe(conf oprocessor.DedupeConfig, mgr interop.Manager) (*dedupeProc, 
 
 //------------------------------------------------------------------------------
 
-func (d *dedupeProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch *message.Batch) ([]*message.Batch, error) {
+func (d *dedupeProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch message.Batch) ([]message.Batch, error) {
 	newBatch := message.QuickBatch(nil)
 	_ = batch.Iter(func(i int, p *message.Part) error {
 		key := d.key.String(i, batch)
@@ -119,7 +117,7 @@ func (d *dedupeProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, ba
 			err = cerr
 		}
 		if err != nil {
-			if err == component.ErrKeyAlreadyExists {
+			if errors.Is(err, component.ErrKeyAlreadyExists) {
 				spans[i].LogKV(
 					"event", "dropped",
 					"type", "deduplicated",
@@ -135,19 +133,17 @@ func (d *dedupeProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, ba
 				)
 				return nil
 			}
-
-			p = p.Copy()
 			processor.MarkErr(p, spans[i], err)
 		}
 
-		newBatch.Append(p)
+		newBatch = append(newBatch, p)
 		return nil
 	})
 
 	if newBatch.Len() == 0 {
 		return nil, nil
 	}
-	return []*message.Batch{newBatch}, nil
+	return []message.Batch{newBatch}, nil
 }
 
 func (d *dedupeProc) Close(context.Context) error {

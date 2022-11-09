@@ -16,10 +16,10 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
@@ -36,7 +36,7 @@ var (
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		return newSwitchOutput(c.Switch, nm)
 	}), docs.ComponentSpec{
 		Name: "switch",
@@ -63,20 +63,20 @@ behavior is false, which will drop the message.`,
 			docs.FieldObject(
 				"cases",
 				"A list of switch cases, outlining outputs that can be routed to.",
-				[]interface{}{
-					map[string]interface{}{
+				[]any{
+					map[string]any{
 						"check": `this.urls.contains("http://benthos.dev")`,
-						"output": map[string]interface{}{
-							"cache": map[string]interface{}{
+						"output": map[string]any{
+							"cache": map[string]any{
 								"target": "foo",
 								"key":    "${!json(\"id\")}",
 							},
 						},
 						"continue": true,
 					},
-					map[string]interface{}{
-						"output": map[string]interface{}{
-							"s3": map[string]interface{}{
+					map[string]any{
+						"output": map[string]any{
+							"s3": map[string]any{
 								"bucket": "bar",
 								"path":   "${!json(\"id\")}",
 							},
@@ -92,14 +92,14 @@ behavior is false, which will drop the message.`,
 				).HasDefault(""),
 				docs.FieldOutput(
 					"output", "An [output](/docs/components/outputs/about/) for messages that pass the check to be routed to.",
-				).HasDefault(map[string]interface{}{}),
+				).HasDefault(map[string]any{}),
 				docs.FieldBool(
 					"continue",
 					"Indicates whether, if this case passes for a message, the next case should also be tested.",
 				).HasDefault(false).Advanced(),
-			).HasDefault([]interface{}{}),
-		).LinterFunc(func(ctx docs.LintContext, line, col int, value interface{}) []docs.Lint {
-			if _, ok := value.(map[string]interface{}); !ok {
+			).HasDefault([]any{}),
+		).LinterFunc(func(ctx docs.LintContext, line, col int, value any) []docs.Lint {
+			if _, ok := value.(map[string]any); !ok {
 				return nil
 			}
 			gObj := gabs.Wrap(value)
@@ -112,7 +112,7 @@ behavior is false, which will drop the message.`,
 				isReject := cObj.Exists("output", "reject")
 				if typeStr == "reject" || isReject {
 					return []docs.Lint{
-						docs.NewLintError(line, "a `switch` output with a `reject` case output must have the field `switch.retry_until_success` set to `false`, otherwise the `reject` child output will result in infinite retries"),
+						docs.NewLintError(line, docs.LintCustom, "a `switch` output with a `reject` case output must have the field `switch.retry_until_success` set to `false`, otherwise the `reject` child output will result in infinite retries"),
 					}
 				}
 			}
@@ -149,7 +149,7 @@ output:
             url: tcp://localhost:6379
             stream: everything_else
           processors:
-            - bloblang: |
+            - mapping: |
                 root = this
                 root.type = this.type | "unknown"
 `,
@@ -200,7 +200,7 @@ type switchOutput struct {
 	shutSig *shutdown.Signaller
 }
 
-func newSwitchOutput(conf ooutput.SwitchConfig, mgr bundle.NewManagement) (output.Streamed, error) {
+func newSwitchOutput(conf output.SwitchConfig, mgr bundle.NewManagement) (output.Streamed, error) {
 	o := &switchOutput{
 		logger:       mgr.Logger(),
 		transactions: nil,
@@ -221,7 +221,7 @@ func newSwitchOutput(conf ooutput.SwitchConfig, mgr bundle.NewManagement) (outpu
 
 	var err error
 	for i, cConf := range conf.Cases {
-		oMgr := mgr.IntoPath("switch", strconv.Itoa(i), "output").(bundle.NewManagement)
+		oMgr := mgr.IntoPath("switch", strconv.Itoa(i), "output")
 		if o.outputs[i], err = oMgr.NewOutput(cConf.Output); err != nil {
 			return nil, err
 		}
@@ -269,7 +269,7 @@ func (o *switchOutput) Connected() bool {
 
 func (o *switchOutput) dispatchToTargets(
 	group *message.SortGroup,
-	sourceMessage *message.Batch,
+	sourceMessage message.Batch,
 	outputTargets [][]*message.Part,
 	ackFn func(context.Context, error) error,
 ) {
@@ -323,7 +323,7 @@ func (o *switchOutput) dispatchToTargets(
 		pendingResponses++
 	}
 	if pendingResponses == 0 {
-		ctx, done := o.shutSig.CloseAtLeisureCtx(context.Background())
+		ctx, done := o.shutSig.CloseNowCtx(context.Background())
 		defer done()
 		_ = ackFn(ctx, nil)
 	}
@@ -333,8 +333,8 @@ func (o *switchOutput) dispatchToTargets(
 			continue
 		}
 
-		msgCopy, i := message.QuickBatch(nil), target
-		msgCopy.SetAll(parts)
+		msgCopy, i := make(message.Batch, len(parts)), target
+		copy(msgCopy, parts)
 
 		select {
 		case o.outputTSChans[i] <- message.NewTransactionFunc(msgCopy, func(ctx context.Context, err error) error {
@@ -358,7 +358,7 @@ func (o *switchOutput) dispatchToTargets(
 			}
 			return nil
 		}):
-		case <-o.shutSig.CloseAtLeisureChan():
+		case <-o.shutSig.CloseNowChan():
 			setErr(component.ErrTypeClosed)
 			return
 		}
@@ -377,7 +377,7 @@ func (o *switchOutput) loop() {
 			case <-ackInterruptChan:
 			case <-time.After(time.Millisecond * 100):
 				// Just incase an interrupt doesn't arrive.
-			case <-o.shutSig.CloseAtLeisureChan():
+			case <-o.shutSig.CloseNowChan():
 				break ackWaitLoop
 			}
 		}
@@ -385,18 +385,18 @@ func (o *switchOutput) loop() {
 			close(tChan)
 		}
 		for _, output := range o.outputs {
-			output.CloseAsync()
+			output.TriggerCloseNow()
 		}
 		for _, output := range o.outputs {
-			_ = output.WaitForClose(shutdown.MaximumShutdownWait())
+			_ = output.WaitForClose(context.Background())
 		}
 		o.shutSig.ShutdownComplete()
 	}()
 
-	shutCtx, done := o.shutSig.CloseAtLeisureCtx(context.Background())
+	shutCtx, done := o.shutSig.CloseNowCtx(context.Background())
 	defer done()
 
-	for !o.shutSig.ShouldCloseAtLeisure() {
+	for !o.shutSig.ShouldCloseNow() {
 		var ts message.Transaction
 		var open bool
 
@@ -405,7 +405,7 @@ func (o *switchOutput) loop() {
 			if !open {
 				return
 			}
-		case <-o.shutSig.CloseAtLeisureChan():
+		case <-o.shutSig.CloseNowChan():
 			return
 		}
 
@@ -425,7 +425,7 @@ func (o *switchOutput) loop() {
 				}
 				if test {
 					routedAtLeastOnce = true
-					outputTargets[j] = append(outputTargets[j], p.Copy())
+					outputTargets[j] = append(outputTargets[j], p.ShallowCopy())
 					if !o.continues[j] {
 						return nil
 					}
@@ -455,15 +455,15 @@ func (o *switchOutput) loop() {
 	}
 }
 
-func (o *switchOutput) CloseAsync() {
-	o.shutSig.CloseAtLeisure()
+func (o *switchOutput) TriggerCloseNow() {
+	o.shutSig.CloseNow()
 }
 
-func (o *switchOutput) WaitForClose(timeout time.Duration) error {
+func (o *switchOutput) WaitForClose(ctx context.Context) error {
 	select {
 	case <-o.shutSig.HasClosedChan():
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }

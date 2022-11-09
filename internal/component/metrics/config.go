@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"fmt"
-
 	"gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/docs"
@@ -20,6 +18,7 @@ type Config struct {
 	Prometheus    PrometheusConfig `json:"prometheus" yaml:"prometheus"`
 	Statsd        StatsdConfig     `json:"statsd" yaml:"statsd"`
 	Logger        LoggerConfig     `json:"logger" yaml:"logger"`
+	Plugin        any              `json:"plugin,omitempty" yaml:"plugin,omitempty"`
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
@@ -34,6 +33,7 @@ func NewConfig() Config {
 		Prometheus:    NewPrometheusConfig(),
 		Statsd:        NewStatsdConfig(),
 		Logger:        NewLoggerConfig(),
+		Plugin:        nil,
 	}
 }
 
@@ -47,11 +47,22 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	err := value.Decode(&aliased)
 	if err != nil {
-		return fmt.Errorf("line %v: %v", value.Line, err)
+		return docs.NewLintError(value.Line, docs.LintFailedRead, err.Error())
 	}
 
-	if aliased.Type, _, err = docs.GetInferenceCandidateFromYAML(docs.DeprecatedProvider, docs.TypeMetrics, value); err != nil {
-		return fmt.Errorf("line %v: %w", value.Line, err)
+	var spec docs.ComponentSpec
+	if aliased.Type, spec, err = docs.GetInferenceCandidateFromYAML(docs.DeprecatedProvider, docs.TypeMetrics, value); err != nil {
+		return docs.NewLintError(value.Line, docs.LintComponentMissing, err.Error())
+	}
+
+	if spec.Plugin {
+		pluginNode, err := docs.GetPluginConfigYAML(aliased.Type, value)
+		if err != nil {
+			return docs.NewLintError(value.Line, docs.LintFailedRead, err.Error())
+		}
+		aliased.Plugin = &pluginNode
+	} else {
+		aliased.Plugin = nil
 	}
 
 	*conf = Config(aliased)

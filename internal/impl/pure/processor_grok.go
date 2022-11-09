@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/Jeffail/gabs/v2"
@@ -15,19 +14,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/filepath"
-	"github.com/benthosdev/benthos/v4/internal/interop"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newGrok(conf.Grok, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("grok", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("grok", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "grok",
 		Categories: []string{
@@ -48,7 +46,7 @@ This processor currently uses the [Go RE2](https://golang.org/s/re2syntax) regul
 			docs.FieldBool("named_captures_only", "Whether to only capture values from named patterns.").Advanced(),
 			docs.FieldBool("use_default_patterns", "Whether to use a [default set of patterns](#default-patterns).").Advanced(),
 			docs.FieldBool("remove_empty_values", "Whether to remove values that are empty from the resulting structure.").Advanced(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewGrokConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewGrokConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title: "VPC Flow Logs",
@@ -92,7 +90,7 @@ type grokProc struct {
 	log      log.Modular
 }
 
-func newGrok(conf oprocessor.GrokConfig, mgr interop.Manager) (processor.V2, error) {
+func newGrok(conf processor.GrokConfig, mgr bundle.NewManagement) (processor.V2, error) {
 	grokConf := grok.Config{
 		RemoveEmptyValues:   conf.RemoveEmpty,
 		NamedCapturesOnly:   conf.NamedOnly,
@@ -101,7 +99,7 @@ func newGrok(conf oprocessor.GrokConfig, mgr interop.Manager) (processor.V2, err
 	}
 
 	for _, path := range conf.PatternPaths {
-		if err := addGrokPatternsFromPath(path, grokConf.Patterns); err != nil {
+		if err := addGrokPatternsFromPath(mgr.FS(), path, grokConf.Patterns); err != nil {
 			return nil, fmt.Errorf("failed to parse patterns from path '%v': %v", path, err)
 		}
 	}
@@ -127,20 +125,20 @@ func newGrok(conf oprocessor.GrokConfig, mgr interop.Manager) (processor.V2, err
 	return g, nil
 }
 
-func addGrokPatternsFromPath(path string, patterns map[string]string) error {
-	if s, err := os.Stat(path); err != nil {
+func addGrokPatternsFromPath(fs ifs.FS, path string, patterns map[string]string) error {
+	if s, err := fs.Stat(path); err != nil {
 		return err
 	} else if s.IsDir() {
 		path += "/*"
 	}
 
-	files, err := filepath.Globs([]string{path})
+	files, err := filepath.Globs(fs, []string{path})
 	if err != nil {
 		return err
 	}
 
 	for _, f := range files {
-		file, err := os.Open(f)
+		file, err := fs.Open(f)
 		if err != nil {
 			return err
 		}
@@ -162,9 +160,9 @@ func addGrokPatternsFromPath(path string, patterns map[string]string) error {
 }
 
 func (g *grokProc) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
-	body := msg.Get()
+	body := msg.AsBytes()
 
-	var values map[string]interface{}
+	var values map[string]any
 	for _, compiler := range g.gparsers {
 		var err error
 		if values, err = compiler.ParseTyped(body); err != nil {
@@ -185,10 +183,8 @@ func (g *grokProc) Process(ctx context.Context, msg *message.Part) ([]*message.P
 		_, _ = gObj.SetP(v, k)
 	}
 
-	newMsg := msg.Copy()
-	newMsg.SetJSON(gObj.Data())
-
-	return []*message.Part{newMsg}, nil
+	msg.SetStructuredMut(gObj.Data())
+	return []*message.Part{msg}, nil
 }
 
 func (g *grokProc) Close(context.Context) error {

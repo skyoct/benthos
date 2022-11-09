@@ -1,19 +1,18 @@
 package pure
 
 import (
-	"time"
+	"context"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/transaction"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		return &syncResponseProc{log: mgr.Logger()}, nil
 	}, docs.ComponentSpec{
 		Name: "sync_response",
@@ -30,7 +29,7 @@ even when combining input types that might not have support for sync responses.
 An example of an input able to utilise this is the ` + "`http_server`" + `.
 
 For more information please read [Synchronous Responses](/docs/guides/sync_responses).`,
-		Config: docs.FieldObject("", "").HasDefault(""),
+		Config: docs.FieldObject("", "").HasDefault(struct{}{}),
 	})
 	if err != nil {
 		panic(err)
@@ -41,16 +40,13 @@ type syncResponseProc struct {
 	log log.Modular
 }
 
-func (s *syncResponseProc) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
+func (s *syncResponseProc) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
 	if err := transaction.SetAsResponse(msg); err != nil {
 		s.log.Debugf("Failed to store message as a sync response: %v\n", err)
 	}
-	return []*message.Batch{msg}, nil
+	return []message.Batch{msg}, nil
 }
 
-func (s *syncResponseProc) CloseAsync() {
-}
-
-func (s *syncResponseProc) WaitForClose(timeout time.Duration) error {
+func (s *syncResponseProc) Close(context.Context) error {
 	return nil
 }

@@ -6,7 +6,8 @@ import (
 	"net/http"
 	"path"
 	"sync"
-	"time"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/query"
@@ -14,18 +15,16 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/buffer"
 	"github.com/benthosdev/benthos/v4/internal/component/cache"
-	iinput "github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	ioutput "github.com/benthosdev/benthos/v4/internal/component/output"
-	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/component/ratelimit"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 // ErrResourceNotFound represents an error where a named resource could not be
@@ -56,6 +55,10 @@ type Type struct {
 	// added as a label to logs and metrics.
 	stream string
 
+	// Opt that determines whether HTTP endpoints registered from within a
+	// stream should be prefixed with the stream name.
+	namespaceStreamEndpoints bool
+
 	// Keeps track of the full configuration path of the component that holds
 	// the manager. This value is used only in observability and therefore it
 	// is acceptable that this does not fully represent reality.
@@ -65,10 +68,11 @@ type Type struct {
 	label string
 
 	apiReg APIReg
+	fs     ifs.FS
 
 	inputs       map[string]*inputWrapper
 	caches       map[string]cache.V1
-	processors   map[string]iprocessor.V1
+	processors   map[string]processor.V1
 	outputs      map[string]*outputWrapper
 	rateLimits   map[string]ratelimit.V1
 	resourceLock *sync.RWMutex
@@ -79,6 +83,7 @@ type Type struct {
 
 	logger log.Modular
 	stats  *metrics.Namespaced
+	tracer trace.TracerProvider
 
 	pipes    map[string]<-chan message.Transaction
 	pipeLock *sync.RWMutex
@@ -86,6 +91,46 @@ type Type struct {
 
 // OptFunc is an opt setting for a manager type.
 type OptFunc func(*Type)
+
+// OptSetAPIReg sets the multiplexer used by components of this manager for
+// registering their own HTTP endpoints.
+func OptSetAPIReg(r APIReg) OptFunc {
+	return func(t *Type) {
+		t.apiReg = r
+	}
+}
+
+// OptSetStreamHTTPNamespacing determines whether HTTP endpoints registered from
+// within a stream should be prefixed with the stream name.
+func OptSetStreamHTTPNamespacing(enabled bool) OptFunc {
+	return func(t *Type) {
+		t.namespaceStreamEndpoints = enabled
+	}
+}
+
+// OptSetLogger sets the logger from which the manager emits log events for
+// components.
+func OptSetLogger(logger log.Modular) OptFunc {
+	return func(t *Type) {
+		t.logger = logger
+	}
+}
+
+// OptSetMetrics sets the metrics exporter from which the manager creates
+// metrics for components.
+func OptSetMetrics(stats *metrics.Namespaced) OptFunc {
+	return func(t *Type) {
+		t.stats = stats
+	}
+}
+
+// OptSetTracer sets the tracer provider from which the manager creates tracing
+// spans.
+func OptSetTracer(tracer trace.TracerProvider) OptFunc {
+	return func(t *Type) {
+		t.tracer = tracer
+	}
+}
 
 // OptSetEnvironment determines the environment from which the manager
 // initializes components and resources. This option is for internal use only.
@@ -103,15 +148,26 @@ func OptSetBloblangEnvironment(env *bloblang.Environment) OptFunc {
 	}
 }
 
-// NewV2 returns an instance of manager.Type, which can be shared amongst
+// OptSetStreamsMode marks the manager as being created for running streams mode
+// resources. This ensures that a label "stream" is added to metrics.
+func OptSetStreamsMode(b bool) OptFunc {
+	return func(t *Type) {
+		if b {
+			t.stats = t.stats.WithLabels("stream", "")
+		}
+	}
+}
+
+// New returns an instance of manager.Type, which can be shared amongst
 // components and logical threads of a Benthos service.
-func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats *metrics.Namespaced, opts ...OptFunc) (*Type, error) {
+func New(conf ResourceConfig, opts ...OptFunc) (*Type, error) {
 	t := &Type{
-		apiReg: apiReg,
+		apiReg:                   mock.NewManager(),
+		namespaceStreamEndpoints: true,
 
 		inputs:       map[string]*inputWrapper{},
 		caches:       map[string]cache.V1{},
-		processors:   map[string]iprocessor.V1{},
+		processors:   map[string]processor.V1{},
 		outputs:      map[string]*outputWrapper{},
 		rateLimits:   map[string]ratelimit.V1{},
 		resourceLock: &sync.RWMutex{},
@@ -120,8 +176,11 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats *metrics.N
 		env:      bundle.GlobalEnvironment,
 		bloblEnv: bloblang.GlobalEnvironment(),
 
-		logger: log,
-		stats:  stats,
+		logger: log.Noop(),
+		stats:  metrics.Noop(),
+		tracer: trace.NewNoopTracerProvider(),
+
+		fs: ifs.OS(),
 
 		pipes:    map[string]<-chan message.Transaction{},
 		pipeLock: &sync.RWMutex{},
@@ -218,8 +277,8 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats *metrics.N
 //------------------------------------------------------------------------------
 
 // ForStream returns a variant of this manager to be used by a particular stream
-// identifer, where APIs registered will be namespaced by that id.
-func (t *Type) ForStream(id string) interop.Manager {
+// identifier, where APIs registered will be namespaced by that id.
+func (t *Type) ForStream(id string) bundle.NewManagement {
 	return t.forStream(id)
 }
 
@@ -246,7 +305,7 @@ func (t *Type) forLabel(name string) *Type {
 // IntoPath returns a variant of this manager to be used by a particular
 // component path, which is a child of the current component, where
 // observability components will be automatically tagged with the new path.
-func (t *Type) IntoPath(segments ...string) interop.Manager {
+func (t *Type) IntoPath(segments ...string) bundle.NewManagement {
 	return t.intoPath(segments...)
 }
 
@@ -277,7 +336,7 @@ func (t *Type) Label() string {
 
 // WithAddedMetrics returns a modified version of the manager where metrics are
 // registered to both the current metrics target as well as the provided one.
-func (t *Type) WithAddedMetrics(m metrics.Type) interop.Manager {
+func (t *Type) WithAddedMetrics(m metrics.Type) bundle.NewManagement {
 	newT := *t
 	newT.stats = newT.stats.WithStats(metrics.Combine(newT.stats.Child(), m))
 	return &newT
@@ -287,12 +346,19 @@ func (t *Type) WithAddedMetrics(m metrics.Type) interop.Manager {
 
 // RegisterEndpoint registers a server wide HTTP endpoint.
 func (t *Type) RegisterEndpoint(apiPath, desc string, h http.HandlerFunc) {
-	if len(t.stream) > 0 {
+	if len(t.stream) > 0 && t.namespaceStreamEndpoints {
 		apiPath = path.Join("/", t.stream, apiPath)
 	}
 	if t.apiReg != nil {
 		t.apiReg.RegisterEndpoint(apiPath, desc, h)
 	}
+}
+
+// FS returns an ifs.FS implementation that provides access to a filesystem. By
+// default this simply access the os package, with relative paths resolved from
+// the directory that the process is running from.
+func (t *Type) FS() ifs.FS {
+	return t.fs
 }
 
 // SetPipe registers a new transaction chan to a named pipe.
@@ -302,7 +368,7 @@ func (t *Type) SetPipe(name string, tran <-chan message.Transaction) {
 	t.pipeLock.Unlock()
 }
 
-// GetPipe attempts to obtain and return a named output Pipe
+// GetPipe attempts to obtain and return a named output Pipe.
 func (t *Type) GetPipe(name string) (<-chan message.Transaction, error) {
 	t.pipeLock.RLock()
 	pipe, exists := t.pipes[name]
@@ -342,6 +408,11 @@ func (t *Type) Logger() log.Modular {
 	return t.logger
 }
 
+// Tracer returns a tracer provider with the current component context.
+func (t *Type) Tracer() trace.TracerProvider {
+	return t.tracer
+}
+
 // Environment returns a bundle environment used by the manager. This is for
 // internal use only.
 func (t *Type) Environment() *bundle.Environment {
@@ -363,30 +434,10 @@ func (t *Type) GetDocs(name string, ctype docs.Type) (docs.ComponentSpec, bool) 
 
 //------------------------------------------------------------------------------
 
-type oldClosable interface {
-	CloseAsync()
-	WaitForClose(timeout time.Duration) error
-}
-
-func closeWithContext(ctx context.Context, c oldClosable) error {
-	c.CloseAsync()
-	waitFor := time.Second
-	deadline, hasDeadline := ctx.Deadline()
-	if hasDeadline {
-		waitFor = time.Until(deadline)
-	}
-	err := c.WaitForClose(waitFor)
-	for err != nil && !hasDeadline {
-		err = c.WaitForClose(time.Second)
-	}
-	return err
-}
-
-//------------------------------------------------------------------------------
-
 // NewBuffer attempts to create a new buffer component from a config.
 func (t *Type) NewBuffer(conf buffer.Config) (buffer.Streamed, error) {
-	return t.env.BufferInit(conf, t)
+	// Buffers currently never have a label
+	return t.env.BufferInit(conf, t.forLabel(""))
 }
 
 //------------------------------------------------------------------------------
@@ -463,7 +514,7 @@ func (t *Type) ProbeInput(name string) bool {
 // During the execution of the provided closure it is guaranteed that the
 // resource will not be closed or removed. However, it is possible for the
 // resource to be accessed by any number of components in parallel.
-func (t *Type) AccessInput(ctx context.Context, name string, fn func(iinput.Streamed)) error {
+func (t *Type) AccessInput(ctx context.Context, name string, fn func(input.Streamed)) error {
 	// TODO: Eventually use ctx to cancel blocking on the mutex lock. Needs
 	// profiling for heavy use within a busy loop.
 	t.resourceLock.RLock()
@@ -477,8 +528,8 @@ func (t *Type) AccessInput(ctx context.Context, name string, fn func(iinput.Stre
 }
 
 // NewInput attempts to create a new input component from a config.
-func (t *Type) NewInput(conf input.Config, pipelines ...iprocessor.PipelineConstructorFunc) (iinput.Streamed, error) {
-	return t.env.InputInit(conf, t.forLabel(conf.Label), pipelines...)
+func (t *Type) NewInput(conf input.Config) (input.Streamed, error) {
+	return t.env.InputInit(conf, t.forLabel(conf.Label))
 }
 
 // StoreInput attempts to store a new input resource. If an existing resource
@@ -532,7 +583,7 @@ func (t *Type) ProbeProcessor(name string) bool {
 // During the execution of the provided closure it is guaranteed that the
 // resource will not be closed or removed. However, it is possible for the
 // resource to be accessed by any number of components in parallel.
-func (t *Type) AccessProcessor(ctx context.Context, name string, fn func(iprocessor.V1)) error {
+func (t *Type) AccessProcessor(ctx context.Context, name string, fn func(processor.V1)) error {
 	// TODO: Eventually use ctx to cancel blocking on the mutex lock. Needs
 	// profiling for heavy use within a busy loop.
 	t.resourceLock.RLock()
@@ -546,7 +597,7 @@ func (t *Type) AccessProcessor(ctx context.Context, name string, fn func(iproces
 }
 
 // NewProcessor attempts to create a new processor component from a config.
-func (t *Type) NewProcessor(conf processor.Config) (iprocessor.V1, error) {
+func (t *Type) NewProcessor(conf processor.Config) (processor.V1, error) {
 	return t.env.ProcessorInit(conf, t.forLabel(conf.Label))
 }
 
@@ -562,7 +613,7 @@ func (t *Type) StoreProcessor(ctx context.Context, name string, conf processor.C
 		// If a previous resource exists with the same name then we do NOT allow
 		// it to be replaced unless it can be successfully closed. This ensures
 		// that we do not leak connections.
-		if err := closeWithContext(ctx, p); err != nil {
+		if err := p.Close(ctx); err != nil {
 			return err
 		}
 	}
@@ -596,7 +647,7 @@ func (t *Type) ProbeOutput(name string) bool {
 // During the execution of the provided closure it is guaranteed that the
 // resource will not be closed or removed. However, it is possible for the
 // resource to be accessed by any number of components in parallel.
-func (t *Type) AccessOutput(ctx context.Context, name string, fn func(ioutput.Sync)) error {
+func (t *Type) AccessOutput(ctx context.Context, name string, fn func(output.Sync)) error {
 	// TODO: Eventually use ctx to cancel blocking on the mutex lock. Needs
 	// profiling for heavy use within a busy loop.
 	t.resourceLock.RLock()
@@ -610,7 +661,7 @@ func (t *Type) AccessOutput(ctx context.Context, name string, fn func(ioutput.Sy
 }
 
 // NewOutput attempts to create a new output component from a config.
-func (t *Type) NewOutput(conf output.Config, pipelines ...iprocessor.PipelineConstructorFunc) (ioutput.Streamed, error) {
+func (t *Type) NewOutput(conf output.Config, pipelines ...processor.PipelineConstructorFunc) (output.Streamed, error) {
 	return t.env.OutputInit(conf, t.forLabel(conf.Label), pipelines...)
 }
 
@@ -626,7 +677,8 @@ func (t *Type) StoreOutput(ctx context.Context, name string, conf output.Config)
 		// If a previous resource exists with the same name then we do NOT allow
 		// it to be replaced unless it can be successfully closed. This ensures
 		// that we do not leak connections.
-		if err := closeWithContext(ctx, o); err != nil {
+		o.TriggerStopConsuming()
+		if err := o.WaitForClose(ctx); err != nil {
 			return err
 		}
 	}
@@ -638,7 +690,7 @@ func (t *Type) StoreOutput(ctx context.Context, name string, conf output.Config)
 	tmpOutput, err := t.intoPath("output_resources").NewOutput(conf)
 	if err == nil {
 		if t.outputs[name], err = wrapOutput(tmpOutput); err != nil {
-			tmpOutput.CloseAsync()
+			tmpOutput.TriggerCloseNow()
 		}
 	}
 	if err != nil {
@@ -710,59 +762,66 @@ func (t *Type) StoreRateLimit(ctx context.Context, name string, conf ratelimit.C
 
 //------------------------------------------------------------------------------
 
-// CloseAsync triggers the shut down of all resource types that implement the
-// lifetime interface types.Closable.
-func (t *Type) CloseAsync() {
+// TriggerStopConsuming instructs the manager to stop resource inputs and
+// outputs from consuming data. This call does not block.
+func (t *Type) TriggerStopConsuming() {
 	t.resourceLock.Lock()
 	defer t.resourceLock.Unlock()
 
 	for _, c := range t.inputs {
-		c.CloseAsync()
-	}
-	for _, p := range t.processors {
-		p.CloseAsync()
+		c.TriggerStopConsuming()
 	}
 	for _, c := range t.outputs {
-		c.CloseAsync()
+		c.TriggerStopConsuming()
 	}
 }
 
-// WaitForClose blocks until either all closable resource types are shut down or
-// a timeout occurs.
-func (t *Type) WaitForClose(timeout time.Duration) error {
+// TriggerCloseNow triggers the absolute shut down of this component but should
+// not block the calling goroutine.
+func (t *Type) TriggerCloseNow() {
 	t.resourceLock.Lock()
 	defer t.resourceLock.Unlock()
 
-	tOutCtx, done := context.WithTimeout(context.Background(), timeout)
-	defer done()
+	for _, c := range t.inputs {
+		c.TriggerCloseNow()
+	}
+	for _, c := range t.outputs {
+		c.TriggerCloseNow()
+	}
+}
 
-	timesOut := time.Now().Add(timeout)
+// WaitForClose is a blocking call to wait until the component has finished
+// shutting down and cleaning up resources.
+func (t *Type) WaitForClose(ctx context.Context) error {
+	t.resourceLock.Lock()
+	defer t.resourceLock.Unlock()
+
 	for k, c := range t.inputs {
-		if err := c.WaitForClose(time.Until(timesOut)); err != nil {
+		if err := c.WaitForClose(ctx); err != nil {
 			return fmt.Errorf("resource '%s' failed to cleanly shutdown: %v", k, err)
 		}
 		delete(t.inputs, k)
 	}
 	for k, c := range t.caches {
-		if err := c.Close(tOutCtx); err != nil {
+		if err := c.Close(ctx); err != nil {
 			return fmt.Errorf("resource '%s' failed to cleanly shutdown: %v", k, err)
 		}
 		delete(t.caches, k)
 	}
 	for k, p := range t.processors {
-		if err := p.WaitForClose(time.Until(timesOut)); err != nil {
+		if err := p.Close(ctx); err != nil {
 			return fmt.Errorf("resource '%s' failed to cleanly shutdown: %v", k, err)
 		}
 		delete(t.processors, k)
 	}
 	for k, c := range t.rateLimits {
-		if err := c.Close(tOutCtx); err != nil {
+		if err := c.Close(ctx); err != nil {
 			return fmt.Errorf("resource '%s' failed to cleanly shutdown: %v", k, err)
 		}
 		delete(t.rateLimits, k)
 	}
 	for k, c := range t.outputs {
-		if err := c.WaitForClose(time.Until(timesOut)); err != nil {
+		if err := c.WaitForClose(ctx); err != nil {
 			return fmt.Errorf("resource '%s' failed to cleanly shutdown: %v", k, err)
 		}
 		delete(t.outputs, k)

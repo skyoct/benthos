@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -14,20 +13,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		b, err := newGenerateReader(nm, c.Generate)
 		if err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader("generate", false, reader.NewAsyncPreserver(b), nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("generate", false, input.NewAsyncPreserver(b), nm)
 	}), docs.ComponentSpec{
 		Name:    "generate",
 		Version: "3.40.0",
@@ -49,7 +46,8 @@ testing your pipeline configs.`,
 				"@every 1s", "0,30 */2 * * * *", "TZ=Europe/London 30 3-6,20-23 * * *",
 			),
 			docs.FieldInt("count", "An optional number of messages to generate, if set above 0 the specified number of messages is generated and then the input will shut down."),
-		).ChildDefaultAndTypesFromStruct(oinput.NewGenerateConfig()),
+			docs.FieldInt("batch_size", "The number of generated messages that should be accumulated into each batch flushed at the specified interval.").HasDefault(1),
+		).ChildDefaultAndTypesFromStruct(input.NewGenerateConfig()),
 		Categories: []string{
 			"Utility",
 		},
@@ -102,7 +100,8 @@ input:
 //------------------------------------------------------------------------------
 
 type generateReader struct {
-	remaining   int64
+	remaining   int
+	batchSize   int
 	limited     bool
 	firstIsFree bool
 	exec        *mapping.Executor
@@ -111,7 +110,7 @@ type generateReader struct {
 	location    *time.Location
 }
 
-func newGenerateReader(mgr interop.Manager, conf oinput.GenerateConfig) (*generateReader, error) {
+func newGenerateReader(mgr bundle.NewManagement, conf input.GenerateConfig) (*generateReader, error) {
 	var (
 		duration    time.Duration
 		timer       *time.Ticker
@@ -142,11 +141,11 @@ func newGenerateReader(mgr interop.Manager, conf oinput.GenerateConfig) (*genera
 		}
 		return nil, fmt.Errorf("failed to parse mapping: %v", err)
 	}
-	remaining := int64(conf.Count)
 	return &generateReader{
 		exec:        exec,
-		remaining:   remaining,
-		limited:     remaining > 0,
+		remaining:   conf.Count,
+		batchSize:   conf.BatchSize,
+		limited:     conf.Count > 0,
 		timer:       timer,
 		schedule:    schedule,
 		location:    location,
@@ -183,16 +182,20 @@ func parseCronExpression(cronExpression string) (*cron.Schedule, *time.Location,
 	return &cronSchedule, loc, nil
 }
 
-// ConnectWithContext establishes a Bloblang reader.
-func (b *generateReader) ConnectWithContext(ctx context.Context) error {
+// Connect establishes a Bloblang reader.
+func (b *generateReader) Connect(ctx context.Context) error {
 	return nil
 }
 
-// ReadWithContext a new bloblang generated message.
-func (b *generateReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+// ReadBatch a new bloblang generated message.
+func (b *generateReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
+	batchSize := b.batchSize
 	if b.limited {
-		if remaining := atomic.AddInt64(&b.remaining, -1); remaining < 0 {
+		if b.remaining <= 0 {
 			return nil, nil, component.ErrTypeClosed
+		}
+		if b.remaining < batchSize {
+			batchSize = b.remaining
 		}
 	}
 
@@ -209,30 +212,31 @@ func (b *generateReader) ReadWithContext(ctx context.Context) (*message.Batch, r
 			return nil, nil, component.ErrTimeout
 		}
 	}
-
 	b.firstIsFree = false
-	p, err := b.exec.MapPart(0, message.QuickBatch(nil))
-	if err != nil {
-		return nil, nil, err
+
+	batch := make(message.Batch, 0, batchSize)
+	for i := 0; i < batchSize; i++ {
+		p, err := b.exec.MapPart(0, batch)
+		if err != nil {
+			return nil, nil, err
+		}
+		if p != nil {
+			if b.limited {
+				b.remaining--
+			}
+			batch = append(batch, p)
+		}
 	}
-	if p == nil {
+	if len(batch) == 0 {
 		return nil, nil, component.ErrTimeout
 	}
-
-	msg := message.QuickBatch(nil)
-	msg.Append(p)
-
-	return msg, func(context.Context, error) error { return nil }, nil
+	return batch, func(context.Context, error) error { return nil }, nil
 }
 
 // CloseAsync shuts down the bloblang reader.
-func (b *generateReader) CloseAsync() {
+func (b *generateReader) Close(ctx context.Context) (err error) {
 	if b.timer != nil {
 		b.timer.Stop()
 	}
-}
-
-// WaitForClose blocks until the bloblang input has closed down.
-func (b *generateReader) WaitForClose(timeout time.Duration) error {
-	return nil
+	return
 }

@@ -3,6 +3,7 @@ package elasticsearch
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/olivere/elastic/v7"
-	aws "github.com/olivere/elastic/v7/aws/v4"
 
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
@@ -18,22 +18,29 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/http/docs/auth"
-	baws "github.com/benthosdev/benthos/v4/internal/impl/aws"
+	"github.com/benthosdev/benthos/v4/internal/httpclient"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
 	itls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
+func notImportedAWSOptFn(conf output.ElasticsearchConfig) ([]elastic.ClientOptionFunc, error) {
+	if !conf.AWS.Enabled {
+		return nil, nil
+	}
+	return nil, errors.New("unable to configure AWS authentication as this binary does not import components/aws")
+}
+
+// AWSOptFn is populated with the child `aws` package when imported.
+var AWSOptFn = notImportedAWSOptFn
+
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(conf ooutput.Config, mgr bundle.NewManagement) (output.Streamed, error) {
-		return NewElasticsearch(conf, mgr, mgr.Logger(), mgr.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(NewElasticsearch), docs.ComponentSpec{
 		Name: "elasticsearch",
 		Summary: `
 Publishes messages into an Elasticsearch index. If the index does not exist then
@@ -51,18 +58,18 @@ false for connections to succeed.`),
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldString("urls", "A list of URLs to connect to. If an item of the list contains commas it will be expanded into multiple URLs.", []string{"http://localhost:9200"}).Array(),
 			docs.FieldString("index", "The index to place messages.").IsInterpolated(),
-			docs.FieldString("action", "The action to take on the document.").IsInterpolated().HasOptions("index", "update", "delete").Advanced(),
+			docs.FieldString("action", "The action to take on the document. This field must resolve to one of the following action types: `create`, `index`, `update`, `upsert` or `delete`.").IsInterpolated().Advanced(),
 			docs.FieldString("pipeline", "An optional pipeline id to preprocess incoming documents.").IsInterpolated().Advanced(),
 			docs.FieldString("id", "The ID for indexed messages. Interpolation should be used in order to create a unique ID for each message.").IsInterpolated(),
-			docs.FieldString("type", "The document type.").Deprecated(),
+			docs.FieldString("type", "The document mapping type. This field is required for versions of elasticsearch earlier than 6.0.0, but are invalid for versions 7.0.0 or later.").Optional().IsInterpolated(),
 			docs.FieldString("routing", "The routing key to use for the document.").IsInterpolated().Advanced(),
 			docs.FieldBool("sniff", "Prompts Benthos to sniff for brokers to connect to when establishing a connection.").Advanced(),
 			docs.FieldBool("healthcheck", "Whether to enable healthchecks.").Advanced(),
 			docs.FieldString("timeout", "The maximum time to wait before abandoning a request (and trying again).").Advanced(),
 			itls.FieldSpec(),
-			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
+			docs.FieldInt("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time."),
 		).WithChildren(retries.FieldSpecs()...).WithChildren(
-			auth.BasicAuthFieldSpec(),
+			httpclient.OldBasicAuthFieldSpec(),
 			policy.FieldSpec(),
 			docs.FieldObject("aws", "Enables and customises connectivity to Amazon Elastic Service.").WithChildren(
 				docs.FieldSpecs{
@@ -70,7 +77,7 @@ false for connections to succeed.`),
 				}.Merge(sess.FieldSpecs())...,
 			).Advanced(),
 			docs.FieldBool("gzip_compression", "Enable gzip compression on the request side.").Advanced(),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewElasticsearchConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewElasticsearchConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -81,18 +88,16 @@ false for connections to succeed.`),
 }
 
 // NewElasticsearch creates a new Elasticsearch output type.
-func NewElasticsearch(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	elasticWriter, err := NewElasticsearchV2(conf.Elasticsearch, mgr, log, stats)
+func NewElasticsearch(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	elasticWriter, err := NewElasticsearchV2(conf.Elasticsearch, mgr)
 	if err != nil {
 		return nil, err
 	}
-	w, err := ooutput.NewAsyncWriter(
-		"elasticsearch", conf.Elasticsearch.MaxInFlight, elasticWriter, log, stats,
-	)
+	w, err := output.NewAsyncWriter("elasticsearch", conf.Elasticsearch.MaxInFlight, elasticWriter, mgr)
 	if err != nil {
 		return w, err
 	}
-	return ooutput.NewBatcherFromConfig(conf.Elasticsearch.Batching, w, mgr, log, stats)
+	return batcher.NewFromConfig(conf.Elasticsearch.Batching, w, mgr)
 }
 
 // Elasticsearch is a writer type that writes messages into elasticsearch.
@@ -103,7 +108,7 @@ type Elasticsearch struct {
 	urls        []string
 	sniff       bool
 	healthcheck bool
-	conf        ooutput.ElasticsearchConfig
+	conf        output.ElasticsearchConfig
 
 	backoffCtor func() backoff.BackOff
 	timeout     time.Duration
@@ -114,15 +119,16 @@ type Elasticsearch struct {
 	indexStr    *field.Expression
 	pipelineStr *field.Expression
 	routingStr  *field.Expression
+	typeStr     *field.Expression
 
 	client *elastic.Client
 }
 
 // NewElasticsearchV2 creates a new Elasticsearch writer type.
-func NewElasticsearchV2(conf ooutput.ElasticsearchConfig, mgr interop.Manager, log log.Modular, stats metrics.Type) (*Elasticsearch, error) {
+func NewElasticsearchV2(conf output.ElasticsearchConfig, mgr bundle.NewManagement) (*Elasticsearch, error) {
 	e := Elasticsearch{
-		log:         log,
-		stats:       stats,
+		log:         mgr.Logger(),
+		stats:       mgr.Metrics(),
 		conf:        conf,
 		sniff:       conf.Sniff,
 		healthcheck: conf.Healthcheck,
@@ -143,6 +149,9 @@ func NewElasticsearchV2(conf ooutput.ElasticsearchConfig, mgr interop.Manager, l
 	}
 	if e.routingStr, err = mgr.BloblEnvironment().NewField(conf.Routing); err != nil {
 		return nil, fmt.Errorf("failed to parse routing key expression: %v", err)
+	}
+	if e.typeStr, err = mgr.BloblEnvironment().NewField(conf.Type); err != nil {
+		return nil, fmt.Errorf("failed to parse type field expression: %v", err)
 	}
 
 	for _, u := range conf.URLs {
@@ -166,7 +175,7 @@ func NewElasticsearchV2(conf ooutput.ElasticsearchConfig, mgr interop.Manager, l
 
 	if conf.TLS.Enabled {
 		var err error
-		if e.tlsConf, err = conf.TLS.Get(); err != nil {
+		if e.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -175,14 +184,8 @@ func NewElasticsearchV2(conf ooutput.ElasticsearchConfig, mgr interop.Manager, l
 
 //------------------------------------------------------------------------------
 
-// ConnectWithContext attempts to establish a connection to a Elasticsearch
-// broker.
-func (e *Elasticsearch) ConnectWithContext(ctx context.Context) error {
-	return e.Connect()
-}
-
 // Connect attempts to establish a connection to a Elasticsearch broker.
-func (e *Elasticsearch) Connect() error {
+func (e *Elasticsearch) Connect(ctx context.Context) error {
 	if e.client != nil {
 		return nil
 	}
@@ -206,21 +209,17 @@ func (e *Elasticsearch) Connect() error {
 			},
 			Timeout: e.timeout,
 		}))
-
 	} else {
 		opts = append(opts, elastic.SetHttpClient(&http.Client{
 			Timeout: e.timeout,
 		}))
 	}
 
-	if e.conf.AWS.Enabled {
-		tsess, err := baws.GetSessionFromConf(e.conf.AWS.Config)
-		if err != nil {
-			return err
-		}
-		signingClient := aws.NewV4SigningClient(tsess.Config.Credentials, e.conf.AWS.Region)
-		opts = append(opts, elastic.SetHttpClient(signingClient))
+	awsOpts, err := AWSOptFn(e.conf)
+	if err != nil {
+		return err
 	}
+	opts = append(opts, awsOpts...)
 
 	if e.conf.GzipCompression {
 		opts = append(opts, elastic.SetGzip(true))
@@ -249,19 +248,19 @@ type pendingBulkIndex struct {
 	Pipeline string
 	Routing  string
 	Type     string
-	Doc      interface{}
+	Doc      any
 	ID       string
 }
 
-// WriteWithContext will attempt to write a message to Elasticsearch, wait for
+// WriteBatch will attempt to write a message to Elasticsearch, wait for
 // acknowledgement, and returns an error if applicable.
-func (e *Elasticsearch) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (e *Elasticsearch) WriteBatch(ctx context.Context, msg message.Batch) error {
 	return e.Write(msg)
 }
 
 // Write will attempt to write a message to Elasticsearch, wait for
 // acknowledgement, and returns an error if applicable.
-func (e *Elasticsearch) Write(msg *message.Batch) error {
+func (e *Elasticsearch) Write(msg message.Batch) error {
 	if e.client == nil {
 		return component.ErrNotConnected
 	}
@@ -270,7 +269,7 @@ func (e *Elasticsearch) Write(msg *message.Batch) error {
 
 	requests := make([]*pendingBulkIndex, msg.Len())
 	if err := msg.Iter(func(i int, part *message.Part) error {
-		jObj, ierr := part.JSON()
+		jObj, ierr := part.AsStructured()
 		if ierr != nil {
 			e.log.Errorf("Failed to marshal message into JSON document: %v\n", ierr)
 			return fmt.Errorf("failed to marshal message into JSON document: %w", ierr)
@@ -280,7 +279,7 @@ func (e *Elasticsearch) Write(msg *message.Batch) error {
 			Index:    e.indexStr.String(i, msg),
 			Pipeline: e.pipelineStr.String(i, msg),
 			Routing:  e.routingStr.String(i, msg),
-			Type:     e.conf.Type,
+			Type:     e.typeStr.String(i, msg),
 			Doc:      jObj,
 			ID:       e.idStr.String(i, msg),
 		}
@@ -350,12 +349,8 @@ func (e *Elasticsearch) Write(msg *message.Batch) error {
 	return nil
 }
 
-// CloseAsync shuts down the Elasticsearch writer and stops processing messages.
-func (e *Elasticsearch) CloseAsync() {
-}
-
-// WaitForClose blocks until the Elasticsearch writer has closed down.
-func (e *Elasticsearch) WaitForClose(timeout time.Duration) error {
+// Close shuts down the Elasticsearch writer and stops processing messages.
+func (e *Elasticsearch) Close(context.Context) error {
 	return nil
 }
 
@@ -372,6 +367,17 @@ func (e *Elasticsearch) buildBulkableRequest(p *pendingBulkIndex) (elastic.Bulka
 			r = r.Type(p.Type)
 		}
 		return r, nil
+	case "upsert":
+		r := elastic.NewBulkUpdateRequest().
+			Index(p.Index).
+			Routing(p.Routing).
+			Id(p.ID).
+			DocAsUpsert(true).
+			Doc(p.Doc)
+		if p.Type != "" {
+			r = r.Type(p.Type)
+		}
+		return r, nil
 	case "delete":
 		r := elastic.NewBulkDeleteRequest().
 			Index(p.Index).
@@ -383,6 +389,17 @@ func (e *Elasticsearch) buildBulkableRequest(p *pendingBulkIndex) (elastic.Bulka
 		return r, nil
 	case "index":
 		r := elastic.NewBulkIndexRequest().
+			Index(p.Index).
+			Pipeline(p.Pipeline).
+			Routing(p.Routing).
+			Id(p.ID).
+			Doc(p.Doc)
+		if p.Type != "" {
+			r = r.Type(p.Type)
+		}
+		return r, nil
+	case "create":
+		r := elastic.NewBulkCreateRequest().
 			Index(p.Index).
 			Pipeline(p.Pipeline).
 			Routing(p.Routing).

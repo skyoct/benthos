@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
 	ioutput "github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 // Output is an interface implemented by Benthos outputs that support single
@@ -74,22 +71,20 @@ type BatchOutput interface {
 
 //------------------------------------------------------------------------------
 
-// Implements output.AsyncSink
+// Implements output.AsyncSink.
 type airGapWriter struct {
 	w Output
-
-	sig *shutdown.Signaller
 }
 
-func newAirGapWriter(w Output) output.AsyncSink {
-	return &airGapWriter{w, shutdown.NewSignaller()}
+func newAirGapWriter(w Output) ioutput.AsyncSink {
+	return &airGapWriter{w: w}
 }
 
-func (a *airGapWriter) ConnectWithContext(ctx context.Context) error {
+func (a *airGapWriter) Connect(ctx context.Context) error {
 	return a.w.Connect(ctx)
 }
 
-func (a *airGapWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (a *airGapWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	err := a.w.Write(ctx, newMessageFromPart(msg.Get(0)))
 	if err != nil && errors.Is(err, ErrNotConnected) {
 		err = component.ErrNotConnected
@@ -97,41 +92,26 @@ func (a *airGapWriter) WriteWithContext(ctx context.Context, msg *message.Batch)
 	return err
 }
 
-func (a *airGapWriter) CloseAsync() {
-	go func() {
-		// TODO: Determine whether to continue trying or log/exit.
-		_ = a.w.Close(context.Background())
-		a.sig.ShutdownComplete()
-	}()
-}
-
-func (a *airGapWriter) WaitForClose(tout time.Duration) error {
-	select {
-	case <-a.sig.HasClosedChan():
-	case <-time.After(tout):
-		return component.ErrTimeout
-	}
-	return nil
+func (a *airGapWriter) Close(ctx context.Context) error {
+	return a.w.Close(ctx)
 }
 
 //------------------------------------------------------------------------------
 
-// Implements output.AsyncSink
+// Implements output.AsyncSink.
 type airGapBatchWriter struct {
 	w BatchOutput
-
-	sig *shutdown.Signaller
 }
 
-func newAirGapBatchWriter(w BatchOutput) output.AsyncSink {
-	return &airGapBatchWriter{w, shutdown.NewSignaller()}
+func newAirGapBatchWriter(w BatchOutput) ioutput.AsyncSink {
+	return &airGapBatchWriter{w: w}
 }
 
-func (a *airGapBatchWriter) ConnectWithContext(ctx context.Context) error {
+func (a *airGapBatchWriter) Connect(ctx context.Context) error {
 	return a.w.Connect(ctx)
 }
 
-func (a *airGapBatchWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (a *airGapBatchWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	parts := make([]*Message, msg.Len())
 	_ = msg.Iter(func(i int, part *message.Part) error {
 		parts[i] = newMessageFromPart(part)
@@ -141,24 +121,57 @@ func (a *airGapBatchWriter) WriteWithContext(ctx context.Context, msg *message.B
 	if err != nil && errors.Is(err, ErrNotConnected) {
 		err = component.ErrNotConnected
 	}
+	err = fromPublicBatchError(err)
 	return err
 }
 
-func (a *airGapBatchWriter) CloseAsync() {
-	go func() {
-		if err := a.w.Close(context.Background()); err == nil {
-			a.sig.ShutdownComplete()
-		}
-	}()
+func (a *airGapBatchWriter) Close(ctx context.Context) error {
+	return a.w.Close(context.Background())
 }
 
-func (a *airGapBatchWriter) WaitForClose(tout time.Duration) error {
-	select {
-	case <-a.sig.HasClosedChan():
-	case <-time.After(tout):
-		return component.ErrTimeout
+//------------------------------------------------------------------------------
+
+// ResourceOutput provides access to an output resource.
+type ResourceOutput struct {
+	o ioutput.Sync
+}
+
+func newResourceOutput(o ioutput.Sync) *ResourceOutput {
+	return &ResourceOutput{o: o}
+}
+
+// Write a message to the output, or return an error either if delivery is not
+// possible or the context is cancelled.
+func (o *ResourceOutput) Write(ctx context.Context, m *Message) error {
+	payload := message.Batch{m.part}
+	return o.writeMsg(ctx, payload)
+}
+
+// WriteBatch attempts to write a message batch to the output, and returns an
+// error either if delivery is not possible or the context is cancelled.
+func (o *ResourceOutput) WriteBatch(ctx context.Context, b MessageBatch) error {
+	payload := make(message.Batch, len(b))
+	for i, m := range b {
+		payload[i] = m.part
 	}
-	return nil
+	return toPublicBatchError(o.writeMsg(ctx, payload))
+}
+
+func (o *ResourceOutput) writeMsg(ctx context.Context, payload message.Batch) error {
+	var wg sync.WaitGroup
+	var ackErr error
+	wg.Add(1)
+
+	if err := o.o.WriteTransaction(ctx, message.NewTransactionFunc(payload, func(ctx context.Context, err error) error {
+		ackErr = err
+		wg.Done()
+		return nil
+	})); err != nil {
+		return err
+	}
+
+	wg.Wait()
+	return ackErr
 }
 
 //------------------------------------------------------------------------------
@@ -187,8 +200,7 @@ func newOwnedOutput(o ioutput.Streamed) (*OwnedOutput, error) {
 // Write a message to the output, or return an error either if delivery is not
 // possible or the context is cancelled.
 func (o *OwnedOutput) Write(ctx context.Context, m *Message) error {
-	payload := message.QuickBatch(nil)
-	payload.Append(m.part)
+	payload := message.Batch{m.part}
 
 	resChan := make(chan error, 1)
 	select {
@@ -208,9 +220,9 @@ func (o *OwnedOutput) Write(ctx context.Context, m *Message) error {
 // WriteBatch attempts to write a message batch to the output, and returns an
 // error either if delivery is not possible or the context is cancelled.
 func (o *OwnedOutput) WriteBatch(ctx context.Context, b MessageBatch) error {
-	payload := message.QuickBatch(nil)
-	for _, m := range b {
-		payload.Append(m.part)
+	payload := make(message.Batch, len(b))
+	for i, m := range b {
+		payload[i] = m.part
 	}
 
 	resChan := make(chan error, 1)
@@ -222,7 +234,7 @@ func (o *OwnedOutput) WriteBatch(ctx context.Context, b MessageBatch) error {
 
 	select {
 	case res := <-resChan:
-		return res
+		return toPublicBatchError(res)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -233,15 +245,5 @@ func (o *OwnedOutput) Close(ctx context.Context) error {
 	o.closeOnce.Do(func() {
 		close(o.t)
 	})
-	for {
-		// Gross but will do for now until we replace these with context params.
-		if err := o.o.WaitForClose(time.Millisecond * 100); err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-	}
+	return o.o.WaitForClose(ctx)
 }

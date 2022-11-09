@@ -6,17 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/integration"
-	"github.com/benthosdev/benthos/v4/internal/log"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-
-	// Bring in legacy definition
-	_ "github.com/benthosdev/benthos/v4/internal/interop/legacy"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func TestIntegrationRedis(t *testing.T) {
@@ -35,16 +33,16 @@ func TestIntegrationRedis(t *testing.T) {
 
 	_ = resource.Expire(900)
 	require.NoError(t, pool.Retry(func() error {
-		conf := ooutput.NewRedisStreamsConfig()
+		conf := output.NewRedisStreamsConfig()
 		conf.URL = fmt.Sprintf("tcp://localhost:%v", resource.GetPort("6379/tcp"))
 
-		r, cErr := newRedisStreamsWriter(conf, log.Noop())
+		r, cErr := newRedisStreamsWriter(conf, mock.NewManager())
 		if cErr != nil {
 			return cErr
 		}
-		cErr = r.ConnectWithContext(context.Background())
+		cErr = r.Connect(context.Background())
 
-		r.CloseAsync()
+		_ = r.Close(context.Background())
 		return cErr
 	}))
 
@@ -55,7 +53,7 @@ func TestIntegrationRedis(t *testing.T) {
 output:
   redis_streams:
     url: tcp://localhost:$PORT
-    stream: stream-$ID
+    stream: ${! meta("routing_stream_prefix") }-stream-$ID
     body_key: body
     max_length: 0
     max_in_flight: $MAX_IN_FLIGHT
@@ -63,12 +61,14 @@ output:
       exclude_prefixes: [ $OUTPUT_META_EXCLUDE_PREFIX ]
     batching:
       count: $OUTPUT_BATCH_COUNT
+  processors:
+    - bloblang: meta routing_stream_prefix = "bar"
 
 input:
   redis_streams:
     url: tcp://localhost:$PORT
     body_key: body
-    streams: [ stream-$ID ]
+    streams: [ bar-stream-$ID ]
     limit: 10
     client_id: client-input-$ID
     consumer_group: group-$ID
@@ -200,13 +200,13 @@ output:
     fields:
       content: ${! content() }
 `
-		hashGetFn := func(ctx context.Context, testID string, id string) (string, []string, error) {
+		hashGetFn := func(ctx context.Context, testID, id string) (string, []string, error) {
 			client := redis.NewClient(&redis.Options{
 				Addr:    fmt.Sprintf("localhost:%v", resource.GetPort("6379/tcp")),
 				Network: "tcp",
 			})
 			key := testID + "-" + id
-			res, err := client.HGet(key, "content").Result()
+			res, err := client.HGet(ctx, key, "content").Result()
 			if err != nil {
 				return "", nil, err
 			}
@@ -241,16 +241,16 @@ func BenchmarkIntegrationRedis(b *testing.B) {
 
 	_ = resource.Expire(900)
 	require.NoError(b, pool.Retry(func() error {
-		conf := ooutput.NewRedisStreamsConfig()
+		conf := output.NewRedisStreamsConfig()
 		conf.URL = fmt.Sprintf("tcp://localhost:%v", resource.GetPort("6379/tcp"))
 
-		r, cErr := newRedisStreamsWriter(conf, log.Noop())
+		r, cErr := newRedisStreamsWriter(conf, mock.NewManager())
 		if cErr != nil {
 			return cErr
 		}
-		cErr = r.ConnectWithContext(context.Background())
+		cErr = r.Connect(context.Background())
 
-		r.CloseAsync()
+		_ = r.Close(context.Background())
 		return cErr
 	}))
 

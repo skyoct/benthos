@@ -80,6 +80,7 @@ output:
     upload_parallel_threads: 4
     compression: AUTO
     snowpipe: ""
+    client_session_keep_alive: false
     batching:
       count: 0
       byte_size: 0
@@ -114,28 +115,29 @@ This authentication mechanism allows Snowpipe functionality, but it does require
 beforehand. Please consult the [documentation](https://docs.snowflake.com/en/user-guide/key-pair-auth.html#configuring-key-pair-authentication)
 for details on how to set it up and assign the Public Key to your user.
 
-Note that the Snowflake documentation suggests using this command:
+Note that the Snowflake documentation [used to suggest](https://twitter.com/felipehoffa/status/1560811785606684672)
+using this command:
 
 ```shell
 openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8
 ```
 
 to generate an encrypted SSH private key. However, in this case, it uses an encryption algorithm called
-`pbeWithMD5AndDES-CBC`, which part of the PKCS#5 v1.5, which is considered insecure. Due to this, Benthos does not
-support it and, if you wish to use password-protected keys directly, you must use PKCS#5 v2.0 to encrypt them. One way
-of achieving this is to use the following command:
+`pbeWithMD5AndDES-CBC`, which is part of the PKCS#5 v1.5 and is considered insecure. Due to this, Benthos does not
+support it and, if you wish to use password-protected keys directly, you must use PKCS#5 v2.0 to encrypt them by using
+the following command (as the current Snowflake docs suggest):
 
 ```shell
 openssl genrsa 2048 | openssl pkcs8 -topk8 -v2 des3 -inform PEM -out rsa_key.p8
 ```
 
-Alternatively, you can re-encrypt an existing key using this command:
+If you have an existing key encrypted with PKCS#5 v1.5, you can re-encrypt it with PKCS#5 v2.0 using this command:
 
 ```shell
 openssl pkcs8 -in rsa_key_original.p8 -topk8 -v2 des3 -out rsa_key.p8
 ```
 
-Please consult this [documentation](https://linux.die.net/man/1/pkcs8) for details.
+Please consult [this](https://linux.die.net/man/1/pkcs8) pkcs8 command documentation for details on PKCS#5 algorithms.
 
 ### Batching
 
@@ -205,8 +207,8 @@ Snowpipe. They match the name of the file that is placed in the stage.
 ## Performance
 
 This output benefits from sending multiple messages in flight in parallel for
-improved performance. You can tune the max number of in flight messages with the
-field `max_in_flight`.
+improved performance. You can tune the max number of in flight messages (or
+message batches) with the field `max_in_flight`.
 
 This output benefits from sending messages as a batch for improved performance.
 Batches can be formed at both the input and output level. You can find out more
@@ -396,6 +398,9 @@ Type: `string`
 ### `password`
 
 An optional password.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -410,6 +415,9 @@ Type: `string`
 ### `private_key_pass`
 
 An optional private SSH key passphrase.
+:::warning Secret
+This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
+:::
 
 
 Type: `string`  
@@ -490,6 +498,14 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 
 Type: `string`  
+
+### `client_session_keep_alive`
+
+Enable Snowflake keepalive mechanism to prevent the client session from expiring after 4 hours (error 390114).
+
+
+Type: `bool`  
+Default: `false`  
 
 ### `batching`
 
@@ -589,7 +605,7 @@ processors:
 
 ### `max_in_flight`
 
-The maximum number of messages to have in flight at a given time. Increase this to improve throughput.
+The maximum number of parallel message batches to have in flight at any given time.
 
 
 Type: `int`  

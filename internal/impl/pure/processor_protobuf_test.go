@@ -1,14 +1,15 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestProtobuf(t *testing.T) {
@@ -121,10 +122,10 @@ func TestProtobuf(t *testing.T) {
 
 			input := message.QuickBatch(nil)
 			for _, p := range test.input {
-				input.Append(message.NewPart(p))
+				input = append(input, message.NewPart(p))
 			}
 
-			msgs, res := proc.ProcessMessage(input)
+			msgs, res := proc.ProcessBatch(context.Background(), input)
 			require.Nil(t, res)
 			require.Len(t, msgs, 1)
 
@@ -179,10 +180,10 @@ func TestProtobufErrors(t *testing.T) {
 
 			input := message.QuickBatch(nil)
 			for _, p := range test.input {
-				input.Append(message.NewPart(p))
+				input = append(input, message.NewPart(p))
 			}
 
-			msgs, res := proc.ProcessMessage(input)
+			msgs, res := proc.ProcessBatch(context.Background(), input)
 			require.Nil(t, res)
 			require.Len(t, msgs, 1)
 

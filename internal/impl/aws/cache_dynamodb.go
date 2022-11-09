@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
 	"github.com/cenkalti/backoff/v4"
 
+	"github.com/benthosdev/benthos/v4/internal/impl/aws/config"
 	"github.com/benthosdev/benthos/v4/public/service"
 )
 
@@ -53,7 +54,7 @@ Strong read consistency can be enabled using the ` + "`consistent_read`" + ` con
 		Field(service.NewBackOffField("retries", false, retriesDefaults).
 			Advanced())
 
-	for _, f := range sessionFields() {
+	for _, f := range config.SessionFields() {
 		spec = spec.Field(f)
 	}
 	return spec
@@ -72,7 +73,6 @@ func init() {
 			}
 			return d, nil
 		})
-
 	if err != nil {
 		panic(err)
 	}
@@ -111,7 +111,7 @@ func newDynamodbCacheFromConfig(conf *service.ParsedConfig) (*dynamodbCache, err
 		}
 		ttlKey = &ttlKeyTmp
 	}
-	sess, err := getSession(conf)
+	sess, err := GetSession(conf)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func newDynamodbCache(
 		ttlKey:         ttlKey,
 		ttl:            ttl,
 		boffPool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				bo := *backOff
 				bo.Reset()
 				return &bo

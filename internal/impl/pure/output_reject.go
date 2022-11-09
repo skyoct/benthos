@@ -4,24 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		f, err := newRejectWriter(nm, c.Reject)
 		if err != nil {
 			return nil, err
 		}
-		return ooutput.NewAsyncWriter("reject", 1, f, nm.Logger(), nm.Metrics())
+		return output.NewAsyncWriter("reject", 1, f, nm)
 	}), docs.ComponentSpec{
 		Name:   "reject",
 		Status: docs.StatusStable,
@@ -66,7 +64,7 @@ type rejectWriter struct {
 	errExpr *field.Expression
 }
 
-func newRejectWriter(mgr interop.Manager, errorString string) (*rejectWriter, error) {
+func newRejectWriter(mgr bundle.NewManagement, errorString string) (*rejectWriter, error) {
 	if errorString == "" {
 		return nil, errors.New("an error message must be provided in order to provide context for the rejection")
 	}
@@ -77,18 +75,15 @@ func newRejectWriter(mgr interop.Manager, errorString string) (*rejectWriter, er
 	return &rejectWriter{errExpr}, nil
 }
 
-func (w *rejectWriter) ConnectWithContext(ctx context.Context) error {
+func (w *rejectWriter) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (w *rejectWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (w *rejectWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	errStr := w.errExpr.String(0, msg)
 	return errors.New(errStr)
 }
 
-func (w *rejectWriter) CloseAsync() {
-}
-
-func (w *rejectWriter) WaitForClose(timeout time.Duration) error {
+func (w *rejectWriter) Close(context.Context) error {
 	return nil
 }

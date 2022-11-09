@@ -13,17 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
-
-	_ "github.com/benthosdev/benthos/v4/internal/interop/legacy"
 )
 
 var _ output.Streamed = &fallbackBroker{}
@@ -31,7 +28,7 @@ var _ output.Streamed = &fallbackBroker{}
 func TestFallbackOutputBasic(t *testing.T) {
 	dir := t.TempDir()
 
-	outOne, outTwo, outThree := ooutput.NewConfig(), ooutput.NewConfig(), ooutput.NewConfig()
+	outOne, outTwo, outThree := output.NewConfig(), output.NewConfig(), output.NewConfig()
 	outOne.Type, outTwo.Type, outThree.Type = "http_client", "file", "file"
 	outOne.HTTPClient.URL = "http://localhost:11111111/badurl"
 	outOne.HTTPClient.NumRetries = 1
@@ -50,11 +47,11 @@ func TestFallbackOutputBasic(t *testing.T) {
 	outTwo.Processors = append(outTwo.Processors, procTwo)
 	outThree.Processors = append(outThree.Processors, procThree)
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "fallback"
 	conf.Fallback = append(conf.Fallback, outOne, outTwo, outThree)
 
-	s, err := bundle.AllOutputs.Init(conf, bmock.NewManager())
+	s, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	sendChan := make(chan message.Transaction)
@@ -62,8 +59,10 @@ func TestFallbackOutputBasic(t *testing.T) {
 	require.NoError(t, s.Consume(sendChan))
 
 	t.Cleanup(func() {
-		s.CloseAsync()
-		require.NoError(t, s.WaitForClose(time.Second))
+		ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+		s.TriggerCloseNow()
+		require.NoError(t, s.WaitForClose(ctx))
+		done()
 	})
 
 	inputs := []string{
@@ -114,8 +113,8 @@ func TestFallbackDoubleClose(t *testing.T) {
 	}
 
 	// This shouldn't cause a panic
-	oTM.CloseAsync()
-	oTM.CloseAsync()
+	oTM.TriggerCloseNow()
+	oTM.TriggerCloseNow()
 }
 
 //------------------------------------------------------------------------------
@@ -161,8 +160,8 @@ func TestFallbackHappyPath(t *testing.T) {
 			var ts message.Transaction
 			select {
 			case ts = <-mockOutputs[0].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 			case <-mockOutputs[1].TChan:
 				t.Error("Received message in wrong order")
@@ -188,10 +187,8 @@ func TestFallbackHappyPath(t *testing.T) {
 		}
 	}
 
-	oTM.CloseAsync()
-	if err := oTM.WaitForClose(time.Second * 10); err != nil {
-		t.Error(err)
-	}
+	oTM.TriggerCloseNow()
+	require.NoError(t, oTM.WaitForClose(tCtx))
 }
 
 func TestFallbackHappyishPath(t *testing.T) {
@@ -235,8 +232,8 @@ func TestFallbackHappyishPath(t *testing.T) {
 			var ts message.Transaction
 			select {
 			case ts = <-mockOutputs[0].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 			case <-mockOutputs[1].TChan:
 				t.Error("Received message in wrong order")
@@ -254,9 +251,10 @@ func TestFallbackHappyishPath(t *testing.T) {
 
 			select {
 			case ts = <-mockOutputs[1].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
+				assert.Equal(t, ts.Payload.Get(0).MetaGetStr("fallback_error"), "test err")
 			case <-mockOutputs[0].TChan:
 				t.Error("Received message in wrong order")
 				return
@@ -282,9 +280,7 @@ func TestFallbackHappyishPath(t *testing.T) {
 	}
 
 	close(readChan)
-	if err := oTM.WaitForClose(time.Second * 10); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, oTM.WaitForClose(tCtx))
 }
 
 func TestFallbackAllFail(t *testing.T) {
@@ -327,8 +323,8 @@ func TestFallbackAllFail(t *testing.T) {
 				var ts message.Transaction
 				select {
 				case ts = <-mockOutputs[j%3].TChan:
-					if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-						t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+					if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+						t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 					}
 				case <-mockOutputs[(j+1)%3].TChan:
 					t.Errorf("Received message in wrong order: %v != %v", j%3, (j+1)%3)
@@ -356,10 +352,8 @@ func TestFallbackAllFail(t *testing.T) {
 		}
 	}
 
-	oTM.CloseAsync()
-	if err := oTM.WaitForClose(time.Second * 10); err != nil {
-		t.Error(err)
-	}
+	oTM.TriggerCloseNow()
+	require.NoError(t, oTM.WaitForClose(tCtx))
 }
 
 func TestFallbackAllFailParallel(t *testing.T) {
@@ -443,9 +437,5 @@ func TestFallbackAllFailParallel(t *testing.T) {
 	}
 
 	close(readChan)
-	if err := oTM.WaitForClose(time.Second * 10); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, oTM.WaitForClose(tCtx))
 }
-
-//------------------------------------------------------------------------------

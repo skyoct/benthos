@@ -2,19 +2,18 @@ package pure
 
 import (
 	"context"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/transaction"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return ooutput.NewAsyncWriter("sync_response", 1, SyncResponseWriter{}, nm.Logger(), nm.Metrics())
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
+		return output.NewAsyncWriter("sync_response", 1, SyncResponseWriter{}, nm)
 	}), docs.ComponentSpec{
 		Name: "sync_response",
 		Summary: `
@@ -43,7 +42,7 @@ output:
           topic: foo_topic
       - sync_response: {}
         processors:
-          - bloblang: 'root = content().uppercase()'
+          - mapping: 'root = content().uppercase()'
 ` + "```" + `
 
 Using the above example and posting the message 'hello world' to the endpoint
@@ -54,7 +53,7 @@ For more information please read [Synchronous Responses](/docs/guides/sync_respo
 		Categories: []string{
 			"Utility",
 		},
-		Config: docs.FieldObject("", ""),
+		Config: docs.FieldObject("", "").HasDefault(struct{}{}),
 	})
 	if err != nil {
 		panic(err)
@@ -67,21 +66,18 @@ For more information please read [Synchronous Responses](/docs/guides/sync_respo
 // directly back to the origin of the message.
 type SyncResponseWriter struct{}
 
-// ConnectWithContext is a noop.
-func (s SyncResponseWriter) ConnectWithContext(ctx context.Context) error {
+// Connect is a noop.
+func (s SyncResponseWriter) Connect(ctx context.Context) error {
 	return nil
 }
 
-// WriteWithContext writes a message batch to a ResultStore located in the first
+// WriteBatch writes a message batch to a ResultStore located in the first
 // message of the batch.
-func (s SyncResponseWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (s SyncResponseWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	return transaction.SetAsResponse(msg)
 }
 
-// CloseAsync is a noop.
-func (s SyncResponseWriter) CloseAsync() {}
-
-// WaitForClose is a noop.
-func (s SyncResponseWriter) WaitForClose(time.Duration) error {
+// Close is a noop.
+func (s SyncResponseWriter) Close(context.Context) error {
 	return nil
 }

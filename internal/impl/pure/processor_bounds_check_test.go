@@ -1,14 +1,15 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestBoundsCheck(t *testing.T) {
@@ -71,16 +72,16 @@ func TestBoundsCheck(t *testing.T) {
 
 	for _, parts := range goodParts {
 		msg := message.QuickBatch(parts)
-		msgs, _ := proc.ProcessMessage(msg)
+		msgs, _ := proc.ProcessBatch(context.Background(), msg)
 		require.Len(t, msgs, 1)
 		require.Equal(t, len(parts), msgs[0].Len())
 		for i, p := range parts {
-			assert.Equal(t, string(p), string(msgs[0].Get(i).Get()), i)
+			assert.Equal(t, string(p), string(msgs[0].Get(i).AsBytes()), i)
 		}
 	}
 
 	for _, parts := range badParts {
-		msgs, res := proc.ProcessMessage(message.QuickBatch(parts))
+		msgs, res := proc.ProcessBatch(context.Background(), message.QuickBatch(parts))
 		assert.Len(t, msgs, 0)
 		assert.Nil(t, res)
 	}

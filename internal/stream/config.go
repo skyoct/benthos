@@ -4,9 +4,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/component/buffer"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/pipeline"
 )
 
@@ -34,7 +34,7 @@ func NewConfig() Config {
 // Sanitised returns a sanitised copy of the Benthos configuration, meaning
 // fields of no consequence (unused inputs, outputs, processors etc) are
 // excluded.
-func (c Config) Sanitised() (interface{}, error) {
+func (c Config) Sanitised() (any, error) {
 	var node yaml.Node
 	if err := node.Encode(c); err != nil {
 		return nil, err
@@ -46,7 +46,7 @@ func (c Config) Sanitised() (interface{}, error) {
 		return nil, err
 	}
 
-	var g interface{}
+	var g any
 	if err := node.Decode(&g); err != nil {
 		return nil, err
 	}

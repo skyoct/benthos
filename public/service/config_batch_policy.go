@@ -8,9 +8,10 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
+	"github.com/benthosdev/benthos/v4/internal/batch/policy/batchconfig"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 // BatchPolicy describes the mechanisms by which batching should be performed of
@@ -26,8 +27,8 @@ type BatchPolicy struct {
 	procs []processor.Config
 }
 
-func (b BatchPolicy) toInternal() policy.Config {
-	batchConf := policy.NewConfig()
+func (b BatchPolicy) toInternal() batchconfig.Config {
+	batchConf := batchconfig.NewConfig()
 	batchConf.ByteSize = b.ByteSize
 	batchConf.Count = b.Count
 	batchConf.Check = b.Check
@@ -71,7 +72,7 @@ func (b *Batcher) UntilNext() (time.Duration, bool) {
 // Flush pending messages into a batch, apply any batching processors that are
 // part of the batching policy, and then return the result.
 func (b *Batcher) Flush(ctx context.Context) (batch MessageBatch, err error) {
-	m := b.p.Flush()
+	m := b.p.Flush(ctx)
 	if m == nil || m.Len() == 0 {
 		return
 	}
@@ -85,18 +86,7 @@ func (b *Batcher) Flush(ctx context.Context) (batch MessageBatch, err error) {
 // Close the batching policy, which cleans up any resources used by batching
 // processors.
 func (b *Batcher) Close(ctx context.Context) error {
-	b.p.CloseAsync()
-	for {
-		// Gross but will do for now until we replace these with context params.
-		if err := b.p.WaitForClose(time.Millisecond * 100); err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-	}
+	return b.p.Close(ctx)
 }
 
 // NewBatcher creates a batching mechanism from the policy.
@@ -153,7 +143,7 @@ func (p *ParsedConfig) FieldBatchPolicy(path ...string) (conf BatchPolicy, err e
 		return
 	}
 
-	procsArray, ok := procsNode.([]interface{})
+	procsArray, ok := procsNode.([]any)
 	if !ok {
 		err = fmt.Errorf("field 'processors' returned unexpected value, expected array, got %T", procsNode)
 		return

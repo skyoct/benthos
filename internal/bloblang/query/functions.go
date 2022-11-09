@@ -12,6 +12,8 @@ import (
 	"github.com/gofrs/uuid"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/segmentio/ksuid"
+
+	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 type fieldFunction struct {
@@ -42,8 +44,8 @@ func (f *fieldFunction) Annotation() string {
 	return "field `" + path + "`"
 }
 
-func (f *fieldFunction) Exec(ctx FunctionContext) (interface{}, error) {
-	var target interface{}
+func (f *fieldFunction) Exec(ctx FunctionContext) (any, error) {
+	var target any
 	if f.fromRoot {
 		if ctx.NewValue == nil {
 			return nil, errors.New("unable to reference `root` from this context")
@@ -107,7 +109,7 @@ func NewNamedContextFieldFunction(namedContext, pathStr string) Function {
 	if len(pathStr) > 0 {
 		path = gabs.DotPathToSlice(pathStr)
 	}
-	return &fieldFunction{namedContext, false, path}
+	return &fieldFunction{namedContext: namedContext, fromRoot: false, path: path}
 }
 
 // NewFieldFunction creates a query function that returns a field from the
@@ -141,7 +143,7 @@ func NewRootFieldFunction(pathStr string) Function {
 // function.
 type Literal struct {
 	annotation string
-	Value      interface{}
+	Value      any
 }
 
 // Annotation returns a token identifier of the function.
@@ -153,7 +155,7 @@ func (l *Literal) Annotation() string {
 }
 
 // Exec returns a literal value.
-func (l *Literal) Exec(ctx FunctionContext) (interface{}, error) {
+func (l *Literal) Exec(ctx FunctionContext) (any, error) {
 	return l.Value, nil
 }
 
@@ -174,8 +176,8 @@ func (l *Literal) String() string {
 
 // NewLiteralFunction creates a query function that returns a static, literal
 // value.
-func NewLiteralFunction(annotation string, v interface{}) *Literal {
-	return &Literal{annotation, v}
+func NewLiteralFunction(annotation string, v any) *Literal {
+	return &Literal{annotation: annotation, Value: v}
 }
 
 //------------------------------------------------------------------------------
@@ -188,7 +190,7 @@ var _ = registerSimpleFunction(
 			`root = if batch_index() > 0 { deleted() }`,
 		),
 	),
-	func(ctx FunctionContext) (interface{}, error) {
+	func(ctx FunctionContext) (any, error) {
 		return int64(ctx.Index), nil
 	},
 )
@@ -203,7 +205,7 @@ var _ = registerSimpleFunction(
 			`root.foo = batch_size()`,
 		),
 	),
-	func(ctx FunctionContext) (interface{}, error) {
+	func(ctx FunctionContext) (any, error) {
 		return int64(ctx.MsgBatch.Len()), nil
 	},
 )
@@ -220,8 +222,45 @@ var _ = registerSimpleFunction(
 			`{"doc":"{\"foo\":\"bar\"}"}`,
 		),
 	),
-	func(ctx FunctionContext) (interface{}, error) {
-		return ctx.MsgBatch.Get(ctx.Index).Get(), nil
+	func(ctx FunctionContext) (any, error) {
+		return ctx.MsgBatch.Get(ctx.Index).AsBytes(), nil
+	},
+)
+
+//------------------------------------------------------------------------------
+
+var _ = registerSimpleFunction(
+	NewFunctionSpec(
+		FunctionCategoryMessage, "tracing_span",
+		"Provides the message tracing span [(created via Open Telemetry APIs)](/docs/components/tracers/about) as an object serialised via text map formatting. The returned value will be `null` if the message does not have a span.",
+		NewExampleSpec("",
+			`root.headers.traceparent = tracing_span().traceparent`,
+			`{"some_stuff":"just can't be explained by science"}`,
+			`{"headers":{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}}`,
+		),
+	).Experimental(),
+	func(fCtx FunctionContext) (any, error) {
+		span := tracing.GetSpan(fCtx.MsgBatch.Get(fCtx.Index))
+		if span == nil {
+			return nil, nil
+		}
+		return span.TextMap()
+	},
+)
+
+//------------------------------------------------------------------------------
+
+var _ = registerSimpleFunction(
+	NewFunctionSpec(
+		FunctionCategoryMessage, "tracing_id",
+		"Provides the message trace id. The returned value will be zeroed if the message does not contain a span.",
+		NewExampleSpec("",
+			`meta trace_id = tracing_id()`,
+		),
+	).Experimental(),
+	func(fCtx FunctionContext) (any, error) {
+		traceID := tracing.GetTraceID(fCtx.MsgBatch.Get(fCtx.Index))
+		return traceID, nil
 	},
 )
 
@@ -243,15 +282,17 @@ root.id = count("bloblang_function_example")`,
 	countFunction,
 )
 
-var counters = map[string]int64{}
-var countersMux = &sync.Mutex{}
+var (
+	counters    = map[string]int64{}
+	countersMux = &sync.Mutex{}
+)
 
 func countFunction(args *ParsedParams) (Function, error) {
 	name, err := args.FieldString("name")
 	if err != nil {
 		return nil, err
 	}
-	return ClosureFunction("function count", func(ctx FunctionContext) (interface{}, error) {
+	return ClosureFunction("function count", func(ctx FunctionContext) (any, error) {
 		countersMux.Lock()
 		defer countersMux.Unlock()
 
@@ -303,7 +344,7 @@ var _ = registerSimpleFunction(
 			`root.doc.error = error()`,
 		),
 	),
-	func(ctx FunctionContext) (interface{}, error) {
+	func(ctx FunctionContext) (any, error) {
 		v := ctx.MsgBatch.Get(ctx.Index).ErrorGet()
 		if v != nil {
 			return v.Error(), nil
@@ -320,7 +361,7 @@ var _ = registerSimpleFunction(
 			`root.doc.status = if errored() { 400 } else { 200 }`,
 		),
 	),
-	func(ctx FunctionContext) (interface{}, error) {
+	func(ctx FunctionContext) (any, error) {
 		return ctx.MsgBatch.Get(ctx.Index).ErrorGet() != nil, nil
 	},
 )
@@ -368,11 +409,11 @@ func rangeFunction(args *ParsedParams) (Function, error) {
 	} else if start >= stop {
 		return nil, fmt.Errorf("with positive step arg start (%v) must be < stop (%v)", start, stop)
 	}
-	r := make([]interface{}, (stop-start)/step)
+	r := make([]any, (stop-start)/step)
 	for i := 0; i < len(r); i++ {
 		r[i] = start + step*int64(i)
 	}
-	return ClosureFunction("function range", func(ctx FunctionContext) (interface{}, error) {
+	return ClosureFunction("function range", func(ctx FunctionContext) (any, error) {
 		return r, nil
 	}, nil), nil
 }
@@ -405,8 +446,8 @@ func jsonFunction(args *ParsedParams) (Function, error) {
 	if len(path) > 0 {
 		argPath = gabs.DotPathToSlice(path)
 	}
-	return ClosureFunction("json path `"+SliceToDotPath(argPath...)+"`", func(ctx FunctionContext) (interface{}, error) {
-		jPart, err := ctx.MsgBatch.Get(ctx.Index).JSON()
+	return ClosureFunction("json path `"+SliceToDotPath(argPath...)+"`", func(ctx FunctionContext) (any, error) {
+		jPart, err := ctx.MsgBatch.Get(ctx.Index).AsStructured()
 		if err != nil {
 			return nil, &ErrRecoverable{
 				Recovered: nil,
@@ -429,6 +470,45 @@ func jsonFunction(args *ParsedParams) (Function, error) {
 
 //------------------------------------------------------------------------------
 
+// NewMetaFunction creates a new function for obtaining a metadata value.
+func NewMetaFunction(key string) Function {
+	if len(key) > 0 {
+		return ClosureFunction("meta field "+key, func(ctx FunctionContext) (any, error) {
+			if ctx.NewMeta == nil {
+				return nil, errors.New("metadata cannot be queried in this context")
+			}
+			v, exists := ctx.NewMeta.MetaGetMut(key)
+			if !exists {
+				return nil, nil
+			}
+			return v, nil
+		}, func(ctx TargetsContext) (TargetsContext, []TargetPath) {
+			paths := []TargetPath{
+				NewTargetPath(TargetMetadata, key),
+			}
+			ctx = ctx.WithValues(paths)
+			return ctx, paths
+		})
+	}
+	return ClosureFunction("meta object", func(ctx FunctionContext) (any, error) {
+		if ctx.NewMeta == nil {
+			return nil, errors.New("metadata cannot be queried in this context")
+		}
+		kvs := map[string]any{}
+		_ = ctx.NewMeta.MetaIterMut(func(k string, v any) error {
+			kvs[k] = v
+			return nil
+		})
+		return kvs, nil
+	}, func(ctx TargetsContext) (TargetsContext, []TargetPath) {
+		paths := []TargetPath{
+			NewTargetPath(TargetMetadata),
+		}
+		ctx = ctx.WithValues(paths)
+		return ctx, paths
+	})
+}
+
 var _ = registerFunction(
 	NewFunctionSpec(
 		FunctionCategoryMessage, "meta",
@@ -448,8 +528,8 @@ var _ = registerFunction(
 			return nil, err
 		}
 		if len(key) > 0 {
-			return ClosureFunction("meta field "+key, func(ctx FunctionContext) (interface{}, error) {
-				v := ctx.MsgBatch.Get(ctx.Index).MetaGet(key)
+			return ClosureFunction("meta field "+key, func(ctx FunctionContext) (any, error) {
+				v := ctx.MsgBatch.Get(ctx.Index).MetaGetStr(key)
 				if v == "" {
 					return nil, nil
 				}
@@ -462,12 +542,10 @@ var _ = registerFunction(
 				return ctx, paths
 			}), nil
 		}
-		return ClosureFunction("meta object", func(ctx FunctionContext) (interface{}, error) {
-			kvs := map[string]interface{}{}
-			_ = ctx.MsgBatch.Get(ctx.Index).MetaIter(func(k, v string) error {
-				if len(v) > 0 {
-					kvs[k] = v
-				}
+		return ClosureFunction("meta object", func(ctx FunctionContext) (any, error) {
+			kvs := map[string]any{}
+			_ = ctx.MsgBatch.Get(ctx.Index).MetaIterStr(func(k, v string) error {
+				kvs[k] = v
 				return nil
 			})
 			return kvs, nil
@@ -502,11 +580,11 @@ var _ = registerFunction(
 			return nil, err
 		}
 		if len(key) > 0 {
-			return ClosureFunction("root_meta field "+key, func(ctx FunctionContext) (interface{}, error) {
+			return ClosureFunction("root_meta field "+key, func(ctx FunctionContext) (any, error) {
 				if ctx.NewMeta == nil {
 					return nil, errors.New("root metadata cannot be queried in this context")
 				}
-				v := ctx.NewMeta.MetaGet(key)
+				v := ctx.NewMeta.MetaGetStr(key)
 				if v == "" {
 					return nil, nil
 				}
@@ -519,15 +597,13 @@ var _ = registerFunction(
 				return ctx, paths
 			}), nil
 		}
-		return ClosureFunction("root_meta object", func(ctx FunctionContext) (interface{}, error) {
+		return ClosureFunction("root_meta object", func(ctx FunctionContext) (any, error) {
 			if ctx.NewMeta == nil {
 				return nil, errors.New("root metadata cannot be queried in this context")
 			}
-			kvs := map[string]interface{}{}
-			_ = ctx.NewMeta.MetaIter(func(k, v string) error {
-				if len(v) > 0 {
-					kvs[k] = v
-				}
+			kvs := map[string]any{}
+			_ = ctx.NewMeta.MetaIterStr(func(k, v string) error {
+				kvs[k] = v
 				return nil
 			})
 			return kvs, nil
@@ -581,7 +657,7 @@ func randomIntFunction(args *ParsedParams) (Function, error) {
 	var randMut sync.Mutex
 	var r *rand.Rand
 
-	return ClosureFunction("function random_int", func(ctx FunctionContext) (interface{}, error) {
+	return ClosureFunction("function random_int", func(ctx FunctionContext) (any, error) {
 		randMut.Lock()
 		defer randMut.Unlock()
 
@@ -609,16 +685,16 @@ func randomIntFunction(args *ParsedParams) (Function, error) {
 var _ = registerFunction(
 	NewFunctionSpec(
 		FunctionCategoryEnvironment, "now",
-		"Returns the current timestamp as a string in ISO 8601 format with the local timezone. Use the method `format_timestamp` in order to change the format and timezone.",
+		"Returns the current timestamp as a string in RFC 3339 format with the local timezone. Use the method `ts_format` in order to change the format and timezone.",
 		NewExampleSpec("",
 			`root.received_at = now()`,
 		),
 		NewExampleSpec("",
-			`root.received_at = now().format_timestamp("Mon Jan 2 15:04:05 -0700 MST 2006", "UTC")`,
+			`root.received_at = now().ts_format("Mon Jan 2 15:04:05 -0700 MST 2006", "UTC")`,
 		),
 	),
 	func(args *ParsedParams) (Function, error) {
-		return ClosureFunction("function now", func(_ FunctionContext) (interface{}, error) {
+		return ClosureFunction("function now", func(_ FunctionContext) (any, error) {
 			return time.Now().Format(time.RFC3339Nano), nil
 		}, nil), nil
 	},
@@ -632,7 +708,7 @@ var _ = registerSimpleFunction(
 			`root.received_at = timestamp_unix()`,
 		),
 	),
-	func(_ FunctionContext) (interface{}, error) {
+	func(_ FunctionContext) (any, error) {
 		return time.Now().Unix(), nil
 	},
 )
@@ -645,7 +721,7 @@ var _ = registerSimpleFunction(
 			`root.received_at = timestamp_unix_nano()`,
 		),
 	),
-	func(_ FunctionContext) (interface{}, error) {
+	func(_ FunctionContext) (any, error) {
 		return time.Now().UnixNano(), nil
 	},
 )
@@ -674,7 +750,7 @@ root.doc.contents = (this.body.content | this.thing.body)`,
 		if err != nil {
 			return nil, err
 		}
-		return ClosureFunction("function throw", func(_ FunctionContext) (interface{}, error) {
+		return ClosureFunction("function throw", func(_ FunctionContext) (any, error) {
 			return nil, errors.New(msg)
 		}, nil), nil
 	},
@@ -688,7 +764,7 @@ var _ = registerSimpleFunction(
 		"Generates a new RFC-4122 UUID each time it is invoked and prints a string representation.",
 		NewExampleSpec("", `root.id = uuid_v4()`),
 	),
-	func(_ FunctionContext) (interface{}, error) {
+	func(_ FunctionContext) (any, error) {
 		u4, err := uuid.NewV4()
 		if err != nil {
 			panic(err)
@@ -724,7 +800,7 @@ func nanoidFunction(args *ParsedParams) (Function, error) {
 	if alphabetArg != nil && lenArg == nil {
 		return nil, errors.New("field length must be specified when an alphabet is specified")
 	}
-	return ClosureFunction("function nanoid", func(ctx FunctionContext) (interface{}, error) {
+	return ClosureFunction("function nanoid", func(ctx FunctionContext) (any, error) {
 		if alphabetArg != nil {
 			return gonanoid.Generate(*alphabetArg, int(*lenArg))
 		}
@@ -743,7 +819,7 @@ var _ = registerSimpleFunction(
 		"Generates a new ksuid each time it is invoked and prints a string representation.",
 		NewExampleSpec("", `root.id = ksuid()`),
 	),
-	func(_ FunctionContext) (interface{}, error) {
+	func(_ FunctionContext) (any, error) {
 		return ksuid.New().String(), nil
 	},
 )
@@ -763,7 +839,7 @@ var _ = registerFunction(
 
 // NewVarFunction creates a new variable function.
 func NewVarFunction(name string) Function {
-	return ClosureFunction("variable "+name, func(ctx FunctionContext) (interface{}, error) {
+	return ClosureFunction("variable "+name, func(ctx FunctionContext) (any, error) {
 		if ctx.Vars == nil {
 			return nil, errors.New("variables were undefined")
 		}

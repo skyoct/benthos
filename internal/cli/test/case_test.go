@@ -12,24 +12,23 @@ import (
 	"github.com/stretchr/testify/require"
 	yaml "gopkg.in/yaml.v3"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
 	"github.com/benthosdev/benthos/v4/internal/cli/test"
-	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 
 	_ "github.com/benthosdev/benthos/v4/internal/impl/pure"
 )
 
-type mockProvider map[string][]iprocessor.V1
+type mockProvider map[string][]processor.V1
 
-func (m mockProvider) Provide(ptr string, env map[string]string, mocks map[string]yaml.Node) ([]iprocessor.V1, error) {
+func (m mockProvider) Provide(ptr string, env map[string]string, mocks map[string]yaml.Node) ([]processor.V1, error) {
 	if procs, ok := m[ptr]; ok {
 		return procs, nil
 	}
 	return nil, errors.New("processors not found")
 }
 
-func (m mockProvider) ProvideBloblang(name string) ([]iprocessor.V1, error) {
+func (m mockProvider) ProvideBloblang(name string) ([]processor.V1, error) {
 	if procs, ok := m[name]; ok {
 		return procs, nil
 	}
@@ -47,7 +46,7 @@ func TestCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider["/pipeline/processors"] = []iprocessor.V1{proc}
+	provider["/pipeline/processors"] = []processor.V1{proc}
 
 	procConf = processor.NewConfig()
 	procConf.Type = "bloblang"
@@ -55,7 +54,7 @@ func TestCase(t *testing.T) {
 	if proc, err = mock.NewManager().NewProcessor(procConf); err != nil {
 		t.Fatal(err)
 	}
-	provider["/input/broker/inputs/0/processors"] = []iprocessor.V1{proc}
+	provider["/input/broker/inputs/0/processors"] = []processor.V1{proc}
 
 	procConf = processor.NewConfig()
 	procConf.Type = "bloblang"
@@ -63,7 +62,15 @@ func TestCase(t *testing.T) {
 	if proc, err = mock.NewManager().NewProcessor(procConf); err != nil {
 		t.Fatal(err)
 	}
-	provider["/input/broker/inputs/1/processors"] = []iprocessor.V1{proc}
+	provider["/input/broker/inputs/1/processors"] = []processor.V1{proc}
+
+	procConf = processor.NewConfig()
+	procConf.Type = "bloblang"
+	procConf.Bloblang = `root = if batch_index() == 0 { count("batch_id") }`
+	if proc, err = mock.NewManager().NewProcessor(procConf); err != nil {
+		t.Fatal(err)
+	}
+	provider["/input/broker/inputs/2/processors"] = []processor.V1{proc}
 
 	type testCase struct {
 		name     string
@@ -115,6 +122,41 @@ output_batches:
 -
   - json_equals:
       foo: bar
+`,
+		},
+		{
+			name: "positive 5",
+			conf: `
+name: positive 5
+input_batches:
+-
+  - content: foo
+-
+  - content: bar
+output_batches:
+-
+  - content_equals: "foo"
+-
+  - content_equals: "bar"
+`,
+		},
+		{
+			name: "batch id 1",
+			conf: `
+name: batch id 1
+target_processors: /input/broker/inputs/2/processors
+input_batches:
+-
+  - content: foo
+-
+  - content: foo
+  - content: bar
+output_batches:
+-
+  - content_equals: "1"
+-
+  - content_equals: "2"
+  - content_equals: "bar"
 `,
 		},
 		{
@@ -184,6 +226,31 @@ output_batches:
 				},
 			},
 		},
+		{
+			name: "unexpected batch 1",
+			conf: `
+name: unexpected batch 1
+input_batches:
+-
+  - content: foo bar
+-
+  - content: foo bar
+-
+  - content: foo bar
+output_batches:
+-
+  - content_equals: "foo bar"
+-
+  - content_equals: "foo bar"
+`,
+			expected: []test.CaseFailure{
+				{
+					Name:     "unexpected batch 1",
+					TestLine: 2,
+					Reason:   "unexpected batch: [foo bar]",
+				},
+			},
+		},
 	}
 
 	for _, testCase := range tests {
@@ -214,7 +281,7 @@ func TestFileCaseInputs(t *testing.T) {
 	proc, err := mock.NewManager().NewProcessor(procConf)
 	require.NoError(t, err)
 
-	provider["/pipeline/processors"] = []iprocessor.V1{proc}
+	provider["/pipeline/processors"] = []processor.V1{proc}
 
 	tmpDir := t.TempDir()
 
@@ -273,7 +340,7 @@ func TestFileCaseConditions(t *testing.T) {
 	proc, err := mock.NewManager().NewProcessor(procConf)
 	require.NoError(t, err)
 
-	provider["/pipeline/processors"] = []iprocessor.V1{proc}
+	provider["/pipeline/processors"] = []processor.V1{proc}
 
 	tmpDir := t.TempDir()
 

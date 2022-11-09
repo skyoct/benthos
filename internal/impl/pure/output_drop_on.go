@@ -9,19 +9,19 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/shutdown"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(func(c output.Config, nm bundle.NewManagement) (output.Streamed, error) {
 		if c.DropOn.Output == nil {
 			return nil, errors.New("cannot create a drop_on output without a child")
 		}
-		wrapped, err := ooutput.New(*c.DropOn.Output, nm, nm.Logger(), nm.Metrics())
+		wrapped, err := nm.NewOutput(*c.DropOn.Output)
 		if err != nil {
 			return nil, err
 		}
@@ -37,7 +37,7 @@ func init() {
 			docs.FieldBool("error", "Whether messages should be dropped when the child output returns an error. For example, this could be when an http_client output gets a 4XX response code."),
 			docs.FieldString("back_pressure", "An optional duration string that determines the maximum length of time to wait for a given message to be accepted by the child output before the message should be dropped instead. The most common reason for an output to block is when waiting for a lost connection to be re-established. Once a message has been dropped due to back pressure all subsequent messages are dropped immediately until the output is ready to process them again. Note that if `error` is set to `false` and this field is specified then messages dropped due to back pressure will return an error response.", "30s", "1m"),
 			docs.FieldOutput("output", "A child output.").HasDefault(nil),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewDropOnConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewDropOnConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title:   "Dropping failed HTTP requests",
@@ -89,12 +89,10 @@ type dropOnWriter struct {
 	transactionsIn  <-chan message.Transaction
 	transactionsOut chan message.Transaction
 
-	ctx        context.Context
-	done       func()
-	closedChan chan struct{}
+	shutSig *shutdown.Signaller
 }
 
-func newDropOnWriter(conf ooutput.DropOnConditions, wrapped output.Streamed, log log.Modular) (*dropOnWriter, error) {
+func newDropOnWriter(conf output.DropOnConditions, wrapped output.Streamed, log log.Modular) (*dropOnWriter, error) {
 	var backPressure time.Duration
 	if len(conf.BackPressure) > 0 {
 		var err error
@@ -103,7 +101,6 @@ func newDropOnWriter(conf ooutput.DropOnConditions, wrapped output.Streamed, log
 		}
 	}
 
-	ctx, done := context.WithCancel(context.Background())
 	return &dropOnWriter{
 		log:             log,
 		wrapped:         wrapped,
@@ -112,18 +109,20 @@ func newDropOnWriter(conf ooutput.DropOnConditions, wrapped output.Streamed, log
 		onError:        conf.Error,
 		onBackpressure: backPressure,
 
-		ctx:        ctx,
-		done:       done,
-		closedChan: make(chan struct{}),
+		shutSig: shutdown.NewSignaller(),
 	}, nil
 }
 
 func (d *dropOnWriter) loop() {
+	cnCtx, cnDone := d.shutSig.CloseNowCtx(context.Background())
 	defer func() {
 		close(d.transactionsOut)
-		d.wrapped.CloseAsync()
-		_ = d.wrapped.WaitForClose(shutdown.MaximumShutdownWait())
-		close(d.closedChan)
+
+		d.wrapped.TriggerCloseNow()
+		_ = d.wrapped.WaitForClose(context.Background())
+
+		d.shutSig.ShutdownComplete()
+		cnDone()
 	}()
 
 	resChan := make(chan error)
@@ -137,7 +136,7 @@ func (d *dropOnWriter) loop() {
 			if !open {
 				return
 			}
-		case <-d.ctx.Done():
+		case <-d.shutSig.CloseNowChan():
 			return
 		}
 
@@ -159,7 +158,7 @@ func (d *dropOnWriter) loop() {
 					case d.transactionsOut <- message.NewTransaction(ts.Payload, resChan):
 					case <-ticker.C:
 						gotBackPressure = true
-					case <-d.ctx.Done():
+					case <-d.shutSig.CloseNowChan():
 						return false
 					}
 				}
@@ -173,7 +172,7 @@ func (d *dropOnWriter) loop() {
 							// the component isn't being shut down.
 							<-resChan
 						}()
-					case <-d.ctx.Done():
+					case <-d.shutSig.CloseNowChan():
 						return false
 					}
 				}
@@ -194,12 +193,12 @@ func (d *dropOnWriter) loop() {
 			// we wait as long as it takes.
 			select {
 			case d.transactionsOut <- message.NewTransaction(ts.Payload, resChan):
-			case <-d.ctx.Done():
+			case <-d.shutSig.CloseNowChan():
 				return
 			}
 			select {
 			case res = <-resChan:
-			case <-d.ctx.Done():
+			case <-d.shutSig.CloseNowChan():
 				return
 			}
 		}
@@ -209,7 +208,7 @@ func (d *dropOnWriter) loop() {
 			res = nil
 		}
 
-		if err := ts.Ack(d.ctx, res); err != nil && d.ctx.Err() != nil {
+		if err := ts.Ack(cnCtx, res); err != nil && cnCtx.Err() != nil {
 			return
 		}
 	}
@@ -231,15 +230,15 @@ func (d *dropOnWriter) Connected() bool {
 	return d.wrapped.Connected()
 }
 
-func (d *dropOnWriter) CloseAsync() {
-	d.done()
+func (d *dropOnWriter) TriggerCloseNow() {
+	d.shutSig.CloseNow()
 }
 
-func (d *dropOnWriter) WaitForClose(timeout time.Duration) error {
+func (d *dropOnWriter) WaitForClose(ctx context.Context) error {
 	select {
-	case <-d.closedChan:
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-d.shutSig.HasClosedChan():
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }

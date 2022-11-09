@@ -13,18 +13,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/batch"
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-
-	_ "github.com/benthosdev/benthos/v4/internal/interop/legacy"
 )
 
-func newSwitch(t *testing.T, conf ooutput.Config, mockOutputs []*mock.OutputChanneled) *switchOutput {
+func newSwitch(t *testing.T, conf output.Config, mockOutputs []*mock.OutputChanneled) *switchOutput {
 	t.Helper()
 
-	mgr := bmock.NewManager()
+	mgr := mock.NewManager()
 
 	conf.Type = "switch"
 	genType, err := mgr.NewOutput(conf)
@@ -48,10 +45,10 @@ func TestSwitchNoConditions(t *testing.T) {
 
 	nOutputs, nMsgs := 10, 1000
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	mockOutputs := []*mock.OutputChanneled{}
 	for i := 0; i < nOutputs; i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 		conf.Switch.Cases[i].Continue = true
 		mockOutputs = append(mockOutputs, &mock.OutputChanneled{})
 	}
@@ -74,8 +71,8 @@ func TestSwitchNoConditions(t *testing.T) {
 		for j := 0; j < nOutputs; j++ {
 			select {
 			case ts := <-mockOutputs[j].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 				resFnSlice = append(resFnSlice, ts.Ack)
 			case <-time.After(time.Second):
@@ -93,8 +90,8 @@ func TestSwitchNoConditions(t *testing.T) {
 		}
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchNoRetries(t *testing.T) {
@@ -103,11 +100,11 @@ func TestSwitchNoRetries(t *testing.T) {
 
 	nOutputs, nMsgs := 10, 1000
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Switch.RetryUntilSuccess = false
 	mockOutputs := []*mock.OutputChanneled{}
 	for i := 0; i < nOutputs; i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 		conf.Switch.Cases[i].Continue = true
 		mockOutputs = append(mockOutputs, &mock.OutputChanneled{})
 	}
@@ -130,8 +127,8 @@ func TestSwitchNoRetries(t *testing.T) {
 		for j := 0; j < nOutputs; j++ {
 			select {
 			case ts := <-mockOutputs[j].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 				resFnSlice = append(resFnSlice, ts.Ack)
 			case <-time.After(time.Second):
@@ -155,30 +152,33 @@ func TestSwitchNoRetries(t *testing.T) {
 		}
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchBatchNoRetries(t *testing.T) {
-	conf := ooutput.NewConfig()
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	conf := output.NewConfig()
 	conf.Switch.RetryUntilSuccess = false
 
-	okOut := ooutput.NewConfig()
+	okOut := output.NewConfig()
 	okOut.Type = "drop"
-	conf.Switch.Cases = append(conf.Switch.Cases, ooutput.SwitchConfigCase{
+	conf.Switch.Cases = append(conf.Switch.Cases, output.SwitchConfigCase{
 		Check:  `root = this.id % 2 == 0`,
 		Output: okOut,
 	})
 
-	errOut := ooutput.NewConfig()
+	errOut := output.NewConfig()
 	errOut.Type = "reject"
 	errOut.Reject = "meow"
-	conf.Switch.Cases = append(conf.Switch.Cases, ooutput.SwitchConfigCase{
+	conf.Switch.Cases = append(conf.Switch.Cases, output.SwitchConfigCase{
 		Check:  `root = true`,
 		Output: errOut,
 	})
 
-	s, err := newSwitchOutput(conf.Switch, bmock.NewManager())
+	s, err := newSwitchOutput(conf.Switch, mock.NewManager())
 	require.NoError(t, err, 1)
 
 	readChan := make(chan message.Transaction)
@@ -217,7 +217,7 @@ func TestSwitchBatchNoRetries(t *testing.T) {
 	errContents := []string{}
 	bOut.WalkParts(func(i int, p *message.Part, e error) bool {
 		if e != nil {
-			errContents = append(errContents, string(p.Get()))
+			errContents = append(errContents, string(p.AsBytes()))
 			assert.EqualError(t, e, "meow")
 		}
 		return true
@@ -227,21 +227,21 @@ func TestSwitchBatchNoRetries(t *testing.T) {
 		`{"content":"hello world","id":3}`,
 	}, errContents)
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchBatchNoRetriesBatchErr(t *testing.T) {
 	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
 	defer done()
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Switch.RetryUntilSuccess = false
 	mockOutputs := []*mock.OutputChanneled{}
 	nOutputs := 2
 
 	for i := 0; i < nOutputs; i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 		conf.Switch.Cases[i].Continue = true
 		mockOutputs = append(mockOutputs, &mock.OutputChanneled{})
 	}
@@ -301,7 +301,7 @@ func TestSwitchBatchNoRetriesBatchErr(t *testing.T) {
 		errContents := []string{}
 		bOut.WalkParts(func(i int, p *message.Part, e error) bool {
 			if e != nil {
-				errContents = append(errContents, string(p.Get()))
+				errContents = append(errContents, string(p.AsBytes()))
 				assert.EqualError(t, e, fmt.Sprintf("err %v", i))
 			}
 			return true
@@ -314,8 +314,8 @@ func TestSwitchBatchNoRetriesBatchErr(t *testing.T) {
 		t.Fatal("Timed out responding to broker")
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchWithConditions(t *testing.T) {
@@ -326,9 +326,9 @@ func TestSwitchWithConditions(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `this.foo == "bar"`
 	conf.Switch.Cases[1].Check = `this.foo == "baz"`
@@ -359,7 +359,7 @@ func TestSwitchWithConditions(t *testing.T) {
 					closed++
 					continue outputLoop
 				}
-				if act := string(ts.Payload.Get(0).Get()); act != bar {
+				if act := string(ts.Payload.Get(0).AsBytes()); act != bar {
 					t.Errorf("Expected output 0 msgs to equal %s, got %s", bar, act)
 				}
 			case ts, ok = <-mockOutputs[1].TChan:
@@ -367,7 +367,7 @@ func TestSwitchWithConditions(t *testing.T) {
 					closed++
 					continue outputLoop
 				}
-				if act := string(ts.Payload.Get(0).Get()); act != baz {
+				if act := string(ts.Payload.Get(0).AsBytes()); act != baz {
 					t.Errorf("Expected output 1 msgs to equal %s, got %s", baz, act)
 				}
 			case ts, ok = <-mockOutputs[2].TChan:
@@ -375,7 +375,7 @@ func TestSwitchWithConditions(t *testing.T) {
 					closed++
 					continue outputLoop
 				}
-				if act := string(ts.Payload.Get(0).Get()); act == bar || act == baz {
+				if act := string(ts.Payload.Get(0).AsBytes()); act == bar || act == baz {
 					t.Errorf("Expected output 2 msgs to not equal %s or %s, got %s", bar, baz, act)
 				}
 			case <-time.After(time.Second):
@@ -412,8 +412,8 @@ func TestSwitchWithConditions(t *testing.T) {
 		}
 	}
 
-	s.CloseAsync()
-	assert.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 	wg.Wait()
 }
 
@@ -423,9 +423,9 @@ func TestSwitchError(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `this.foo == "bar"`
 	conf.Switch.Cases[1].Check = `this.foo.not_null() == "baz"`
@@ -458,13 +458,13 @@ func TestSwitchError(t *testing.T) {
 		select {
 		case ts = <-mockOutputs[0].TChan:
 			assert.Equal(t, 1, ts.Payload.Len())
-			assert.Equal(t, `{"foo":"bar"}`, string(ts.Payload.Get(0).Get()))
+			assert.Equal(t, `{"foo":"bar"}`, string(ts.Payload.Get(0).AsBytes()))
 		case ts = <-mockOutputs[1].TChan:
 			assert.Equal(t, 1, ts.Payload.Len())
-			assert.Equal(t, `{"foo":"baz"}`, string(ts.Payload.Get(0).Get()))
+			assert.Equal(t, `{"foo":"baz"}`, string(ts.Payload.Get(0).AsBytes()))
 		case ts = <-mockOutputs[2].TChan:
 			assert.Equal(t, 1, ts.Payload.Len())
-			assert.Equal(t, `{"foo":"buz"}`, string(ts.Payload.Get(0).Get()))
+			assert.Equal(t, `{"foo":"buz"}`, string(ts.Payload.Get(0).AsBytes()))
 		case <-time.After(time.Second):
 			t.Error("Timed out waiting for output to propagate")
 		}
@@ -480,8 +480,8 @@ func TestSwitchError(t *testing.T) {
 		t.Error("Timed out responding to output")
 	}
 
-	s.CloseAsync()
-	assert.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchBatchSplit(t *testing.T) {
@@ -490,9 +490,9 @@ func TestSwitchBatchSplit(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `this.foo == "bar"`
 	conf.Switch.Cases[1].Check = `this.foo == "baz"`
@@ -524,13 +524,13 @@ func TestSwitchBatchSplit(t *testing.T) {
 		select {
 		case ts = <-mockOutputs[0].TChan:
 			assert.Equal(t, 1, ts.Payload.Len())
-			assert.Equal(t, `{"foo":"bar"}`, string(ts.Payload.Get(0).Get()))
+			assert.Equal(t, `{"foo":"bar"}`, string(ts.Payload.Get(0).AsBytes()))
 		case ts = <-mockOutputs[1].TChan:
 			assert.Equal(t, 1, ts.Payload.Len())
-			assert.Equal(t, `{"foo":"baz"}`, string(ts.Payload.Get(0).Get()))
+			assert.Equal(t, `{"foo":"baz"}`, string(ts.Payload.Get(0).AsBytes()))
 		case ts = <-mockOutputs[2].TChan:
 			assert.Equal(t, 1, ts.Payload.Len())
-			assert.Equal(t, `{"foo":"buz"}`, string(ts.Payload.Get(0).Get()))
+			assert.Equal(t, `{"foo":"buz"}`, string(ts.Payload.Get(0).AsBytes()))
 		case <-time.After(time.Second):
 			t.Error("Timed out waiting for output to propagate")
 		}
@@ -544,8 +544,8 @@ func TestSwitchBatchSplit(t *testing.T) {
 		t.Error("Timed out responding to output")
 	}
 
-	s.CloseAsync()
-	assert.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchBatchGroup(t *testing.T) {
@@ -554,9 +554,9 @@ func TestSwitchBatchGroup(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `json().foo.from(0) == "bar"`
 	conf.Switch.Cases[1].Check = `json().foo.from(0) == "baz"`
@@ -589,10 +589,10 @@ func TestSwitchBatchGroup(t *testing.T) {
 		t.Error("did not expect message route to 0")
 	case ts = <-mockOutputs[1].TChan:
 		assert.Equal(t, 4, ts.Payload.Len())
-		assert.Equal(t, `{"foo":"baz"}`, string(ts.Payload.Get(0).Get()))
-		assert.Equal(t, `{"foo":"bar"}`, string(ts.Payload.Get(1).Get()))
-		assert.Equal(t, `{"foo":"buz"}`, string(ts.Payload.Get(2).Get()))
-		assert.Equal(t, `{"foo":"nope"}`, string(ts.Payload.Get(3).Get()))
+		assert.Equal(t, `{"foo":"baz"}`, string(ts.Payload.Get(0).AsBytes()))
+		assert.Equal(t, `{"foo":"bar"}`, string(ts.Payload.Get(1).AsBytes()))
+		assert.Equal(t, `{"foo":"buz"}`, string(ts.Payload.Get(2).AsBytes()))
+		assert.Equal(t, `{"foo":"nope"}`, string(ts.Payload.Get(3).AsBytes()))
 	case ts = <-mockOutputs[2].TChan:
 		t.Error("did not expect message route to 2")
 	case <-time.After(time.Second):
@@ -613,16 +613,19 @@ func TestSwitchBatchGroup(t *testing.T) {
 		t.Error("Timed out responding to output")
 	}
 
-	s.CloseAsync()
-	assert.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchNoMatch(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `this.foo == "bar"`
 	conf.Switch.Cases[1].Check = `this.foo == "baz"`
@@ -649,17 +652,20 @@ func TestSwitchNoMatch(t *testing.T) {
 		t.Fatal("Timed out responding to output")
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchNoMatchStrict(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Switch.StrictMode = true
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `this.foo == "bar"`
 	conf.Switch.Cases[1].Check = `this.foo == "baz"`
@@ -686,8 +692,8 @@ func TestSwitchNoMatchStrict(t *testing.T) {
 		t.Fatal("Timed out responding to output")
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchWithConditionsNoFallthrough(t *testing.T) {
@@ -698,9 +704,9 @@ func TestSwitchWithConditionsNoFallthrough(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		conf.Switch.Cases = append(conf.Switch.Cases, ooutput.NewSwitchConfigCase())
+		conf.Switch.Cases = append(conf.Switch.Cases, output.NewSwitchConfigCase())
 	}
 	conf.Switch.Cases[0].Check = `this.foo == "bar"`
 	conf.Switch.Cases[1].Check = `this.foo == "baz"`
@@ -731,7 +737,7 @@ func TestSwitchWithConditionsNoFallthrough(t *testing.T) {
 						closed++
 						continue outputLoop
 					}
-					if act := string(ts.Payload.Get(0).Get()); act != bar {
+					if act := string(ts.Payload.Get(0).AsBytes()); act != bar {
 						t.Errorf("Expected output 0 msgs to equal %s, got %s", bar, act)
 					}
 					resFns = append(resFns, ts.Ack)
@@ -740,7 +746,7 @@ func TestSwitchWithConditionsNoFallthrough(t *testing.T) {
 						closed++
 						continue outputLoop
 					}
-					if act := string(ts.Payload.Get(0).Get()); act != baz {
+					if act := string(ts.Payload.Get(0).AsBytes()); act != baz {
 						t.Errorf("Expected output 1 msgs to equal %s, got %s", baz, act)
 					}
 					resFns = append(resFns, ts.Ack)
@@ -782,8 +788,8 @@ func TestSwitchWithConditionsNoFallthrough(t *testing.T) {
 		}
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 
 	wg.Wait()
 }
@@ -801,10 +807,10 @@ func TestSwitchAtLeastOnce(t *testing.T) {
 		&mockOne, &mockTwo,
 	}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Switch.RetryUntilSuccess = true
 	for i := 0; i < len(mockOutputs); i++ {
-		outConf := ooutput.NewSwitchConfigCase()
+		outConf := output.NewSwitchConfigCase()
 		outConf.Continue = true
 		conf.Switch.Cases = append(conf.Switch.Cases, outConf)
 	}
@@ -853,7 +859,7 @@ func TestSwitchAtLeastOnce(t *testing.T) {
 	}
 
 	close(readChan)
-	require.NoError(t, s.WaitForClose(time.Second*5))
+	require.NoError(t, s.WaitForClose(ctx))
 }
 
 func TestSwitchShutDownFromErrorResponse(t *testing.T) {
@@ -862,9 +868,9 @@ func TestSwitchShutDownFromErrorResponse(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		outConf := ooutput.NewSwitchConfigCase()
+		outConf := output.NewSwitchConfigCase()
 		outConf.Continue = true
 		conf.Switch.Cases = append(conf.Switch.Cases, outConf)
 	}
@@ -897,8 +903,8 @@ func TestSwitchShutDownFromErrorResponse(t *testing.T) {
 	}
 	require.NoError(t, ts.Ack(ctx, errors.New("test")))
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 
 	select {
 	case _, open := <-mockOutputs[0].TChan:
@@ -909,11 +915,14 @@ func TestSwitchShutDownFromErrorResponse(t *testing.T) {
 }
 
 func TestSwitchShutDownFromReceive(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	mockOutputs := []*mock.OutputChanneled{{}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		outConf := ooutput.NewSwitchConfigCase()
+		outConf := output.NewSwitchConfigCase()
 		outConf.Continue = true
 		conf.Switch.Cases = append(conf.Switch.Cases, outConf)
 	}
@@ -937,8 +946,8 @@ func TestSwitchShutDownFromReceive(t *testing.T) {
 		t.Fatal("Timed out waiting for msg rcv")
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 
 	select {
 	case _, open := <-mockOutputs[0].TChan:
@@ -949,11 +958,14 @@ func TestSwitchShutDownFromReceive(t *testing.T) {
 }
 
 func TestSwitchShutDownFromSend(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	mockOutputs := []*mock.OutputChanneled{{}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		outConf := ooutput.NewSwitchConfigCase()
+		outConf := output.NewSwitchConfigCase()
 		outConf.Continue = true
 		conf.Switch.Cases = append(conf.Switch.Cases, outConf)
 	}
@@ -970,8 +982,8 @@ func TestSwitchShutDownFromSend(t *testing.T) {
 		t.Fatal("Timed out waiting for msg send")
 	}
 
-	s.CloseAsync()
-	require.NoError(t, s.WaitForClose(time.Second))
+	s.TriggerCloseNow()
+	require.NoError(t, s.WaitForClose(ctx))
 
 	select {
 	case _, open := <-mockOutputs[0].TChan:
@@ -989,9 +1001,9 @@ func TestSwitchBackPressure(t *testing.T) {
 
 	mockOutputs := []*mock.OutputChanneled{{}, {}}
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	for i := 0; i < len(mockOutputs); i++ {
-		outConf := ooutput.NewSwitchConfigCase()
+		outConf := output.NewSwitchConfigCase()
 		outConf.Continue = true
 		conf.Switch.Cases = append(conf.Switch.Cases, outConf)
 	}

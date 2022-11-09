@@ -1,6 +1,7 @@
 package avro_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
@@ -9,9 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func TestAvroBasic(t *testing.T) {
@@ -132,7 +133,7 @@ func TestAvroBasic(t *testing.T) {
 
 			input := message.QuickBatch(nil)
 			for _, p := range test.input {
-				input.Append(message.NewPart([]byte(p)))
+				input = append(input, message.NewPart([]byte(p)))
 			}
 
 			exp := make([][]byte, len(test.output))
@@ -140,7 +141,7 @@ func TestAvroBasic(t *testing.T) {
 				exp[i] = []byte(p)
 			}
 
-			msgs, res := proc.ProcessMessage(input)
+			msgs, res := proc.ProcessBatch(context.Background(), input)
 			if res != nil {
 				tt.Fatal(res)
 			}
@@ -289,7 +290,7 @@ func TestAvroSchemaPath(t *testing.T) {
 
 			input := message.QuickBatch(nil)
 			for _, p := range test.input {
-				input.Append(message.NewPart([]byte(p)))
+				input = append(input, message.NewPart([]byte(p)))
 			}
 
 			exp := make([][]byte, len(test.output))
@@ -297,7 +298,7 @@ func TestAvroSchemaPath(t *testing.T) {
 				exp[i] = []byte(p)
 			}
 
-			msgs, res := proc.ProcessMessage(input)
+			msgs, res := proc.ProcessBatch(context.Background(), input)
 			if res != nil {
 				tt.Fatal(res)
 			}
@@ -324,6 +325,6 @@ func TestAvroSchemaPathNotExist(t *testing.T) {
 
 	_, err := mock.NewManager().NewProcessor(conf)
 	if err == nil {
-		t.Error("expected error from loading non existant schema file")
+		t.Error("expected error from loading non existent schema file")
 	}
 }

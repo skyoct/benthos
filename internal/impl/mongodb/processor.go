@@ -11,31 +11,30 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/mapping"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	iprocessor "github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/mongodb/client"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
-	"github.com/benthosdev/benthos/v4/internal/shutdown"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 //------------------------------------------------------------------------------
 
 func init() {
-	err := bundle.AllProcessors.Add(func(c processor.Config, nm bundle.NewManagement) (iprocessor.V1, error) {
-		v2Proc, err := NewProcessor(c, nm, nm.Logger(), nm.Metrics())
+	err := bundle.AllProcessors.Add(func(c processor.Config, nm bundle.NewManagement) (processor.V1, error) {
+		v2Proc, err := NewProcessor(c, nm)
 		if err != nil {
 			return nil, err
 		}
-		return iprocessor.NewV2BatchedToV1Processor("", v2Proc, nm.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("", v2Proc, nm), nil
 	}, docs.ComponentSpec{
 		Name:       "mongodb",
 		Type:       docs.TypeProcessor,
@@ -96,11 +95,12 @@ func init() {
 //------------------------------------------------------------------------------
 
 // Processor stores or retrieves data from a mongo db for each message of a
-// batch
+// batch.
 type Processor struct {
-	conf  processor.MongoDBConfig
-	log   log.Modular
-	stats metrics.Type
+	conf   processor.MongoDBConfig
+	log    log.Modular
+	stats  metrics.Type
+	tracer trace.TracerProvider
 
 	client                       *mongo.Client
 	collection                   *field.Expression
@@ -111,14 +111,10 @@ type Processor struct {
 	documentMap *mapping.Executor
 	hintMap     *mapping.Executor
 	operation   client.Operation
-
-	shutSig *shutdown.Signaller
 }
 
 // NewProcessor returns a MongoDB processor.
-func NewProcessor(
-	conf processor.Config, mgr bundle.NewManagement, log log.Modular, stats metrics.Type,
-) (iprocessor.V2Batched, error) {
+func NewProcessor(conf processor.Config, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	// TODO: V4 Remove this after V4 lands and #972 is fixed
 	operation := client.NewOperation(conf.MongoDB.Operation)
 	if operation == client.OperationInvalid {
@@ -126,13 +122,12 @@ func NewProcessor(
 	}
 
 	m := &Processor{
-		conf:  conf.MongoDB,
-		log:   log,
-		stats: stats,
+		conf:   conf.MongoDB,
+		log:    mgr.Logger(),
+		stats:  mgr.Metrics(),
+		tracer: mgr.Tracer(),
 
 		operation: operation,
-
-		shutSig: shutdown.NewSignaller(),
 	}
 
 	if conf.MongoDB.MongoDB.URL == "" {
@@ -197,8 +192,10 @@ func NewProcessor(
 	}
 
 	var timeout time.Duration
-	if timeout, err = time.ParseDuration(conf.MongoDB.WriteConcern.WTimeout); err != nil {
-		return nil, fmt.Errorf("failed to parse wtimeout string: %v", err)
+	if len(conf.MongoDB.WriteConcern.WTimeout) > 0 {
+		if timeout, err = time.ParseDuration(conf.MongoDB.WriteConcern.WTimeout); err != nil {
+			return nil, fmt.Errorf("failed to parse wtimeout string: %v", err)
+		}
 	}
 
 	writeConcern := writeconcern.New(
@@ -229,11 +226,9 @@ func NewProcessor(
 
 // ProcessBatch applies the processor to a message batch, either creating >0
 // resulting messages or a response to be sent back to the message source.
-func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch *message.Batch) ([]*message.Batch, error) {
-	newBatch := batch.Copy()
-
+func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch message.Batch) ([]message.Batch, error) {
 	writeModelsMap := map[*mongo.Collection][]mongo.WriteModel{}
-	processor.IteratePartsWithSpanV2("mongodb", nil, newBatch, func(i int, s *tracing.Span, p *message.Part) error {
+	_ = batch.Iter(func(i int, p *message.Part) error {
 		var err error
 		var filterVal, documentVal *message.Part
 		var upsertVal, filterValWanted, documentValWanted bool
@@ -243,13 +238,13 @@ func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, bat
 		upsertVal = m.conf.Upsert
 
 		if filterValWanted {
-			if filterVal, err = m.filterMap.MapPart(i, newBatch); err != nil {
+			if filterVal, err = m.filterMap.MapPart(i, batch); err != nil {
 				return fmt.Errorf("failed to execute filter_map: %v", err)
 			}
 		}
 
 		if (filterVal != nil || !filterValWanted) && documentValWanted {
-			if documentVal, err = m.documentMap.MapPart(i, newBatch); err != nil {
+			if documentVal, err = m.documentMap.MapPart(i, batch); err != nil {
 				return fmt.Errorf("failed to execute document_map: %v", err)
 			}
 		}
@@ -262,34 +257,34 @@ func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, bat
 			return fmt.Errorf("failed to generate documentVal")
 		}
 
-		var docJSON, filterJSON, hintJSON interface{}
+		var docJSON, filterJSON, hintJSON any
 
 		if filterValWanted {
-			if filterJSON, err = filterVal.JSON(); err != nil {
+			if filterJSON, err = filterVal.AsStructured(); err != nil {
 				return err
 			}
 		}
 
 		if documentValWanted {
-			if docJSON, err = documentVal.JSON(); err != nil {
+			if docJSON, err = documentVal.AsStructured(); err != nil {
 				return err
 			}
 		}
 
 		findOptions := &options.FindOneOptions{}
 		if m.hintMap != nil {
-			hintVal, err := m.hintMap.MapPart(i, newBatch)
+			hintVal, err := m.hintMap.MapPart(i, batch)
 			if err != nil {
 				return fmt.Errorf("failed to execute hint_map: %v", err)
 			}
-			if hintJSON, err = hintVal.JSON(); err != nil {
+			if hintJSON, err = hintVal.AsStructured(); err != nil {
 				return err
 			}
 			findOptions.Hint = hintJSON
 		}
 
 		var writeModel mongo.WriteModel
-		collection := m.database.Collection(m.collection.String(i, newBatch), m.writeConcernCollectionOption)
+		collection := m.database.Collection(m.collection.String(i, batch), m.writeConcernCollectionOption)
 
 		switch m.operation {
 		case client.OperationInsertOne:
@@ -321,10 +316,10 @@ func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, bat
 				Hint:   hintJSON,
 			}
 		case client.OperationFindOne:
-			var decoded interface{}
+			var decoded any
 			err := collection.FindOne(context.Background(), filterJSON, findOptions).Decode(&decoded)
 			if err != nil {
-				if err == mongo.ErrNoDocuments {
+				if errors.Is(err, mongo.ErrNoDocuments) {
 					return err
 				}
 				m.log.Errorf("Error decoding mongo db result, filter = %v: %s", filterJSON, err)
@@ -335,7 +330,7 @@ func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, bat
 				return err
 			}
 
-			p.Set(data)
+			p.SetBytes(data)
 
 			return nil
 		}
@@ -351,15 +346,15 @@ func (m *Processor) ProcessBatch(ctx context.Context, spans []*tracing.Span, bat
 			// We should have at least one write model in the slice
 			if _, err := collection.BulkWrite(context.Background(), writeModels); err != nil {
 				m.log.Errorf("Bulk write failed in mongodb processor: %v", err)
-				_ = newBatch.Iter(func(i int, p *message.Part) error {
-					iprocessor.MarkErr(p, spans[i], err)
+				_ = batch.Iter(func(i int, p *message.Part) error {
+					processor.MarkErr(p, spans[i], err)
 					return nil
 				})
 			}
 		}
 	}
 
-	return []*message.Batch{newBatch}, nil
+	return []message.Batch{batch}, nil
 }
 
 // Close shuts down the processor and stops processing requests.

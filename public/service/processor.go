@@ -2,9 +2,8 @@ package service
 
 import (
 	"context"
-	"time"
 
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
+	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
@@ -69,8 +68,8 @@ type airGapProcessor struct {
 	p Processor
 }
 
-func newAirGapProcessor(typeStr string, p Processor, stats metrics.Type) processor.V1 {
-	return processor.NewV2ToV1Processor(typeStr, &airGapProcessor{p}, stats)
+func newAirGapProcessor(typeStr string, p Processor, mgr bundle.NewManagement) processor.V1 {
+	return processor.NewV2ToV1Processor(typeStr, &airGapProcessor{p}, mgr)
 }
 
 func (a *airGapProcessor) Process(ctx context.Context, msg *message.Part) ([]*message.Part, error) {
@@ -96,11 +95,11 @@ type airGapBatchProcessor struct {
 	p BatchProcessor
 }
 
-func newAirGapBatchProcessor(typeStr string, p BatchProcessor, stats metrics.Type) processor.V1 {
-	return processor.NewV2BatchedToV1Processor(typeStr, &airGapBatchProcessor{p}, stats)
+func newAirGapBatchProcessor(typeStr string, p BatchProcessor, mgr bundle.NewManagement) processor.V1 {
+	return processor.NewV2BatchedToV1Processor(typeStr, &airGapBatchProcessor{p}, mgr)
 }
 
-func (a *airGapBatchProcessor) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch *message.Batch) ([]*message.Batch, error) {
+func (a *airGapBatchProcessor) ProcessBatch(ctx context.Context, spans []*tracing.Span, batch message.Batch) ([]message.Batch, error) {
 	inputBatch := make([]*Message, batch.Len())
 	_ = batch.Iter(func(i int, p *message.Part) error {
 		inputBatch[i] = newMessageFromPart(p)
@@ -112,11 +111,11 @@ func (a *airGapBatchProcessor) ProcessBatch(ctx context.Context, spans []*tracin
 		return nil, err
 	}
 
-	newBatches := make([]*message.Batch, len(outputBatches))
+	newBatches := make([]message.Batch, len(outputBatches))
 	for i, batch := range outputBatches {
-		newBatch := message.QuickBatch(nil)
-		for _, msg := range batch {
-			newBatch.Append(msg.part)
+		newBatch := make(message.Batch, len(batch))
+		for i, m := range batch {
+			newBatch[i] = m.part
 		}
 		newBatches[i] = newBatch
 	}
@@ -139,14 +138,9 @@ type OwnedProcessor struct {
 // Process a single message, returns either a batch of zero or more resulting
 // messages or an error if the message could not be processed.
 func (o *OwnedProcessor) Process(ctx context.Context, msg *Message) (MessageBatch, error) {
-	outMsg := message.QuickBatch(nil)
+	outMsg := message.Batch{msg.part}
 
-	// TODO: After V4 we can modify the internal message type to remove this
-	// requirement.
-	msg.ensureCopied()
-	outMsg.Append(msg.part)
-
-	iMsgs, res := o.p.ProcessMessage(outMsg)
+	iMsgs, res := o.p.ProcessBatch(ctx, outMsg)
 	if res != nil {
 		return nil, res
 	}
@@ -162,19 +156,19 @@ func (o *OwnedProcessor) Process(ctx context.Context, msg *Message) (MessageBatc
 }
 
 // ProcessBatch attempts to process a batch of messages, returns zero or more
-// batches of resulting messages or an error if the messages could not be
-// processed.
+// batches of resulting messages, or an error if the context is cancelled during
+// execution.
+//
+// However, for general processing errors unrelated to context cancellation the
+// error is marked against individual messages with the `SetError` method and a
+// nil error is returned by this method.
 func (o *OwnedProcessor) ProcessBatch(ctx context.Context, batch MessageBatch) ([]MessageBatch, error) {
-	outMsg := message.QuickBatch(nil)
-
-	for _, msg := range batch {
-		// TODO: After V4 we can modify the internal message type to remove this
-		// requirement.
-		msg.ensureCopied()
-		outMsg.Append(msg.part)
+	outMsg := make(message.Batch, len(batch))
+	for i, msg := range batch {
+		outMsg[i] = msg.part
 	}
 
-	iMsgs, res := o.p.ProcessMessage(outMsg)
+	iMsgs, res := o.p.ProcessBatch(ctx, outMsg)
 	if res != nil {
 		return nil, res
 	}
@@ -191,18 +185,34 @@ func (o *OwnedProcessor) ProcessBatch(ctx context.Context, batch MessageBatch) (
 	return batches, nil
 }
 
-// Close the processor, allowing it to clean up resources. It is
+// Close the processor, allowing it to clean up resources.
 func (o *OwnedProcessor) Close(ctx context.Context) error {
-	o.p.CloseAsync()
-	for {
-		// Gross but will do for now until we replace these with context params.
-		if err := o.p.WaitForClose(time.Millisecond * 100); err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	return o.p.Close(ctx)
+}
+
+// ExecuteProcessors runs a set of batches through a series processors. If a
+// context error occurs during execution then this function terminates and
+// returns the error.
+//
+// However, for general processing errors unrelated to context cancellation the
+// errors are marked against individual messages with the `SetError` method and
+// processing continues against subsequent processors.
+func ExecuteProcessors(ctx context.Context, processors []*OwnedProcessor, inbatches ...MessageBatch) ([]MessageBatch, error) {
+	if len(processors) == 0 {
+		return inbatches, nil
 	}
+
+	proc := processors[0]
+
+	nextBatches := make([]MessageBatch, 0, len(inbatches))
+	for _, batch := range inbatches {
+		batches, err := proc.ProcessBatch(ctx, batch)
+		if err != nil {
+			return nil, err
+		}
+
+		nextBatches = append(nextBatches, batches...)
+	}
+
+	return ExecuteProcessors(ctx, processors[1:], nextBatches...)
 }

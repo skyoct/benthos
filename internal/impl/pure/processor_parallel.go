@@ -4,23 +4,21 @@ import (
 	"context"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newParallel(conf.Parallel, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("parallel", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("parallel", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "parallel",
 		Categories: []string{
@@ -35,7 +33,7 @@ The functionality of this processor depends on being applied across messages tha
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldInt("cap", "The maximum number of messages to have processing at a given time."),
 			docs.FieldProcessor("processors", "A list of child processors to apply.").Array(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewParallelConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewParallelConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -47,10 +45,10 @@ type parallelProc struct {
 	cap      int
 }
 
-func newParallel(conf oprocessor.ParallelConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
+func newParallel(conf processor.ParallelConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	var children []processor.V1
 	for i, pconf := range conf.Processors {
-		pMgr := mgr.IntoPath("parallel", strconv.Itoa(i)).(bundle.NewManagement)
+		pMgr := mgr.IntoPath("parallel", strconv.Itoa(i))
 		proc, err := pMgr.NewProcessor(pconf)
 		if err != nil {
 			return nil, err
@@ -63,12 +61,10 @@ func newParallel(conf oprocessor.ParallelConfig, mgr bundle.NewManagement) (proc
 	}, nil
 }
 
-func (p *parallelProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
-	resultMsgs := make([]*message.Batch, msg.Len())
+func (p *parallelProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
+	resultMsgs := make([]message.Batch, msg.Len())
 	_ = msg.Iter(func(i int, p *message.Part) error {
-		tmpMsg := message.QuickBatch(nil)
-		tmpMsg.SetAll([]*message.Part{p})
-		resultMsgs[i] = tmpMsg
+		resultMsgs[i] = message.Batch{p}
 		return nil
 	})
 
@@ -85,7 +81,7 @@ func (p *parallelProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, 
 		go func() {
 			// TODO: V4 Handle processor errors when we migrate to service APIs
 			for index := range reqChan {
-				resMsgs, _ := oprocessor.ExecuteAll(p.children, resultMsgs[index])
+				resMsgs, _ := processor.ExecuteAll(ctx, p.children, resultMsgs[index])
 				resultParts := []*message.Part{}
 				for _, m := range resMsgs {
 					_ = m.Iter(func(i int, p *message.Part) error {
@@ -93,7 +89,7 @@ func (p *parallelProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, 
 						return nil
 					})
 				}
-				resultMsgs[index].SetAll(resultParts)
+				resultMsgs[index] = resultParts
 			}
 			wg.Done()
 		}()
@@ -107,24 +103,17 @@ func (p *parallelProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, 
 	resMsg := message.QuickBatch(nil)
 	for _, m := range resultMsgs {
 		_ = m.Iter(func(i int, p *message.Part) error {
-			resMsg.Append(p)
+			resMsg = append(resMsg, p)
 			return nil
 		})
 	}
 
-	return []*message.Batch{resMsg}, nil
+	return []message.Batch{resMsg}, nil
 }
 
 func (p *parallelProc) Close(ctx context.Context) error {
 	for _, c := range p.children {
-		c.CloseAsync()
-	}
-	deadline, exists := ctx.Deadline()
-	if !exists {
-		deadline = time.Now().Add(time.Second * 5)
-	}
-	for _, c := range p.children {
-		if err := c.WaitForClose(time.Until(deadline)); err != nil {
+		if err := c.Close(ctx); err != nil {
 			return err
 		}
 	}

@@ -7,7 +7,6 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/shutdown"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
@@ -30,7 +29,7 @@ type V2Batched interface {
 	// Process a batch of messages into one or more resulting batches, or return
 	// an error if the entire batch could not be processed. If zero messages are
 	// returned and the error is nil then all messages are filtered.
-	ProcessBatch(ctx context.Context, spans []*tracing.Span, b *message.Batch) ([]*message.Batch, error)
+	ProcessBatch(ctx context.Context, spans []*tracing.Span, b message.Batch) ([]message.Batch, error)
 
 	// Close the component, blocks until either the underlying resources are
 	// cleaned up or the context is cancelled. Returns an error if the context
@@ -40,11 +39,11 @@ type V2Batched interface {
 
 //------------------------------------------------------------------------------
 
-// Implements V1
+// Implements V1.
 type v2ToV1Processor struct {
 	typeStr string
 	p       V2
-	sig     *shutdown.Signaller
+	mgr     component.Observability
 
 	mReceived      metrics.StatCounter
 	mBatchReceived metrics.StatCounter
@@ -55,36 +54,35 @@ type v2ToV1Processor struct {
 }
 
 // NewV2ToV1Processor wraps a processor.V2 with a struct that implements V1.
-func NewV2ToV1Processor(typeStr string, p V2, stats metrics.Type) V1 {
+func NewV2ToV1Processor(typeStr string, p V2, mgr component.Observability) V1 {
 	return &v2ToV1Processor{
-		typeStr: typeStr, p: p, sig: shutdown.NewSignaller(),
+		typeStr: typeStr, p: p, mgr: mgr,
 
-		mReceived:      stats.GetCounter("processor_received"),
-		mBatchReceived: stats.GetCounter("processor_batch_received"),
-		mSent:          stats.GetCounter("processor_sent"),
-		mBatchSent:     stats.GetCounter("processor_batch_sent"),
-		mError:         stats.GetCounter("processor_error"),
-		mLatency:       stats.GetTimer("processor_latency_ns"),
+		mReceived:      mgr.Metrics().GetCounter("processor_received"),
+		mBatchReceived: mgr.Metrics().GetCounter("processor_batch_received"),
+		mSent:          mgr.Metrics().GetCounter("processor_sent"),
+		mBatchSent:     mgr.Metrics().GetCounter("processor_batch_sent"),
+		mError:         mgr.Metrics().GetCounter("processor_error"),
+		mLatency:       mgr.Metrics().GetTimer("processor_latency_ns"),
 	}
 }
 
-func (a *v2ToV1Processor) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
+func (a *v2ToV1Processor) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
 	a.mReceived.Incr(int64(msg.Len()))
 	a.mBatchReceived.Incr(1)
 
 	tStarted := time.Now()
 
 	newParts := make([]*message.Part, 0, msg.Len())
-
 	_ = msg.Iter(func(i int, part *message.Part) error {
-		span := tracing.CreateChildSpan(a.typeStr, part)
+		_, span := tracing.WithChildSpan(a.mgr.Tracer(), a.typeStr, part)
 
-		nextParts, err := a.p.Process(context.Background(), part)
+		nextParts, err := a.p.Process(ctx, part)
 		if err != nil {
-			newPart := part.Copy()
 			a.mError.Incr(1)
-			MarkErr(newPart, span, err)
-			nextParts = append(nextParts, newPart)
+			a.mgr.Logger().Debugf("Processor failed: %v", err)
+			MarkErr(part, span, err)
+			nextParts = append(nextParts, part)
 		}
 
 		span.Finish()
@@ -99,38 +97,22 @@ func (a *v2ToV1Processor) ProcessMessage(msg *message.Batch) ([]*message.Batch, 
 		return nil, nil
 	}
 
-	newMsg := message.QuickBatch(nil)
-	newMsg.SetAll(newParts)
-
-	a.mSent.Incr(int64(newMsg.Len()))
+	a.mSent.Incr(int64(len(newParts)))
 	a.mBatchSent.Incr(1)
-	return []*message.Batch{newMsg}, nil
+	return []message.Batch{newParts}, nil
 }
 
-func (a *v2ToV1Processor) CloseAsync() {
-	go func() {
-		if err := a.p.Close(context.Background()); err == nil {
-			a.sig.ShutdownComplete()
-		}
-	}()
-}
-
-func (a *v2ToV1Processor) WaitForClose(tout time.Duration) error {
-	select {
-	case <-a.sig.HasClosedChan():
-	case <-time.After(tout):
-		return component.ErrTimeout
-	}
-	return nil
+func (a *v2ToV1Processor) Close(ctx context.Context) error {
+	return a.p.Close(ctx)
 }
 
 //------------------------------------------------------------------------------
 
-// Implements types.Processor
+// Implements types.Processor.
 type v2BatchedToV1Processor struct {
 	typeStr string
 	p       V2Batched
-	sig     *shutdown.Signaller
+	mgr     component.Observability
 
 	mReceived      metrics.StatCounter
 	mBatchReceived metrics.StatCounter
@@ -142,35 +124,35 @@ type v2BatchedToV1Processor struct {
 
 // NewV2BatchedToV1Processor wraps a processor.V2Batched with a struct that
 // implements types.Processor.
-func NewV2BatchedToV1Processor(typeStr string, p V2Batched, stats metrics.Type) V1 {
+func NewV2BatchedToV1Processor(typeStr string, p V2Batched, mgr component.Observability) V1 {
 	return &v2BatchedToV1Processor{
-		typeStr: typeStr, p: p, sig: shutdown.NewSignaller(),
+		typeStr: typeStr, p: p, mgr: mgr,
 
-		mReceived:      stats.GetCounter("processor_received"),
-		mBatchReceived: stats.GetCounter("processor_batch_received"),
-		mSent:          stats.GetCounter("processor_sent"),
-		mBatchSent:     stats.GetCounter("processor_batch_sent"),
-		mError:         stats.GetCounter("processor_error"),
-		mLatency:       stats.GetTimer("processor_latency_ns"),
+		mReceived:      mgr.Metrics().GetCounter("processor_received"),
+		mBatchReceived: mgr.Metrics().GetCounter("processor_batch_received"),
+		mSent:          mgr.Metrics().GetCounter("processor_sent"),
+		mBatchSent:     mgr.Metrics().GetCounter("processor_batch_sent"),
+		mError:         mgr.Metrics().GetCounter("processor_error"),
+		mLatency:       mgr.Metrics().GetTimer("processor_latency_ns"),
 	}
 }
 
-func (a *v2BatchedToV1Processor) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
+func (a *v2BatchedToV1Processor) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
 	a.mReceived.Incr(int64(msg.Len()))
 	a.mBatchReceived.Incr(1)
 
 	tStarted := time.Now()
-	spans := tracing.CreateChildSpans(a.typeStr, msg)
+	_, spans := tracing.WithChildSpans(a.mgr.Tracer(), a.typeStr, msg)
 
-	outputBatches, err := a.p.ProcessBatch(context.Background(), spans, msg)
+	outputBatches, err := a.p.ProcessBatch(ctx, spans, msg)
 	if err != nil {
 		a.mError.Incr(1)
-		outputBatch := msg.Copy()
-		_ = outputBatch.Iter(func(i int, p *message.Part) error {
+		a.mgr.Logger().Debugf("Processor failed: %v", err)
+		_ = msg.Iter(func(i int, p *message.Part) error {
 			MarkErr(p, spans[i], err)
 			return nil
 		})
-		outputBatches = append(outputBatches, outputBatch)
+		outputBatches = append(outputBatches, msg)
 	}
 
 	for _, s := range spans {
@@ -189,19 +171,6 @@ func (a *v2BatchedToV1Processor) ProcessMessage(msg *message.Batch) ([]*message.
 	return outputBatches, nil
 }
 
-func (a *v2BatchedToV1Processor) CloseAsync() {
-	go func() {
-		if err := a.p.Close(context.Background()); err == nil {
-			a.sig.ShutdownComplete()
-		}
-	}()
-}
-
-func (a *v2BatchedToV1Processor) WaitForClose(tout time.Duration) error {
-	select {
-	case <-a.sig.HasClosedChan():
-	case <-time.After(tout):
-		return component.ErrTimeout
-	}
-	return nil
+func (a *v2BatchedToV1Processor) Close(ctx context.Context) error {
+	return a.p.Close(ctx)
 }

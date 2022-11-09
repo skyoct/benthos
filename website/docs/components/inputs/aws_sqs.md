@@ -46,6 +46,7 @@ input:
     delete_message: true
     reset_visibility: true
     max_number_of_messages: 10
+    wait_time_seconds: 0
     region: ""
     endpoint: ""
     credentials:
@@ -53,6 +54,7 @@ input:
       id: ""
       secret: ""
       token: ""
+      from_ec2_role: false
       role: ""
       role_external_id: ""
 ```
@@ -116,6 +118,14 @@ The maximum number of messages to return on one poll. Valid values: 1 to 10.
 Type: `int`  
 Default: `10`  
 
+### `wait_time_seconds`
+
+Whether to set the wait time. Enabling this activates long-polling. Valid values: 0 to 20.
+
+
+Type: `int`  
+Default: `0`  
+
 ### `region`
 
 The AWS region to target.
@@ -170,6 +180,15 @@ The token for the credentials being used, required when using short term credent
 
 Type: `string`  
 Default: `""`  
+
+### `credentials.from_ec2_role`
+
+Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 4.2.0 or newer  
 
 ### `credentials.role`
 

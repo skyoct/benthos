@@ -37,13 +37,13 @@ func TestFunctionSetWithout(t *testing.T) {
 
 func TestFunctionSetOnlyPure(t *testing.T) {
 	setOne := AllFunctions
+	require.NoError(t, setOne.Add(NewFunctionSpec("meower", "meow", "Does impure meows.").MarkImpure(), func(args *ParsedParams) (Function, error) {
+		return nil, errors.New("not implemented")
+	}))
 	setTwo := setOne.OnlyPure()
 
-	assert.Contains(t, listFunctions(setOne), "env")
-	assert.NotContains(t, listFunctions(setTwo), "env")
-
-	assert.Contains(t, listFunctions(setOne), "file")
-	assert.NotContains(t, listFunctions(setTwo), "file")
+	assert.Contains(t, listFunctions(setOne), "meow")
+	assert.NotContains(t, listFunctions(setTwo), "meow")
 }
 
 func TestFunctionSetDeactivated(t *testing.T) {
@@ -54,7 +54,7 @@ func TestFunctionSetDeactivated(t *testing.T) {
 
 	spec := NewFunctionSpec(FunctionCategoryGeneral, "meow", "").Param(ParamString("val1", ""))
 	require.NoError(t, setOne.Add(spec, func(args *ParsedParams) (Function, error) {
-		return ClosureFunction("", func(ctx FunctionContext) (interface{}, error) {
+		return ClosureFunction("", func(ctx FunctionContext) (any, error) {
 			return nil, customErr
 		}, func(ctx TargetsContext) (TargetsContext, []TargetPath) { return ctx, nil }), nil
 	}))

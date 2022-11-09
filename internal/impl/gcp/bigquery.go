@@ -6,12 +6,13 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"github.com/Masterminds/squirrel"
+	"go.uber.org/multierr"
 
 	"github.com/benthosdev/benthos/v4/public/service"
 )
 
 type bigqueryIterator interface {
-	Next(dst interface{}) error
+	Next(dst any) error
 }
 
 type bqClient interface {
@@ -46,8 +47,8 @@ func (client *wrappedBQClient) RunQuery(ctx context.Context, options *bqQueryBui
 		return nil, fmt.Errorf("failed to wait on job: %w", err)
 	}
 
-	if err := status.Err(); err != nil {
-		return nil, fmt.Errorf("failed to complete job successfully: %w", err)
+	if err := errorFromStatus(status); err != nil {
+		return nil, err
 	}
 
 	it, err := job.Read(ctx)
@@ -71,9 +72,10 @@ type bqQueryParts struct {
 }
 
 type bqQueryBuilderOptions struct {
-	queryParts *bqQueryParts
-	jobLabels  map[string]string
-	args       []interface{}
+	queryParts    *bqQueryParts
+	jobLabels     map[string]string
+	queryPriority bigquery.QueryPriority
+	args          []any
 }
 
 func buildBQQuery(client *bigquery.Client, options *bqQueryBuilderOptions) (*bigquery.Query, error) {
@@ -98,6 +100,7 @@ func buildBQQuery(client *bigquery.Client, options *bqQueryBuilderOptions) (*big
 
 	query := client.Query(qs)
 	query.Labels = options.jobLabels
+	query.Priority = options.queryPriority
 
 	bqparams := make([]bigquery.QueryParameter, 0, len(args))
 	for _, arg := range args {
@@ -107,4 +110,47 @@ func buildBQQuery(client *bigquery.Client, options *bqQueryBuilderOptions) (*big
 	query.Parameters = bqparams
 
 	return query, nil
+}
+
+func errorFromStatus(status *bigquery.JobStatus) error {
+	// status.Err() tells us that the job _completed unsuccessfully_.
+	// If that is set, then we can proceed to look at status.Errors.
+	statusErr := status.Err()
+	if statusErr == nil {
+		return nil
+	}
+
+	var bqErr error
+
+	if len(status.Errors) > 0 {
+		for _, cerr := range status.Errors {
+			bqErr = multierr.Append(bqErr, cerr)
+		}
+	} else {
+		bqErr = statusErr
+	}
+
+	return fmt.Errorf("failed to complete bigquery job successfully: %w", bqErr)
+}
+
+func parseQueryPriority(config *service.ParsedConfig, fieldName string) (bigquery.QueryPriority, error) {
+	if !config.Contains(fieldName) {
+		return "", nil
+	}
+
+	rawPriority, err := config.FieldString(fieldName)
+	if err != nil {
+		return "", err
+	}
+
+	switch rawPriority {
+	case "interactive":
+		return bigquery.InteractivePriority, nil
+	case "batch":
+		return bigquery.BatchPriority, nil
+	case "":
+		return "", nil
+	default:
+		return "", fmt.Errorf("unrecognised query priority: %s", rawPriority)
+	}
 }

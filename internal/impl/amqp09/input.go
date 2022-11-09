@@ -17,22 +17,21 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		var a reader.Async
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
+		var a input.Async
 		var err error
-		if a, err = newAMQP09Reader(c.AMQP09, nm.Logger()); err != nil {
+		if a, err = newAMQP09Reader(c.AMQP09, nm); err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader("amqp_0_9", true, a, nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("amqp_0_9", true, a, nm)
 	}), docs.ComponentSpec{
 		Name: "amqp_0_9",
 		Summary: `
@@ -78,19 +77,20 @@ You can access these metadata fields using
 				[]string{"amqp://guest:guest@127.0.0.1:5672/"},
 				[]string{"amqp://127.0.0.1:5672/,amqp://127.0.0.2:5672/"},
 				[]string{"amqp://127.0.0.1:5672/", "amqp://127.0.0.2:5672/"},
-			).Array().AtVersion("3.58.0").HasDefault([]interface{}{}),
+			).Array().AtVersion("3.58.0").HasDefault([]any{}),
 			docs.FieldString("queue", "An AMQP queue to consume from.").HasDefault(""),
 			docs.FieldObject("queue_declare", `
 Allows you to passively declare the target queue. If the queue already exists
 then the declaration passively verifies that they match the target fields.`,
 			).WithChildren(
 				docs.FieldBool("enabled", "Whether to enable queue declaration.").HasDefault(false),
-				docs.FieldBool("durable", "Whether the declared queue is durable.").HasDefault(false),
-			).Advanced().HasDefault(map[string]interface{}{}),
+				docs.FieldBool("durable", "Whether the declared queue is durable.").HasDefault(true),
+				docs.FieldBool("auto_delete", "Whether the declared queue will auto-delete.").HasDefault(false),
+			).Advanced(),
 			docs.FieldObject("bindings_declare",
 				"Allows you to passively declare bindings for the target queue.",
-				[]interface{}{
-					map[string]interface{}{
+				[]any{
+					map[string]any{
 						"exchange": "foo",
 						"key":      "bar",
 					},
@@ -98,10 +98,10 @@ then the declaration passively verifies that they match the target fields.`,
 			).Array().WithChildren(
 				docs.FieldString("exchange", "The exchange of the declared binding.").HasDefault(""),
 				docs.FieldString("key", "The key of the declared binding.").HasDefault(""),
-			).Advanced().HasDefault([]interface{}{}),
+			).Advanced().HasDefault([]any{}),
 			docs.FieldString("consumer_tag", "A consumer tag.").HasDefault(""),
 			docs.FieldBool("auto_ack", "Acknowledge messages automatically as they are consumed rather than waiting for acknowledgments from downstream. This can improve throughput and prevent the pipeline from blocking but at the cost of eliminating delivery guarantees.").Advanced().HasDefault(false),
-			docs.FieldString("nack_reject_patterns", "A list of regular expression patterns whereby if a message that has failed to be delivered by Benthos has an error that matches it will be dropped (or delivered to a dead-letter queue if one exists). By default failed messages are nacked with requeue enabled.", []string{"^reject me please:.+$"}).Array().Advanced().AtVersion("3.64.0").HasDefault([]interface{}{}),
+			docs.FieldString("nack_reject_patterns", "A list of regular expression patterns whereby if a message that has failed to be delivered by Benthos has an error that matches it will be dropped (or delivered to a dead-letter queue if one exists). By default failed messages are nacked with requeue enabled.", []string{"^reject me please:.+$"}).Array().Advanced().AtVersion("3.64.0").HasDefault([]any{}),
 			docs.FieldInt("prefetch_count", "The maximum number of pending messages to have consumed at a time.").HasDefault(10),
 			docs.FieldInt("prefetch_size", "The maximum amount of pending messages measured in bytes to have consumed at a time.").Advanced().HasDefault(0),
 			btls.FieldSpec(),
@@ -126,16 +126,16 @@ type amqp09Reader struct {
 
 	nackRejectPattens []*regexp.Regexp
 
-	conf oinput.AMQP09Config
+	conf input.AMQP09Config
 	log  log.Modular
 
 	m sync.RWMutex
 }
 
-func newAMQP09Reader(conf oinput.AMQP09Config, log log.Modular) (*amqp09Reader, error) {
+func newAMQP09Reader(conf input.AMQP09Config, mgr bundle.NewManagement) (*amqp09Reader, error) {
 	a := amqp09Reader{
 		conf: conf,
-		log:  log,
+		log:  mgr.Logger(),
 	}
 
 	if len(conf.URLs) == 0 {
@@ -160,7 +160,7 @@ func newAMQP09Reader(conf oinput.AMQP09Config, log log.Modular) (*amqp09Reader, 
 
 	if conf.TLS.Enabled {
 		var err error
-		if a.tlsConf, err = conf.TLS.Get(); err != nil {
+		if a.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -169,8 +169,8 @@ func newAMQP09Reader(conf oinput.AMQP09Config, log log.Modular) (*amqp09Reader, 
 
 //------------------------------------------------------------------------------
 
-// ConnectWithContext establishes a connection to an AMQP09 server.
-func (a *amqp09Reader) ConnectWithContext(ctx context.Context) (err error) {
+// Connect establishes a connection to an AMQP09 server.
+func (a *amqp09Reader) Connect(ctx context.Context) (err error) {
 	a.m.Lock()
 	defer a.m.Unlock()
 
@@ -193,12 +193,12 @@ func (a *amqp09Reader) ConnectWithContext(ctx context.Context) (err error) {
 
 	if a.conf.QueueDeclare.Enabled {
 		if _, err = amqpChan.QueueDeclare(
-			a.conf.Queue,                // name of the queue
-			a.conf.QueueDeclare.Durable, // durable
-			false,                       // delete when unused
-			false,                       // exclusive
-			false,                       // noWait
-			nil,                         // arguments
+			a.conf.Queue,                   // name of the queue
+			a.conf.QueueDeclare.Durable,    // durable
+			a.conf.QueueDeclare.AutoDelete, // delete when unused
+			false,                          // exclusive
+			false,                          // noWait
+			nil,                            // arguments
 		); err != nil {
 			return fmt.Errorf("queue Declare: %s", err)
 		}
@@ -265,9 +265,9 @@ func (a *amqp09Reader) disconnect() error {
 
 //------------------------------------------------------------------------------
 
-func amqpSetMetadata(p *message.Part, k string, v interface{}) {
+func amqpSetMetadata(p *message.Part, k string, v any) {
 	var metaValue string
-	var metaKey = strings.ReplaceAll(k, "-", "_")
+	metaKey := strings.ReplaceAll(k, "-", "_")
 
 	switch v := v.(type) {
 	case bool:
@@ -306,12 +306,12 @@ func amqpSetMetadata(p *message.Part, k string, v interface{}) {
 	}
 
 	if metaValue != "" {
-		p.MetaSet(metaKey, metaValue)
+		p.MetaSetMut(metaKey, metaValue)
 	}
 }
 
-// ReadWithContext a new AMQP09 message.
-func (a *amqp09Reader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+// ReadBatch a new AMQP09 message.
+func (a *amqp09Reader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	var c <-chan amqp.Delivery
 
 	a.m.RLock()
@@ -358,7 +358,7 @@ func (a *amqp09Reader) ReadWithContext(ctx context.Context) (*message.Batch, rea
 		amqpSetMetadata(part, "amqp_exchange", data.Exchange)
 		amqpSetMetadata(part, "amqp_routing_key", data.RoutingKey)
 
-		msg.Append(part)
+		msg = append(msg, part)
 	}
 
 	select {
@@ -388,17 +388,11 @@ func (a *amqp09Reader) ReadWithContext(ctx context.Context) (*message.Batch, rea
 	return nil, nil, component.ErrTimeout
 }
 
-// CloseAsync shuts down the AMQP09 input and stops processing requests.
-func (a *amqp09Reader) CloseAsync() {
-	_ = a.disconnect()
+func (a *amqp09Reader) Close(ctx context.Context) error {
+	return a.disconnect()
 }
 
-// WaitForClose blocks until the AMQP09 input has closed down.
-func (a *amqp09Reader) WaitForClose(timeout time.Duration) error {
-	return nil
-}
-
-// reDial connection to amqp with one or more fallback URLs
+// reDial connection to amqp with one or more fallback URLs.
 func (a *amqp09Reader) reDial(urls []string) (conn *amqp.Connection, err error) {
 	for _, u := range urls {
 		conn, err = a.dial(u)
@@ -413,7 +407,7 @@ func (a *amqp09Reader) reDial(urls []string) (conn *amqp.Connection, err error) 
 	return nil, err
 }
 
-// dial attempts to connect to amqp URL
+// dial attempts to connect to amqp URL.
 func (a *amqp09Reader) dial(amqpURL string) (conn *amqp.Connection, err error) {
 	u, err := url.Parse(amqpURL)
 	if err != nil {

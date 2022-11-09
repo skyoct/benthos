@@ -3,23 +3,21 @@ package pure
 import (
 	"context"
 	"strconv"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newCatch(conf.Catch, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("catch", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("catch", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "catch",
 		Categories: []string{
@@ -53,15 +51,15 @@ When messages leave the catch block their fail flags are cleared. This processor
 is useful for when it's possible to recover failed messages, or when special
 actions (such as logging/metrics) are required before dropping them.
 
-More information about error handing can be found [here](/docs/configuration/error_handling).`,
+More information about error handling can be found [here](/docs/configuration/error_handling).`,
 		Config: docs.FieldProcessor("", "").Array().
-			LinterFunc(func(ctx docs.LintContext, line, col int, value interface{}) []docs.Lint {
-				childProcs, ok := value.([]interface{})
+			LinterFunc(func(ctx docs.LintContext, line, col int, value any) []docs.Lint {
+				childProcs, ok := value.([]any)
 				if !ok {
 					return nil
 				}
 				for _, child := range childProcs {
-					childObj, ok := child.(map[string]interface{})
+					childObj, ok := child.(map[string]any)
 					if !ok {
 						continue
 					}
@@ -72,7 +70,7 @@ More information about error handing can be found [here](/docs/configuration/err
 					}
 					if _, exists := childObj["try"]; exists {
 						return []docs.Lint{
-							docs.NewLintError(line, "`catch` block contains a `try` block which will never execute due to errors only being cleared at the end of the `catch`, for more information about nesting `try` within `catch` read: https://www.benthos.dev/docs/components/processors/try#nesting-within-a-catch-block"),
+							docs.NewLintError(line, docs.LintCustom, "`catch` block contains a `try` block which will never execute due to errors only being cleared at the end of the `catch`, for more information about nesting `try` within `catch` read: https://www.benthos.dev/docs/components/processors/try#nesting-within-a-catch-block"),
 						}
 					}
 				}
@@ -90,10 +88,10 @@ type catchProc struct {
 	children []processor.V1
 }
 
-func newCatch(conf []oprocessor.Config, mgr bundle.NewManagement) (*catchProc, error) {
+func newCatch(conf []processor.Config, mgr bundle.NewManagement) (*catchProc, error) {
 	var children []processor.V1
 	for i, pconf := range conf {
-		pMgr := mgr.IntoPath("catch", strconv.Itoa(i)).(bundle.NewManagement)
+		pMgr := mgr.IntoPath("catch", strconv.Itoa(i))
 		proc, err := pMgr.NewProcessor(pconf)
 		if err != nil {
 			return nil, err
@@ -105,24 +103,22 @@ func newCatch(conf []oprocessor.Config, mgr bundle.NewManagement) (*catchProc, e
 	}, nil
 }
 
-func (p *catchProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
-	resultMsgs := make([]*message.Batch, msg.Len())
+func (p *catchProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
+	resultMsgs := make([]message.Batch, msg.Len())
 	_ = msg.Iter(func(i int, p *message.Part) error {
-		tmpMsg := message.QuickBatch(nil)
-		tmpMsg.SetAll([]*message.Part{p})
-		resultMsgs[i] = tmpMsg
+		resultMsgs[i] = message.Batch{p}
 		return nil
 	})
 
 	var res error
-	if resultMsgs, res = oprocessor.ExecuteCatchAll(p.children, resultMsgs...); res != nil || len(resultMsgs) == 0 {
+	if resultMsgs, res = processor.ExecuteCatchAll(ctx, p.children, resultMsgs...); res != nil || len(resultMsgs) == 0 {
 		return nil, res
 	}
 
 	resMsg := message.QuickBatch(nil)
 	for _, m := range resultMsgs {
 		_ = m.Iter(func(i int, p *message.Part) error {
-			resMsg.Append(p)
+			resMsg = append(resMsg, p)
 			return nil
 		})
 	}
@@ -135,20 +131,13 @@ func (p *catchProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg
 		return nil
 	})
 
-	resMsgs := [1]*message.Batch{resMsg}
+	resMsgs := [1]message.Batch{resMsg}
 	return resMsgs[:], nil
 }
 
 func (p *catchProc) Close(ctx context.Context) error {
-	for _, c := range p.children {
-		c.CloseAsync()
-	}
-	deadline, exists := ctx.Deadline()
-	if !exists {
-		deadline = time.Now().Add(time.Second * 5)
-	}
-	for _, c := range p.children {
-		if err := c.WaitForClose(time.Until(deadline)); err != nil {
+	for _, child := range p.children {
+		if err := child.Close(ctx); err != nil {
 			return err
 		}
 	}

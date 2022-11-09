@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 )
@@ -25,9 +23,9 @@ func newDummyReader(confFilePath string) *Reader {
 func TestReaderFileWatching(t *testing.T) {
 	dummyConfig := []byte(`
 input:
-  kafka: {}
+  generate: {}
 output:
-  aws_s3: {}
+  drop: {}
 `)
 
 	confDir := t.TempDir()
@@ -47,7 +45,7 @@ output:
 	}))
 
 	// Watch for configuration changes
-	testMgr, err := manager.NewV2(manager.NewResourceConfig(), nil, log.Noop(), metrics.Noop())
+	testMgr, err := manager.New(manager.NewResourceConfig())
 	require.NoError(t, err)
 	require.NoError(t, rdr.BeginFileWatching(testMgr, true))
 
@@ -61,16 +59,16 @@ output:
 		require.FailNow(t, "Expected a config change to be triggered")
 	}
 
-	assert.Equal(t, "kafka", updatedConf.Input.Type)
-	assert.Equal(t, "aws_s3", updatedConf.Output.Type)
+	assert.Equal(t, "generate", updatedConf.Input.Type)
+	assert.Equal(t, "drop", updatedConf.Output.Type)
 }
 
 func TestReaderFileWatchingSymlinkReplace(t *testing.T) {
 	dummyConfig := []byte(`
 input:
-  kafka: {}
+  generate: {}
 output:
-  aws_s3: {}
+  drop: {}
 `)
 
 	rootDir := t.TempDir()
@@ -98,7 +96,7 @@ output:
 	}))
 
 	// Watch for configuration changes
-	testMgr, err := manager.NewV2(manager.NewResourceConfig(), nil, log.Noop(), metrics.Noop())
+	testMgr, err := manager.New(manager.NewResourceConfig())
 	require.NoError(t, err)
 	require.NoError(t, rdr.BeginFileWatching(testMgr, true))
 
@@ -124,6 +122,6 @@ output:
 		require.FailNow(t, "Expected a config change to be triggered")
 	}
 
-	assert.Equal(t, "kafka", updatedConf.Input.Type)
-	assert.Equal(t, "aws_s3", updatedConf.Output.Type)
+	assert.Equal(t, "generate", updatedConf.Input.Type)
+	assert.Equal(t, "drop", updatedConf.Output.Type)
 }

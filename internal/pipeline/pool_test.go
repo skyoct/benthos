@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/pipeline"
 
 	_ "github.com/benthosdev/benthos/v4/internal/impl/pure"
@@ -111,10 +111,8 @@ func TestPoolBasic(t *testing.T) {
 		t.Fatal("Timed out")
 	}
 
-	proc.CloseAsync()
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
-		t.Error(err)
-	}
+	proc.TriggerCloseNow()
+	require.NoError(t, proc.WaitForClose(ctx))
 }
 
 func TestPoolMultiMsgs(t *testing.T) {
@@ -155,7 +153,7 @@ func TestPoolMultiMsgs(t *testing.T) {
 				if !open {
 					t.Error("Closed early")
 				}
-				act := string(procT.Payload.Get(0).Get())
+				act := string(procT.Payload.Get(0).AsBytes())
 				if _, exists := expMsgs[act]; !exists {
 					t.Errorf("Unexpected result: %v", act)
 				} else {
@@ -186,10 +184,8 @@ func TestPoolMultiMsgs(t *testing.T) {
 		}
 	}
 
-	proc.CloseAsync()
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
-		t.Error(err)
-	}
+	proc.TriggerCloseNow()
+	require.NoError(t, proc.WaitForClose(ctx))
 }
 
 func TestPoolMultiThreads(t *testing.T) {
@@ -258,10 +254,8 @@ func TestPoolMultiThreads(t *testing.T) {
 		}
 	}
 
-	proc.CloseAsync()
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
-		t.Error(err)
-	}
+	proc.TriggerCloseNow()
+	require.NoError(t, proc.WaitForClose(ctx))
 }
 
 func TestPoolMultiNaturalClose(t *testing.T) {
@@ -280,8 +274,5 @@ func TestPoolMultiNaturalClose(t *testing.T) {
 	}
 
 	close(tChan)
-
-	if err := proc.WaitForClose(time.Second * 5); err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, proc.WaitForClose(context.Background()))
 }

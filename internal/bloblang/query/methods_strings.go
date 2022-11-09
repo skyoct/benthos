@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
+	"hash/crc32"
 	"html"
 	"io"
 	"net/url"
@@ -23,12 +25,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/OneOfOne/xxhash"
-	"github.com/itchyny/timefmt-go"
 	"github.com/microcosm-cc/bluemonday"
-	"github.com/rickb777/date/period"
 	"github.com/tilinna/z85"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -48,7 +47,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			return IToBytes(v), nil
 		}, nil
 	},
@@ -69,7 +68,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return cases.Title(language.English).String(t), nil
@@ -163,7 +162,7 @@ var _ = registerSimpleMethod(
 			return nil, fmt.Errorf("unrecognized encoding type: %v", schemeStr)
 		}
 
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var res string
 			var err error
 			switch t := v.(type) {
@@ -244,7 +243,7 @@ var _ = registerSimpleMethod(
 			return nil, fmt.Errorf("unrecognized encoding type: %v", schemeStr)
 		}
 
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var res []byte
 			var err error
 			switch t := v.(type) {
@@ -331,7 +330,7 @@ root.encrypted = this.value.encrypt_aes("ctr", $key, $vector).encode("hex")`,
 		default:
 			return nil, fmt.Errorf("unrecognized encryption type: %v", schemeStr)
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var res string
 			var err error
 			switch t := v.(type) {
@@ -416,7 +415,7 @@ root.decrypted = this.value.decode("hex").decrypt_aes("ctr", $key, $vector).stri
 		default:
 			return nil, fmt.Errorf("unrecognized decryption type: %v", schemeStr)
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var res []byte
 			var err error
 			switch t := v.(type) {
@@ -447,7 +446,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return html.EscapeString(s), nil
 		}), nil
 	},
@@ -477,7 +476,7 @@ var _ = registerSimpleMethod(
 		if err != nil {
 			return nil, err
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return int64(strings.Index(t, substring)), nil
@@ -504,7 +503,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return html.UnescapeString(s), nil
 		}), nil
 	},
@@ -525,7 +524,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return url.QueryEscape(s), nil
 		}), nil
 	},
@@ -546,7 +545,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return url.QueryUnescape(s)
 		}), nil
 	},
@@ -567,8 +566,8 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			arr, ok := v.([]interface{})
+		return func(v any, ctx FunctionContext) (any, error) {
+			arr, ok := v.([]any)
 			if !ok {
 				return nil, NewTypeError(v, ValueArray)
 			}
@@ -600,9 +599,9 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			dir, file := filepath.Split(s)
-			return []interface{}{dir, file}, nil
+			return []any{dir, file}, nil
 		}), nil
 	},
 )
@@ -622,7 +621,7 @@ var _ = registerSimpleMethod(
 		),
 	).VariadicParams(),
 	func(args *ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return fmt.Sprintf(s, args.Raw()...), nil
 		}), nil
 	},
@@ -649,7 +648,7 @@ root.t2 = this.v2.has_prefix("foo")`,
 			return nil, err
 		}
 		prefixB := []byte(prefix)
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return strings.HasPrefix(t, prefix), nil
@@ -682,7 +681,7 @@ root.t2 = this.v2.has_suffix("foo")`,
 			return nil, err
 		}
 		suffixB := []byte(suffix)
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return strings.HasSuffix(t, suffix), nil
@@ -704,7 +703,7 @@ var _ = registerSimpleMethod(
 		`
 Hashes a string or byte array according to a chosen algorithm and returns the result as a byte array. When mapping the result to a JSON field the value should be cast to a string using the method `+"[`string`][methods.string], or encoded using the method [`encode`][methods.encode]"+`, otherwise it will be base64 encoded by default.
 
-Available algorithms are: `+"`hmac_sha1`, `hmac_sha256`, `hmac_sha512`, `md5`, `sha1`, `sha256`, `sha512`, `xxhash64`"+`.
+Available algorithms are: `+"`hmac_sha1`, `hmac_sha256`, `hmac_sha512`, `md5`, `sha1`, `sha256`, `sha512`, `xxhash64`, `crc32`"+`.
 
 The following algorithms require a key, which is specified as a second argument: `+"`hmac_sha1`, `hmac_sha256`, `hmac_sha512`"+`.`,
 		NewExampleSpec("",
@@ -713,9 +712,16 @@ root.h2 = this.value.hash("hmac_sha1","static-key").encode("hex")`,
 			`{"value":"hello world"}`,
 			`{"h1":"2aae6c35c94fcfb415dbe95f408b9ce91ee846ed","h2":"d87e5f068fa08fe90bb95bc7c8344cb809179d76"}`,
 		),
+		NewExampleSpec("The `crc32` algorithm supports options for the polynomial.",
+			`root.h1 = this.value.hash(algorithm: "crc32", polynomial: "Castagnoli").encode("hex")
+root.h2 = this.value.hash(algorithm: "crc32", polynomial: "Koopman").encode("hex")`,
+			`{"value":"hello world"}`,
+			`{"h1":"c99465aa","h2":"df373d3c"}`,
+		),
 	).
 		Param(ParamString("algorithm", "The hasing algorithm to use.")).
-		Param(ParamString("key", "An optional key to use.").Optional()),
+		Param(ParamString("key", "An optional key to use.").Optional()).
+		Param(ParamString("polynomial", "An optional polynomial key to use when selecting the `crc32` algorithm, otherwise ignored. Options are `IEEE` (default), `Castagnoli` and `Koopman`").Default("IEEE")),
 	func(args *ParsedParams) (simpleMethod, error) {
 		algorithmStr, err := args.FieldString("algorithm")
 		if err != nil {
@@ -728,6 +734,10 @@ root.h2 = this.value.hash("hmac_sha1","static-key").encode("hex")`,
 		}
 		if keyParam != nil {
 			key = []byte(*keyParam)
+		}
+		poly, err := args.FieldString("polynomial")
+		if err != nil {
+			return nil, err
 		}
 		var hashFn func([]byte) ([]byte, error)
 		switch algorithmStr {
@@ -788,10 +798,26 @@ root.h2 = this.value.hash("hmac_sha1","static-key").encode("hex")`,
 				_, _ = h.Write(b)
 				return []byte(strconv.FormatUint(h.Sum64(), 10)), nil
 			}
+		case "crc32":
+			hashFn = func(b []byte) ([]byte, error) {
+				var hasher hash.Hash
+				switch poly {
+				case "IEEE":
+					hasher = crc32.NewIEEE()
+				case "Castagnoli":
+					hasher = crc32.New(crc32.MakeTable(crc32.Castagnoli))
+				case "Koopman":
+					hasher = crc32.New(crc32.MakeTable(crc32.Koopman))
+				default:
+					return nil, fmt.Errorf("unsupported crc32 hash key %q", poly)
+				}
+				hasher.Write(b)
+				return hasher.Sum(nil), nil
+			}
 		default:
 			return nil, fmt.Errorf("unrecognized hash type: %v", algorithmStr)
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var res []byte
 			var err error
 			switch t := v.(type) {
@@ -831,8 +857,8 @@ root.joined_numbers = this.numbers.map_each(this.string()).join(",")`,
 		if delimArg != nil {
 			delim = *delimArg
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			slice, ok := v.([]interface{})
+		return func(v any, ctx FunctionContext) (any, error) {
+			slice, ok := v.([]any)
 			if !ok {
 				return nil, NewTypeError(v, ValueArray)
 			}
@@ -871,7 +897,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return strings.ToUpper(t), nil
@@ -899,7 +925,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return strings.ToLower(t), nil
@@ -930,7 +956,7 @@ var _ = registerSimpleMethod(
 )
 
 func parseCSVMethod(*ParsedParams) (simpleMethod, error) {
-	return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+	return func(v any, ctx FunctionContext) (any, error) {
 		var csvBytes []byte
 		switch t := v.(type) {
 		case string:
@@ -950,7 +976,7 @@ func parseCSVMethod(*ParsedParams) (simpleMethod, error) {
 			return nil, errors.New("zero records were parsed")
 		}
 
-		records := make([]interface{}, 0, len(strRecords)-1)
+		records := make([]any, 0, len(strRecords)-1)
 		headers := strRecords[0]
 		if len(headers) == 0 {
 			return nil, fmt.Errorf("no headers found on first row")
@@ -959,7 +985,7 @@ func parseCSVMethod(*ParsedParams) (simpleMethod, error) {
 			if len(headers) != len(strRecord) {
 				return nil, fmt.Errorf("record on line %v: record mismatch with headers", j)
 			}
-			obj := make(map[string]interface{}, len(strRecord))
+			obj := make(map[string]any, len(strRecord))
 			for i, r := range strRecord {
 				obj[headers[i]] = r
 			}
@@ -975,6 +1001,8 @@ func parseCSVMethod(*ParsedParams) (simpleMethod, error) {
 var _ = registerSimpleMethod(
 	NewMethodSpec(
 		"parse_json", "",
+	).Param(
+		ParamBool("use_number", "An optional flag that when set makes parsing numbers as json.Number instead of the default float64.").Optional(),
 	).InCategory(
 		MethodCategoryParsing,
 		"Attempts to parse a string as a JSON document and returns the result.",
@@ -983,9 +1011,18 @@ var _ = registerSimpleMethod(
 			`{"doc":"{\"foo\":\"bar\"}"}`,
 			`{"doc":{"foo":"bar"}}`,
 		),
+		NewExampleSpec("",
+			`root.doc = this.doc.parse_json(use_number: true)`,
+			`{"doc":"{\"foo\":\"11380878173205700000000000000000000000000000000\"}"}`,
+			`{"doc":{"foo":"11380878173205700000000000000000000000000000000"}}`,
+		),
 	),
-	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+	func(args *ParsedParams) (simpleMethod, error) {
+		useNumber, err := args.FieldOptionalBool("use_number")
+		if err != nil {
+			return nil, err
+		}
+		return func(v any, ctx FunctionContext) (any, error) {
 			var jsonBytes []byte
 			switch t := v.(type) {
 			case string:
@@ -995,8 +1032,12 @@ var _ = registerSimpleMethod(
 			default:
 				return nil, NewTypeError(v, ValueString)
 			}
-			var jObj interface{}
-			if err := json.Unmarshal(jsonBytes, &jObj); err != nil {
+			var jObj any
+			decoder := json.NewDecoder(bytes.NewReader(jsonBytes))
+			if useNumber != nil && *useNumber {
+				decoder.UseNumber()
+			}
+			if err := decoder.Decode(&jObj); err != nil {
 				return nil, fmt.Errorf("failed to parse value as JSON: %w", err)
 			}
 			return jObj, nil
@@ -1017,7 +1058,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var yamlBytes []byte
 			switch t := v.(type) {
 			case string:
@@ -1027,7 +1068,7 @@ var _ = registerSimpleMethod(
 			default:
 				return nil, NewTypeError(v, ValueString)
 			}
-			var sObj interface{}
+			var sObj any
 			if err := yaml.Unmarshal(yamlBytes, &sObj); err != nil {
 				return nil, fmt.Errorf("failed to parse value as YAML: %w", err)
 			}
@@ -1055,7 +1096,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			return yaml.Marshal(v)
 		}, nil
 	},
@@ -1103,7 +1144,7 @@ var _ = registerSimpleMethod(
 		if indentOpt != nil {
 			indent = *indentOpt
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			b, err := json.Marshal(v)
 			if err != nil {
 				return nil, err
@@ -1114,151 +1155,6 @@ var _ = registerSimpleMethod(
 				return nil, err
 			}
 			return out.Bytes(), nil
-		}, nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"parse_duration", "",
-	).InCategory(
-		MethodCategoryTime,
-		`Attempts to parse a string as a duration and returns an integer of nanoseconds. A duration string is a possibly signed sequence of decimal numbers, each with an optional fraction and a unit suffix, such as "300ms", "-1.5h" or "2h45m". Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".`,
-		NewExampleSpec("",
-			`root.delay_for_ns = this.delay_for.parse_duration()`,
-			`{"delay_for":"50us"}`,
-			`{"delay_for_ns":50000}`,
-		),
-		NewExampleSpec("",
-			`root.delay_for_s = this.delay_for.parse_duration() / 1000000000`,
-			`{"delay_for":"2h"}`,
-			`{"delay_for_s":7200}`,
-		),
-	),
-	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
-			d, err := time.ParseDuration(s)
-			if err != nil {
-				return nil, err
-			}
-			return d.Nanoseconds(), nil
-		}), nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"parse_duration_iso8601", "",
-	).InCategory(
-		MethodCategoryTime,
-		`Attempts to parse a string using ISO-8601 rules as a duration and returns an integer of nanoseconds. A duration string is represented by the format "P[n]Y[n]M[n]DT[n]H[n]M[n]S" or "P[n]W". In these representations, the "[n]" is replaced by the value for each of the date and time elements that follow the "[n]". For example, "P3Y6M4DT12H30M5S" represents a duration of "three years, six months, four days, twelve hours, thirty minutes, and five seconds". The last field of the format allows fractions with one decimal place, so "P3.5S" will return 3500000000ns. Any additional decimals will be truncated.`,
-		NewExampleSpec("Arbitrary ISO-8601 duration string to nanoseconds:",
-			`root.delay_for_ns = this.delay_for.parse_duration_iso8601()`,
-			`{"delay_for":"P3Y6M4DT12H30M5S"}`,
-			`{"delay_for_ns":110839937000000000}`,
-		),
-		NewExampleSpec("Two hours ISO-8601 duration string to seconds:",
-			`root.delay_for_s = this.delay_for.parse_duration_iso8601() / 1000000000`,
-			`{"delay_for":"PT2H"}`,
-			`{"delay_for_s":7200}`,
-		),
-		NewExampleSpec("Two and a half seconds ISO-8601 duration string to seconds:",
-			`root.delay_for_s = this.delay_for.parse_duration_iso8601() / 1000000000`,
-			`{"delay_for":"PT2.5S"}`,
-			`{"delay_for_s":2.5}`,
-		),
-	).Beta(),
-	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
-			// No need to normalise the output since we need it expressed as nanoseconds.
-			d, err := period.Parse(s, false)
-			if err != nil {
-				return nil, err
-			}
-			// The conversion is likely imprecise when the period specifies years, months and days.
-			// See method documentation for details on precision.
-			return d.DurationApprox().Nanoseconds(), nil
-		}), nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"parse_timestamp", "",
-	).InCategory(
-		MethodCategoryTime,
-		"Attempts to parse a string as a timestamp following a specified format and outputs a string following ISO 8601, which can then be fed into `format_timestamp`. The input format is defined by showing how the reference time, defined to be Mon Jan 2 15:04:05 -0700 MST 2006, would be displayed if it were the value.",
-		NewExampleSpec("",
-			`root.doc.timestamp = this.doc.timestamp.parse_timestamp("2006-Jan-02")`,
-			`{"doc":{"timestamp":"2020-Aug-14"}}`,
-			`{"doc":{"timestamp":"2020-08-14T00:00:00Z"}}`,
-		),
-	).Beta().Param(ParamString("format", "The format of the target string.")),
-	func(args *ParsedParams) (simpleMethod, error) {
-		layout, err := args.FieldString("format")
-		if err != nil {
-			return nil, err
-		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			var str string
-			switch t := v.(type) {
-			case []byte:
-				str = string(t)
-			case string:
-				str = t
-			default:
-				return nil, NewTypeError(v, ValueString)
-			}
-			ut, err := time.Parse(layout, str)
-			if err != nil {
-				return nil, err
-			}
-			return ut.Format(time.RFC3339Nano), nil
-		}, nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"parse_timestamp_strptime", "",
-	).InCategory(
-		MethodCategoryTime,
-		"Attempts to parse a string as a timestamp following a specified strptime-compatible format and outputs a string following ISO 8601, which can then be fed into `format_timestamp`.",
-		NewExampleSpec(
-			"The format consists of zero or more conversion specifiers and ordinary characters (except `%`). All ordinary characters are copied to the output string without modification. Each conversion specification begins with a `%` character followed by the character that determines the behaviour of the specifier. Please refer to [man 3 strptime](https://linux.die.net/man/3/strptime) for the list of format specifiers.",
-			`root.doc.timestamp = this.doc.timestamp.parse_timestamp_strptime("%Y-%b-%d")`,
-			`{"doc":{"timestamp":"2020-Aug-14"}}`,
-			`{"doc":{"timestamp":"2020-08-14T00:00:00Z"}}`,
-		),
-	).Beta().Param(ParamString("format", "The format of the target string.")),
-	func(args *ParsedParams) (simpleMethod, error) {
-		layout, err := args.FieldString("format")
-		if err != nil {
-			return nil, err
-		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			var str string
-			switch t := v.(type) {
-			case []byte:
-				str = string(t)
-			case string:
-				str = t
-			default:
-				return nil, NewTypeError(v, ValueString)
-			}
-			ut, err := timefmt.Parse(str, layout)
-			if err != nil {
-				return nil, err
-			}
-			return ut.Format(time.RFC3339Nano), nil
 		}, nil
 	},
 )
@@ -1283,7 +1179,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				runes := []rune(t)
@@ -1308,183 +1204,6 @@ var _ = registerSimpleMethod(
 
 var _ = registerSimpleMethod(
 	NewMethodSpec(
-		"format_timestamp", "",
-	).InCategory(
-		MethodCategoryTime,
-		"Attempts to format a timestamp value as a string according to a specified format, or ISO 8601 by default. Timestamp values can either be a numerical unix time in seconds (with up to nanosecond precision via decimals), or a string in ISO 8601 format.",
-		NewExampleSpec("",
-			`root.something_at = (this.created_at + 300).format_timestamp()`,
-			// `{"created_at":1597405526}`,
-			// `{"something_at":"2020-08-14T11:50:26.371Z"}`,
-		),
-		NewExampleSpec(
-			"An optional string argument can be used in order to specify the output format of the timestamp. The format is defined by showing how the reference time, defined to be Mon Jan 2 15:04:05 -0700 MST 2006, would be displayed if it were the value.",
-			`root.something_at = (this.created_at + 300).format_timestamp("2006-Jan-02 15:04:05")`,
-			// `{"created_at":1597405526}`,
-			// `{"something_at":"2020-Aug-14 11:50:26"}`,
-		),
-		NewExampleSpec(
-			"A second optional string argument can also be used in order to specify a timezone, otherwise the timezone of the input string is used, or in the case of unix timestamps the local timezone is used.",
-			`root.something_at = this.created_at.format_timestamp(format: "2006-Jan-02 15:04:05", tz: "UTC")`,
-
-			`{"created_at":1597405526}`,
-			`{"something_at":"2020-Aug-14 11:45:26"}`,
-
-			`{"created_at":"2020-08-14T11:50:26.371Z"}`,
-			`{"something_at":"2020-Aug-14 11:50:26"}`,
-		),
-		NewExampleSpec(
-			"And `format_timestamp` supports up to nanosecond precision with floating point timestamp values.",
-			`root.something_at = this.created_at.format_timestamp("2006-Jan-02 15:04:05.999999", "UTC")`,
-
-			`{"created_at":1597405526.123456}`,
-			`{"something_at":"2020-Aug-14 11:45:26.123456"}`,
-
-			`{"created_at":"2020-08-14T11:50:26.371Z"}`,
-			`{"something_at":"2020-Aug-14 11:50:26.371"}`,
-		),
-	).Beta().
-		Param(ParamString("format", "The output format to use.").Default(time.RFC3339Nano)).
-		Param(ParamString("tz", "An optional timezone to use, otherwise the timezone of the input string is used, or in the case of unix timestamps the local timezone is used.").Optional()),
-	func(args *ParsedParams) (simpleMethod, error) {
-		layout, err := args.FieldString("format")
-		if err != nil {
-			return nil, err
-		}
-		var timezone *time.Location
-		tzOpt, err := args.FieldOptionalString("tz")
-		if err != nil {
-			return nil, err
-		}
-		if tzOpt != nil {
-			if timezone, err = time.LoadLocation(*tzOpt); err != nil {
-				return nil, fmt.Errorf("failed to parse timezone location name: %w", err)
-			}
-		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			target, err := IGetTimestamp(v)
-			if err != nil {
-				return nil, err
-			}
-			if timezone != nil {
-				target = target.In(timezone)
-			}
-			return target.Format(layout), nil
-		}, nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"format_timestamp_strftime", "",
-	).InCategory(
-		MethodCategoryTime,
-		"Attempts to format a timestamp value as a string according to a specified strftime-compatible format. Timestamp values can either be a numerical unix time in seconds (with up to nanosecond precision via decimals), or a string in ISO 8601 format.",
-		NewExampleSpec(
-			"The format consists of zero or more conversion specifiers and ordinary characters (except `%`). All ordinary characters are copied to the output string without modification. Each conversion specification begins with `%` character followed by the character that determines the behaviour of the specifier. Please refer to [man 3 strftime](https://linux.die.net/man/3/strftime) for the list of format specifiers.",
-			`root.something_at = (this.created_at + 300).format_timestamp_strftime("%Y-%b-%d %H:%M:%S")`,
-			// `{"created_at":1597405526}`,
-			// `{"something_at":"2020-Aug-14 11:50:26"}`,
-		),
-		NewExampleSpec(
-			"A second optional string argument can also be used in order to specify a timezone, otherwise the timezone of the input string is used, or in the case of unix timestamps the local timezone is used.",
-			`root.something_at = this.created_at.format_timestamp_strftime("%Y-%b-%d %H:%M:%S", "UTC")`,
-
-			`{"created_at":1597405526}`,
-			`{"something_at":"2020-Aug-14 11:45:26"}`,
-
-			`{"created_at":"2020-08-14T11:50:26.371Z"}`,
-			`{"something_at":"2020-Aug-14 11:50:26"}`,
-		),
-	).Beta().
-		Param(ParamString("format", "The output format to use.")).
-		Param(ParamString("tz", "An optional timezone to use, otherwise the timezone of the input string is used.").Optional()),
-	func(args *ParsedParams) (simpleMethod, error) {
-		layout, err := args.FieldString("format")
-		if err != nil {
-			return nil, err
-		}
-		var timezone *time.Location
-		tzOpt, err := args.FieldOptionalString("tz")
-		if err != nil {
-			return nil, err
-		}
-		if tzOpt != nil {
-			if timezone, err = time.LoadLocation(*tzOpt); err != nil {
-				return nil, fmt.Errorf("failed to parse timezone location name: %w", err)
-			}
-		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			target, err := IGetTimestamp(v)
-			if err != nil {
-				return nil, err
-			}
-			if timezone != nil {
-				target = target.In(timezone)
-			}
-			return timefmt.Format(target, layout), nil
-		}, nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"format_timestamp_unix", "",
-	).InCategory(
-		MethodCategoryTime,
-		"Attempts to format a timestamp value as a unix timestamp. Timestamp values can either be a numerical unix time in seconds (with up to nanosecond precision via decimals), or a string in ISO 8601 format. The [`parse_timestamp`](#parse_timestamp) method can be used in order to parse different timestamp formats.",
-		NewExampleSpec("",
-			`root.created_at_unix = this.created_at.format_timestamp_unix()`,
-			`{"created_at":"2009-11-10T23:00:00Z"}`,
-			`{"created_at_unix":1257894000}`,
-		),
-	).Beta(),
-	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			target, err := IGetTimestamp(v)
-			if err != nil {
-				return nil, err
-			}
-
-			return target.Unix(), nil
-		}, nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
-		"format_timestamp_unix_nano", "",
-	).InCategory(
-		MethodCategoryTime,
-		"Attempts to format a timestamp value as a unix timestamp with nanosecond precision. Timestamp values can either be a numerical unix time in seconds (with up to nanosecond precision via decimals), or a string in ISO 8601 format. The [`parse_timestamp`](#parse_timestamp) method can be used in order to parse different timestamp formats.",
-		NewExampleSpec("",
-			`root.created_at_unix = this.created_at.format_timestamp_unix_nano()`,
-			`{"created_at":"2009-11-10T23:00:00Z"}`,
-			`{"created_at_unix":1257894000000000000}`,
-		),
-	).Beta(),
-	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			target, err := IGetTimestamp(v)
-			if err != nil {
-				return nil, err
-			}
-
-			return target.UnixNano(), nil
-		}, nil
-	},
-)
-
-//------------------------------------------------------------------------------
-
-var _ = registerSimpleMethod(
-	NewMethodSpec(
 		"quote", "",
 	).InCategory(
 		MethodCategoryStrings,
@@ -1496,7 +1215,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return strconv.Quote(s), nil
 		}), nil
 	},
@@ -1517,7 +1236,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return stringMethod(func(s string) (interface{}, error) {
+		return stringMethod(func(s string) (any, error) {
 			return strconv.Unquote(s)
 		}), nil
 	},
@@ -1559,7 +1278,7 @@ func replaceAllImpl(args *ParsedParams) (simpleMethod, error) {
 		return nil, err
 	}
 	oldB, newB := []byte(oldStr), []byte(newStr)
-	return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+	return func(v any, ctx FunctionContext) (any, error) {
 		switch t := v.(type) {
 		case string:
 			return strings.ReplaceAll(t, oldStr, newStr), nil
@@ -1623,7 +1342,7 @@ func replaceAllManyImpl(args *ParsedParams) (simpleMethod, error) {
 		replacePairsBytes = append(replacePairsBytes, [2][]byte{[]byte(from), []byte(to)})
 	}
 
-	return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+	return func(v any, ctx FunctionContext) (any, error) {
 		switch t := v.(type) {
 		case string:
 			for _, pair := range replacePairs {
@@ -1663,18 +1382,18 @@ var _ = registerSimpleMethod(
 		if err != nil {
 			return nil, err
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			var result []interface{}
+		return func(v any, ctx FunctionContext) (any, error) {
+			var result []any
 			switch t := v.(type) {
 			case string:
 				matches := re.FindAllString(t, -1)
-				result = make([]interface{}, 0, len(matches))
+				result = make([]any, 0, len(matches))
 				for _, str := range matches {
 					result = append(result, str)
 				}
 			case []byte:
 				matches := re.FindAll(t, -1)
-				result = make([]interface{}, 0, len(matches))
+				result = make([]any, 0, len(matches))
 				for _, str := range matches {
 					result = append(result, string(str))
 				}
@@ -1709,14 +1428,14 @@ var _ = registerSimpleMethod(
 		if err != nil {
 			return nil, err
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			var result []interface{}
+		return func(v any, ctx FunctionContext) (any, error) {
+			var result []any
 			switch t := v.(type) {
 			case string:
 				groupMatches := re.FindAllStringSubmatch(t, -1)
-				result = make([]interface{}, 0, len(groupMatches))
+				result = make([]any, 0, len(groupMatches))
 				for _, matches := range groupMatches {
-					r := make([]interface{}, 0, len(matches))
+					r := make([]any, 0, len(matches))
 					for _, str := range matches {
 						r = append(r, str)
 					}
@@ -1724,9 +1443,9 @@ var _ = registerSimpleMethod(
 				}
 			case []byte:
 				groupMatches := re.FindAllSubmatch(t, -1)
-				result = make([]interface{}, 0, len(groupMatches))
+				result = make([]any, 0, len(groupMatches))
 				for _, matches := range groupMatches {
-					r := make([]interface{}, 0, len(matches))
+					r := make([]any, 0, len(matches))
 					for _, str := range matches {
 						r = append(r, string(str))
 					}
@@ -1774,8 +1493,8 @@ var _ = registerSimpleMethod(
 				groups[i] = fmt.Sprintf("%v", i)
 			}
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			result := make(map[string]interface{}, len(groups))
+		return func(v any, ctx FunctionContext) (any, error) {
+			result := make(map[string]any, len(groups))
 			switch t := v.(type) {
 			case string:
 				groupMatches := re.FindStringSubmatch(t)
@@ -1831,14 +1550,14 @@ var _ = registerSimpleMethod(
 				groups[i] = fmt.Sprintf("%v", i)
 			}
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
-			var result []interface{}
+		return func(v any, ctx FunctionContext) (any, error) {
+			var result []any
 			switch t := v.(type) {
 			case string:
 				reMatches := re.FindAllStringSubmatch(t, -1)
-				result = make([]interface{}, 0, len(reMatches))
+				result = make([]any, 0, len(reMatches))
 				for _, matches := range reMatches {
-					obj := make(map[string]interface{}, len(groups))
+					obj := make(map[string]any, len(groups))
 					for i, match := range matches {
 						key := groups[i]
 						obj[key] = match
@@ -1847,9 +1566,9 @@ var _ = registerSimpleMethod(
 				}
 			case []byte:
 				reMatches := re.FindAllSubmatch(t, -1)
-				result = make([]interface{}, 0, len(reMatches))
+				result = make([]any, 0, len(reMatches))
 				for _, matches := range reMatches {
-					obj := make(map[string]interface{}, len(groups))
+					obj := make(map[string]any, len(groups))
 					for i, match := range matches {
 						key := groups[i]
 						obj[key] = match
@@ -1889,7 +1608,7 @@ var _ = registerSimpleMethod(
 		if err != nil {
 			return nil, err
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			var result bool
 			switch t := v.(type) {
 			case string:
@@ -1944,7 +1663,7 @@ func reReplaceAllImpl(args *ParsedParams) (simpleMethod, error) {
 		return nil, err
 	}
 	withBytes := []byte(with)
-	return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+	return func(v any, ctx FunctionContext) (any, error) {
 		var result string
 		switch t := v.(type) {
 		case string:
@@ -1978,18 +1697,18 @@ var _ = registerSimpleMethod(
 			return nil, err
 		}
 		delimB := []byte(delim)
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				bits := strings.Split(t, delim)
-				vals := make([]interface{}, 0, len(bits))
+				vals := make([]any, 0, len(bits))
 				for _, b := range bits {
 					vals = append(vals, b)
 				}
 				return vals, nil
 			case []byte:
 				bits := bytes.Split(t, delimB)
-				vals := make([]interface{}, 0, len(bits))
+				vals := make([]any, 0, len(bits))
 				for _, b := range bits {
 					vals = append(vals, b)
 				}
@@ -2020,7 +1739,7 @@ var _ = registerSimpleMethod(
 		),
 	),
 	func(*ParsedParams) (simpleMethod, error) {
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			return IToString(v), nil
 		}, nil
 	},
@@ -2061,7 +1780,7 @@ var _ = registerSimpleMethod(
 			}
 			p = p.AllowElements(tagStrs...)
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				return p.Sanitize(t), nil
@@ -2093,7 +1812,7 @@ root.description = this.description.trim()`,
 		if err != nil {
 			return nil, err
 		}
-		return func(v interface{}, ctx FunctionContext) (interface{}, error) {
+		return func(v any, ctx FunctionContext) (any, error) {
 			switch t := v.(type) {
 			case string:
 				if cutset == nil {

@@ -13,6 +13,7 @@ linters-settings:
   errcheck:
     exclude-functions:
       - (*github.com/benthosdev/benthos/v4/internal/batch.Error).Failed
+      - (*github.com/benthosdev/benthos/v4/public/service.BatchError).Failed
   gocritic:
     enabled-tags:
       - diagnostic
@@ -35,25 +36,24 @@ linters:
   disable-all: true
   enable:
     # Default linters reported by `golangci-lint help linters` in v1.41.1
-    - deadcode
-    - errcheck
+    # Disabled for Go 1.18
     - gosimple
+    - staticcheck
+    - unused
+    - errcheck
     - govet
     - ineffassign
-    - staticcheck
-    - structcheck
     - typecheck
-    - unused
-    - varcheck
     # Extra linters:
+    # Disabled for Go 1.18
+    # - wastedassign
+    - stylecheck
     - gofmt
     - goimports
     - gocritic
     - revive
-    - stylecheck
     - unconvert
     - durationcheck
-    - wastedassign
     - depguard
     # - bodyclose
     # - gosec

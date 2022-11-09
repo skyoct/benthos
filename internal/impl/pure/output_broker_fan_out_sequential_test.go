@@ -48,8 +48,8 @@ func TestBasicFanOutSequential(t *testing.T) {
 		for j := 0; j < nOutputs; j++ {
 			select {
 			case ts := <-mockOutputs[j].TChan:
-				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
-					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
+				if !bytes.Equal(ts.Payload.Get(0).AsBytes(), content[0]) {
+					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).AsBytes(), content[0])
 				}
 				go func() {
 					require.NoError(t, ts.Ack(tCtx, nil))
@@ -66,8 +66,11 @@ func TestBasicFanOutSequential(t *testing.T) {
 		}
 	}
 
-	oTM.CloseAsync()
-	assert.NoError(t, oTM.WaitForClose(time.Second*5))
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	oTM.TriggerCloseNow()
+	assert.NoError(t, oTM.WaitForClose(ctx))
 }
 
 func TestFanOutSequentialBlock(t *testing.T) {
@@ -117,5 +120,8 @@ func TestFanOutSequentialBlock(t *testing.T) {
 	}
 
 	close(readChan)
-	require.NoError(t, oTM.WaitForClose(time.Second*5))
+
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+	require.NoError(t, oTM.WaitForClose(ctx))
 }

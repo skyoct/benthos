@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -21,7 +22,7 @@ type awsKinesisRecordBatcher struct {
 	batchPolicy  *policy.Batcher
 	checkpointer *checkpoint.Capped
 
-	flushedMessage *message.Batch
+	flushedMessage message.Batch
 
 	batchedSequence string
 
@@ -47,19 +48,19 @@ func (k *kinesisReader) newAWSKinesisRecordBatcher(streamID, shardID, sequence s
 
 func (a *awsKinesisRecordBatcher) AddRecord(r *kinesis.Record) bool {
 	p := message.NewPart(r.Data)
-	p.MetaSet("kinesis_stream", a.streamID)
-	p.MetaSet("kinesis_shard", a.shardID)
+	p.MetaSetMut("kinesis_stream", a.streamID)
+	p.MetaSetMut("kinesis_shard", a.shardID)
 	if r.PartitionKey != nil {
-		p.MetaSet("kinesis_partition_key", *r.PartitionKey)
+		p.MetaSetMut("kinesis_partition_key", *r.PartitionKey)
 	}
-	p.MetaSet("kinesis_sequence_number", *r.SequenceNumber)
+	p.MetaSetMut("kinesis_sequence_number", *r.SequenceNumber)
 
 	a.batchedSequence = *r.SequenceNumber
 	if a.flushedMessage != nil {
 		// Upstream shouldn't really be adding records if a prior flush was
 		// unsuccessful. However, we can still accommodate this by appending it
 		// to the flushed message.
-		a.flushedMessage.Append(p)
+		a.flushedMessage = append(a.flushedMessage, p)
 		return true
 	}
 	return a.batchPolicy.Add(p)
@@ -71,14 +72,14 @@ func (a *awsKinesisRecordBatcher) HasPendingMessage() bool {
 
 func (a *awsKinesisRecordBatcher) FlushMessage(ctx context.Context) (asyncMessage, error) {
 	if a.flushedMessage == nil {
-		if a.flushedMessage = a.batchPolicy.Flush(); a.flushedMessage == nil {
+		if a.flushedMessage = a.batchPolicy.Flush(ctx); a.flushedMessage == nil {
 			return asyncMessage{}, nil
 		}
 	}
 
 	resolveFn, err := a.checkpointer.Track(ctx, a.batchedSequence, int64(a.flushedMessage.Len()))
 	if err != nil {
-		if err == component.ErrTimeout {
+		if errors.Is(err, component.ErrTimeout) {
 			err = nil
 		}
 		return asyncMessage{}, err
@@ -113,9 +114,9 @@ func (a *awsKinesisRecordBatcher) GetSequence() string {
 	return seq
 }
 
-func (a *awsKinesisRecordBatcher) Close(blocked bool) {
+func (a *awsKinesisRecordBatcher) Close(ctx context.Context, blocked bool) {
 	if blocked {
 		a.ackedWG.Wait()
 	}
-	a.batchPolicy.CloseAsync()
+	_ = a.batchPolicy.Close(ctx)
 }

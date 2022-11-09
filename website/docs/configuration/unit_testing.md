@@ -32,7 +32,7 @@ input:
 
 pipeline:
   processors:
-  - bloblang: '"%vend".format(content().uppercase().string())'
+  - mapping: '"%vend".format(content().uppercase().string())'
 
 output:
   aws_s3:
@@ -53,7 +53,7 @@ tests:
           example_key: example metadata value
     output_batches:
       -
-        - content_equals: example content
+        - content_equals: EXAMPLE CONTENTend
           metadata_equals:
             example_key: example metadata value
 ```
@@ -130,7 +130,7 @@ tests:
           example_key: example metadata value
     output_batches:
       -
-        - content_equals: example content
+        - content_equals: EXAMPLE CONTENTend
           metadata_equals:
             example_key: example metadata value
 ```
@@ -168,7 +168,7 @@ A map of key/value pairs that sets the metadata values of the message.
 ### `bloblang`
 
 ```yml
-bloblang: 'this.age > 10 && meta("foo").length() > 0'
+bloblang: 'this.age > 10 && @foo.length() > 0'
 ```
 
 Executes a [Bloblang expression][bloblang] on a message, if the result is anything other than a boolean equalling `true` the test fails.
@@ -241,7 +241,7 @@ Checks that both the message and the condition are valid JSON documents, and tha
 
 Executing tests for a specific config can be done by pointing the subcommand `test` at either the config to be tested or its test definition, e.g. `benthos test ./config.yaml` and `benthos test ./config_benthos_test.yaml` are equivalent.
 
-In order to execute all tests of a directory simply point `test` to that directory, e.g. `benthos test ./foo` will execute all tests found in the directory `foo`. In order to walk a directory tree and execute all tests found you can use the shortcut `./...`, e.g. `benthos test ./...` will execute all tests found in the current directory, any child directories, and so on.
+The `test` subcommand also supports wildcard patterns e.g. `benthos test ./foo/*.yaml` will execute all tests within matching files. In order to walk a directory tree and execute all tests found you can use the shortcut `./...`, e.g. `benthos test ./...` will execute all tests found in the current directory, any child directories, and so on.
 
 If you want to allow components to write logs at a provided level to stdout when running the tests, you can use
 `benthos test --log <level>`. Please consult the [logger docs][logger] for further details.
@@ -255,15 +255,15 @@ Sometimes you'll want to write tests for a series of processors, where one or mo
 ```yaml
 pipeline:
   processors:
-    - bloblang: 'root = "simon says: " + content()'
+    - mapping: 'root = "simon says: " + content()'
     - label: get_foobar_api
       http:
         url: http://example.com/foobar
         verb: GET
-    - bloblang: 'root = content().uppercase()'
+    - mapping: 'root = content().uppercase()'
 ```
 
-Rather than create a fake service for the `http` processor to interact with we can define a mock in our test definition that replaces it with a `bloblang` processor. Mocks are configured as a map of labels that identify a processor to replace and the config to replace it with:
+Rather than create a fake service for the `http` processor to interact with we can define a mock in our test definition that replaces it with a [`mapping` processor][processors.mapping]. Mocks are configured as a map of labels that identify a processor to replace and the config to replace it with:
 
 ```yaml
 tests:
@@ -271,14 +271,14 @@ tests:
     target_processors: '/pipeline/processors'
     mocks:
       get_foobar_api:
-        bloblang: 'root = content().string() + " this is some mock content"'
+        mapping: 'root = content().string() + " this is some mock content"'
     input_batch:
       - content: "hello world"
     output_batches:
       - - content_equals: "SIMON SAYS: HELLO WORLD THIS IS SOME MOCK CONTENT"
 ```
 
-With the above test definition the `http` processor will be swapped out for `bloblang: 'root = content().string() + " this is some mock content"'`. For the purposes of mocking it is recommended that you use a `bloblang` processor that simply mutates the message in a way that you would expect the mocked processor to.
+With the above test definition the `http` processor will be swapped out for `mapping: 'root = content().string() + " this is some mock content"'`. For the purposes of mocking it is recommended that you use a [`mapping` processor][processors.mapping] that simply mutates the message in a way that you would expect the mocked processor to.
 
 > Note: It's not currently possible to mock components that are imported as separate resource files (using `--resource`/`-r`). It is recommended that you mock these by maintaining separate definitions for test purposes (`-r "./test/*.yaml"`).
 
@@ -292,7 +292,7 @@ tests:
     target_processors: '/pipeline/processors'
     mocks:
       /pipeline/processors/1:
-        bloblang: 'root = content().string() + " this is some mock content"'
+        mapping: 'root = content().string() + " this is some mock content"'
     input_batch:
       - content: "hello world"
     output_batches:
@@ -356,7 +356,7 @@ Default: `""`
 
 ### `tests[].mocks`
 
-An optional map of processors to mock. Keys should contain either a label or a JSON pointer of a processor that should be mocked. Values should contain a processor definition, which will replace the mocked processor. Most of the time you'll want to use a `bloblang` processor here, and use it to create a result that emulates the target processor.
+An optional map of processors to mock. Keys should contain either a label or a JSON pointer of a processor that should be mocked. Values should contain a processor definition, which will replace the mocked processor. Most of the time you'll want to use a [`mapping` processor][processors.mapping] here, and use it to create a result that emulates the target processor.
 
 
 Type: map of `unknown`  
@@ -366,16 +366,16 @@ Type: map of `unknown`
 
 mocks:
   get_foobar_api:
-    bloblang: root = content().string() + " this is some mock content"
+    mapping: root = content().string() + " this is some mock content"
 
 mocks:
   /pipeline/processors/1:
-    bloblang: root = content().string() + " this is some mock content"
+    mapping: root = content().string() + " this is some mock content"
 ```
 
 ### `tests[].input_batch`
 
-Sorry! This field is missing documentation.
+Define a batch of messages to feed into your test, specify either an `input_batch` or a series of `input_batches`.
 
 
 Type: list of `object`  
@@ -425,9 +425,61 @@ A map of metadata key/values to add to the input message.
 
 Type: map of `string`  
 
+### `tests[].input_batches`
+
+Define a series of batches of messages to feed into your test, specify either an `input_batch` or a series of `input_batches`.
+
+
+Type: `object`  
+
+### `tests[].input_batches[][].content`
+
+The raw content of the input message.
+
+
+Type: `string`  
+Default: `""`  
+
+### `tests[].input_batches[][].json_content`
+
+Sets the raw content of the message to a JSON document matching the structure of the value.
+
+
+Type: `unknown`  
+
+```yml
+# Examples
+
+json_content:
+  bar:
+    - element1
+    - 10
+  foo: foo value
+```
+
+### `tests[].input_batches[][].file_content`
+
+Sets the raw content of the message by reading a file. The path of the file should be relative to the path of the test file.
+
+
+Type: `string`  
+
+```yml
+# Examples
+
+file_content: ./foo/bar.txt
+```
+
+### `tests[].input_batches[][].metadata`
+
+A map of metadata key/values to add to the input message.
+
+
+Type: map of `string`  
+
 ### `tests[].output_batches`
 
-Sorry! This field is missing documentation.
+List of output batches.
 
 
 Type: `object`  
@@ -445,7 +497,7 @@ Default: `""`
 A map of metadata key/values to add to the input message.
 
 
-Type: map of `string`  
+Type: map of `unknown`  
 
 ### `tests[].output_batches[][].bloblang`
 
@@ -457,7 +509,7 @@ Type: `string`
 ```yml
 # Examples
 
-bloblang: this.age > 10 && meta("foo").length() > 0
+bloblang: this.age > 10 && @foo.length() > 0
 ```
 
 ### `tests[].output_batches[][].content_equals`
@@ -485,7 +537,7 @@ content_matches: ^foo [a-z]+ bar$
 Checks a map of metadata keys to values against the metadata stored in the message. If there is a value mismatch between a key of the condition versus the message metadata this condition will fail.
 
 
-Type: map of `string`  
+Type: map of `unknown`  
 
 ```yml
 # Examples
@@ -548,6 +600,20 @@ json_contains:
   key: value
 ```
 
+### `tests[].output_batches[][].file_json_contains`
+
+Checks that both the message and the file contents are valid JSON documents, and that the message is a superset of the condition. Will ignore formatting and ordering differences. The path of the file should be relative to the path of the test file.
+
+
+Type: `string`  
+
+```yml
+# Examples
+
+file_json_contains: ./foo/bar.json
+```
+
 [json-pointer]: https://tools.ietf.org/html/rfc6901
 [bloblang]: /docs/guides/bloblang/about
 [logger]: /docs/components/logger/about
+[processors.mapping]: /docs/components/processors/mapping

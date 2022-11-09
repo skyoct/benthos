@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -15,6 +14,8 @@ import (
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/mapping"
+	"github.com/benthosdev/benthos/v4/internal/bloblang/query"
+	"github.com/benthosdev/benthos/v4/internal/filepath/ifs"
 	"github.com/benthosdev/benthos/v4/internal/message"
 )
 
@@ -80,6 +81,12 @@ func (c *ConditionsMap) UnmarshalYAML(value *yaml.Node) error {
 				return fmt.Errorf("line %v: %v", v.Line, err)
 			}
 			cond = val
+		case "file_json_contains":
+			val := FileJSONContainsCondition("")
+			if err := v.Decode(&val); err != nil {
+				return fmt.Errorf("line %v: %v", v.Line, err)
+			}
+			cond = val
 		case "metadata_equals":
 			val := MetadataEqualsCondition{}
 			if err := v.Decode(&val); err != nil {
@@ -139,8 +146,7 @@ func parseBloblangCondition(n yaml.Node) (*bloblangCondition, error) {
 
 // Check this condition against a message part.
 func (b *bloblangCondition) Check(p *message.Part) error {
-	msg := message.QuickBatch(nil)
-	msg.Append(p)
+	msg := message.Batch{p}
 	res, err := b.m.QueryPart(0, msg)
 	if err != nil {
 		return err
@@ -159,7 +165,7 @@ type ContentEqualsCondition string
 
 // Check this condition against a message part.
 func (c ContentEqualsCondition) Check(p *message.Part) error {
-	if exp, act := string(c), string(p.Get()); exp != act {
+	if exp, act := string(c), string(p.AsBytes()); exp != act {
 		return fmt.Errorf("content mismatch\n  expected: %v\n  received: %v", blue(exp), red(act))
 	}
 	return nil
@@ -174,8 +180,8 @@ type ContentMatchesCondition string
 // Check this condition against a message part.
 func (c ContentMatchesCondition) Check(p *message.Part) error {
 	re := regexp.MustCompile(string(c))
-	if !re.MatchString(string(p.Get())) {
-		return fmt.Errorf("pattern mismatch\n   pattern: %v\n  received: %v", blue(string(c)), red(string(p.Get())))
+	if !re.MatchString(string(p.AsBytes())) {
+		return fmt.Errorf("pattern mismatch\n   pattern: %v\n  received: %v", blue(string(c)), red(string(p.AsBytes())))
 	}
 	return nil
 }
@@ -190,7 +196,7 @@ type ContentJSONEqualsCondition string
 // Check this condition against a message part.
 func (c ContentJSONEqualsCondition) Check(p *message.Part) error {
 	jdopts := jsondiff.DefaultConsoleOptions()
-	diff, explanation := jsondiff.Compare(p.Get(), []byte(c), &jdopts)
+	diff, explanation := jsondiff.Compare(p.AsBytes(), []byte(c), &jdopts)
 	if diff != jsondiff.FullMatch {
 		return fmt.Errorf("JSON content mismatch\n%v", explanation)
 	}
@@ -201,13 +207,13 @@ func (c ContentJSONEqualsCondition) Check(p *message.Part) error {
 
 // ContentJSONContainsCondition is a string condition that tests the string against
 // the contents of a message using JSON comparison and is true if the expected
-// and actual documents are both valid JSON, and the actual is a superset of the expected
+// and actual documents are both valid JSON, and the actual is a superset of the expected.
 type ContentJSONContainsCondition string
 
 // Check this condition against a message part.
 func (c ContentJSONContainsCondition) Check(p *message.Part) error {
 	jdopts := jsondiff.DefaultConsoleOptions()
-	diff, explanation := jsondiff.Compare(p.Get(), []byte(c), &jdopts)
+	diff, explanation := jsondiff.Compare(p.AsBytes(), []byte(c), &jdopts)
 	if diff != jsondiff.FullMatch && diff != jsondiff.SupersetMatch {
 		return fmt.Errorf("JSON superset mismatch\n%v", explanation)
 	}
@@ -228,12 +234,12 @@ func (c FileEqualsCondition) Check(p *message.Part) error {
 func (c FileEqualsCondition) checkFrom(dir string, p *message.Part) error {
 	relPath := filepath.Join(dir, string(c))
 
-	fileContent, err := os.ReadFile(relPath)
+	fileContent, err := ifs.ReadFile(ifs.OS(), relPath)
 	if err != nil {
 		return fmt.Errorf("failed to read comparison file: %w", err)
 	}
 
-	if exp, act := string(fileContent), string(p.Get()); exp != act {
+	if exp, act := string(fileContent), string(p.AsBytes()); exp != act {
 		return fmt.Errorf("content mismatch\n  expected: %v\n  received: %v", blue(exp), red(act))
 	}
 	return nil
@@ -254,7 +260,7 @@ func (c FileJSONEqualsCondition) Check(p *message.Part) error {
 func (c FileJSONEqualsCondition) checkFrom(dir string, p *message.Part) error {
 	relPath := filepath.Join(dir, string(c))
 
-	fileContent, err := os.ReadFile(relPath)
+	fileContent, err := ifs.ReadFile(ifs.OS(), relPath)
 	if err != nil {
 		return fmt.Errorf("failed to read comparison JSON file: %w", err)
 	}
@@ -265,14 +271,42 @@ func (c FileJSONEqualsCondition) checkFrom(dir string, p *message.Part) error {
 
 //------------------------------------------------------------------------------
 
+// FileJSONContainsCondition is a string condition that tests the contents of the file
+// against the contents of a message using JSON comparison and is true if the expected
+// and actual documents are both valid JSON and the actual is a superset of the expected.
+type FileJSONContainsCondition string
+
+// Check this condition against a message part.
+func (c FileJSONContainsCondition) Check(p *message.Part) error {
+	return c.checkFrom("", p)
+}
+
+func (c FileJSONContainsCondition) checkFrom(dir string, p *message.Part) error {
+	relPath := filepath.Join(dir, string(c))
+
+	fileContent, err := ifs.ReadFile(ifs.OS(), relPath)
+	if err != nil {
+		return fmt.Errorf("failed to read comparison JSON file: %w", err)
+	}
+
+	comparison := ContentJSONContainsCondition(fileContent)
+	return comparison.Check(p)
+}
+
+//------------------------------------------------------------------------------
+
 // MetadataEqualsCondition checks whether a metadata keys contents matches a
 // value.
-type MetadataEqualsCondition map[string]string
+type MetadataEqualsCondition map[string]any
 
 // Check this condition against a message part.
 func (m MetadataEqualsCondition) Check(p *message.Part) error {
-	for k, v := range m {
-		if exp, act := v, p.MetaGet(k); exp != act {
+	for k, exp := range m {
+		act, exists := p.MetaGetMut(k)
+		if !exists {
+			return fmt.Errorf("metadata key '%v' expected but not found", k)
+		}
+		if !query.ICompare(exp, act) {
 			return fmt.Errorf("metadata key '%v' mismatch\n  expected: %v\n  received: %v", k, blue(exp), red(act))
 		}
 	}
@@ -286,11 +320,11 @@ func (m MetadataEqualsCondition) Check(p *message.Part) error {
 // complex nodes are converted to a JSON representation
 // assumption is that only the subset of YAML compatible
 // with JSON will be present; decode errors will trigger
-// if this is not the case
+// if this is not the case.
 func yamlNodeToTestString(n *yaml.Node, tgt *string) error {
 	switch n.Kind {
 	case yaml.SequenceNode:
-		var aval []interface{}
+		var aval []any
 		err := n.Decode(&aval)
 		if err != nil {
 			return err
@@ -299,7 +333,7 @@ func yamlNodeToTestString(n *yaml.Node, tgt *string) error {
 		*tgt = bytes.NewBuffer(bval).String()
 		return err
 	case yaml.MappingNode:
-		var mval map[string]interface{}
+		var mval map[string]any
 		err := n.Decode(&mval)
 		if err != nil {
 			return err

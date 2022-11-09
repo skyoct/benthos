@@ -16,25 +16,23 @@ import (
 	batchInternal "github.com/benthosdev/benthos/v4/internal/batch"
 	"github.com/benthosdev/benthos/v4/internal/batch/policy"
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
+	"github.com/benthosdev/benthos/v4/internal/bloblang/query"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/batcher"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/kafka/sasl"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
 	"github.com/benthosdev/benthos/v4/internal/metadata"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newKafkaOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newKafkaOutput), docs.ComponentSpec{
 		Name:    "kafka",
 		Summary: `The kafka output type writes a batch of messages to Kafka brokers and waits for acknowledgement before propagating it back to the input.`,
 		Description: output.Description(true, true, `
@@ -80,7 +78,7 @@ Unfortunately this error message will appear for a wide range of connection prob
 			docs.FieldString("timeout", "The maximum period of time to wait for message sends before abandoning the request and retrying.").Advanced(),
 			docs.FieldBool("retry_as_batch", "When enabled forces an entire batch of messages to be retried if any individual message fails on a send, otherwise only the individual messages that failed are retried. Disabling this helps to reduce message duplicates during intermittent errors, but also makes it impossible to guarantee strict ordering of messages.").Advanced(),
 			policy.FieldSpec(),
-		).WithChildren(retries.FieldSpecs()...).ChildDefaultAndTypesFromStruct(ooutput.NewKafkaConfig()),
+		).WithChildren(retries.FieldSpecs()...).ChildDefaultAndTypesFromStruct(output.NewKafkaConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -90,32 +88,35 @@ Unfortunately this error message will appear for a wide range of connection prob
 	}
 }
 
-func newKafkaOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	k, err := NewKafkaWriter(conf.Kafka, mgr, log)
+func newKafkaOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	k, err := NewKafkaWriter(conf.Kafka, mgr)
 	if err != nil {
 		return nil, err
 	}
-	w, err := ooutput.NewAsyncWriter("kafka", conf.Kafka.MaxInFlight, k, log, stats)
+	w, err := output.NewAsyncWriter("kafka", conf.Kafka.MaxInFlight, k, mgr)
 	if err != nil {
 		return nil, err
 	}
 
 	if conf.Kafka.InjectTracingMap != "" {
-		aw, ok := w.(*ooutput.AsyncWriter)
+		aw, ok := w.(*output.AsyncWriter)
 		if !ok {
 			return nil, fmt.Errorf("unable to set an inject_tracing_map due to wrong type: %T", w)
 		}
-		if err = aw.SetInjectTracingMap(conf.Kafka.InjectTracingMap); err != nil {
+
+		injectTracingMap, err := mgr.BloblEnvironment().NewMapping(conf.Kafka.InjectTracingMap)
+		if err != nil {
 			return nil, fmt.Errorf("failed to initialize inject tracing map: %v", err)
 		}
+		aw.SetInjectTracingMap(injectTracingMap)
 	}
 
-	return ooutput.NewBatcherFromConfig(conf.Kafka.Batching, w, mgr, log, stats)
+	return batcher.NewFromConfig(conf.Kafka.Batching, w, mgr)
 }
 
 type kafkaWriter struct {
 	log log.Modular
-	mgr interop.Manager
+	mgr bundle.NewManagement
 
 	backoffCtor func() backoff.BackOff
 
@@ -124,7 +125,7 @@ type kafkaWriter struct {
 
 	addresses []string
 	version   sarama.KafkaVersion
-	conf      ooutput.KafkaConfig
+	conf      output.KafkaConfig
 
 	key       *field.Expression
 	topic     *field.Expression
@@ -141,7 +142,7 @@ type kafkaWriter struct {
 }
 
 // NewKafkaWriter returns a kafka writer.
-func NewKafkaWriter(conf ooutput.KafkaConfig, mgr interop.Manager, log log.Modular) (ooutput.AsyncSink, error) {
+func NewKafkaWriter(conf output.KafkaConfig, mgr bundle.NewManagement) (output.AsyncSink, error) {
 	compression, err := strToCompressionCodec(conf.Compression)
 	if err != nil {
 		return nil, err
@@ -159,7 +160,7 @@ func NewKafkaWriter(conf ooutput.KafkaConfig, mgr interop.Manager, log log.Modul
 	}
 
 	k := kafkaWriter{
-		log: log,
+		log: mgr.Logger(),
 		mgr: mgr,
 
 		conf:          conf,
@@ -194,7 +195,7 @@ func NewKafkaWriter(conf ooutput.KafkaConfig, mgr interop.Manager, log log.Modul
 
 	if conf.TLS.Enabled {
 		var err error
-		if k.tlsConf, err = conf.TLS.Get(); err != nil {
+		if k.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -259,10 +260,10 @@ func strToPartitioner(str string) (sarama.PartitionerConstructor, error) {
 func (k *kafkaWriter) buildSystemHeaders(part *message.Part) []sarama.RecordHeader {
 	if k.version.IsAtLeast(sarama.V0_11_0_0) {
 		out := []sarama.RecordHeader{}
-		_ = k.metaFilter.Iter(part, func(k, v string) error {
+		_ = k.metaFilter.Iter(part, func(k string, v any) error {
 			out = append(out, sarama.RecordHeader{
 				Key:   []byte(k),
-				Value: []byte(v),
+				Value: []byte(query.IToString(v)),
 			})
 			return nil
 		})
@@ -295,8 +296,8 @@ func (k *kafkaWriter) buildUserDefinedHeaders(staticHeaders map[string]string) [
 
 //------------------------------------------------------------------------------
 
-// ConnectWithContext attempts to establish a connection to a Kafka broker.
-func (k *kafkaWriter) ConnectWithContext(ctx context.Context) error {
+// Connect attempts to establish a connection to a Kafka broker.
+func (k *kafkaWriter) Connect(ctx context.Context) error {
 	k.connMut.Lock()
 	defer k.connMut.Unlock()
 
@@ -339,9 +340,9 @@ func (k *kafkaWriter) ConnectWithContext(ctx context.Context) error {
 	return err
 }
 
-// WriteWithContext will attempt to write a message to Kafka, wait for
+// WriteBatch will attempt to write a message to Kafka, wait for
 // acknowledgement, and returns an error if applicable.
-func (k *kafkaWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+func (k *kafkaWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	k.connMut.RLock()
 	producer := k.producer
 	k.connMut.RUnlock()
@@ -359,7 +360,7 @@ func (k *kafkaWriter) WriteWithContext(ctx context.Context, msg *message.Batch) 
 		key := k.key.Bytes(i, msg)
 		nextMsg := &sarama.ProducerMessage{
 			Topic:    k.topic.String(i, msg),
-			Value:    sarama.ByteEncoder(p.Get()),
+			Value:    sarama.ByteEncoder(p.AsBytes()),
 			Headers:  append(k.buildSystemHeaders(p), userDefinedHeaders...),
 			Metadata: i, // Store the original index for later reference.
 		}
@@ -390,7 +391,6 @@ func (k *kafkaWriter) WriteWithContext(ctx context.Context, msg *message.Batch) 
 		msgs = append(msgs, nextMsg)
 		return nil
 	})
-
 	if err != nil {
 		return err
 	}
@@ -446,21 +446,18 @@ func (k *kafkaWriter) WriteWithContext(ctx context.Context, msg *message.Batch) 
 	return nil
 }
 
-// CloseAsync shuts down the Kafka writer and stops processing messages.
-func (k *kafkaWriter) CloseAsync() {
-	go func() {
-		k.connMut.Lock()
-		if k.producer != nil {
-			k.producer.Close()
-			k.producer = nil
-		}
-		k.connMut.Unlock()
-	}()
-}
+// Close shuts down the Kafka writer and stops processing messages.
+func (k *kafkaWriter) Close(context.Context) error {
+	k.connMut.Lock()
+	defer k.connMut.Unlock()
 
-// WaitForClose blocks until the Kafka writer has closed down.
-func (k *kafkaWriter) WaitForClose(timeout time.Duration) error {
-	return nil
+	var err error
+	if k.producer != nil {
+		err = k.producer.Close()
+		k.producer = nil
+	}
+
+	return err
 }
 
 //------------------------------------------------------------------------------

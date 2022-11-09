@@ -9,21 +9,19 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	jsonschema "github.com/xeipuuv/gojsonschema"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newJSONSchema(conf.JSONSchema, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2ToV1Processor("json_schema", p, mgr.Metrics()), nil
+		return processor.NewV2ToV1Processor("json_schema", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "json_schema",
 		Categories: []string{
@@ -76,7 +74,7 @@ pipeline:
     - log:
         level: ERROR
         message: "Schema validation failed due to: ${!error()}"
-    - bloblang: 'root = deleted()' # Drop messages that fail
+    - mapping: 'root = deleted()' # Drop messages that fail
 ` + "```" + `
 
 If a payload being processed looked like:
@@ -90,7 +88,7 @@ dropped.`,
 		Config: docs.FieldComponent().WithChildren(
 			docs.FieldString("schema", "A schema to apply. Use either this or the `schema_path` field."),
 			docs.FieldString("schema_path", "The path of a schema document to apply. Use either this or the `schema` field."),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewJSONSchemaConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewJSONSchemaConfig()),
 	})
 	if err != nil {
 		panic(err)
@@ -102,7 +100,7 @@ type jsonSchemaProc struct {
 	schema *jsonschema.Schema
 }
 
-func newJSONSchema(conf oprocessor.JSONSchemaConfig, mgr interop.Manager) (processor.V2, error) {
+func newJSONSchema(conf processor.JSONSchemaConfig, mgr bundle.NewManagement) (processor.V2, error) {
 	var schema *jsonschema.Schema
 	var err error
 
@@ -136,7 +134,7 @@ func newJSONSchema(conf oprocessor.JSONSchemaConfig, mgr interop.Manager) (proce
 // ProcessMessage applies the processor to a message, either creating >0
 // resulting messages or a response to be sent back to the message source.
 func (s *jsonSchemaProc) Process(ctx context.Context, part *message.Part) ([]*message.Part, error) {
-	jsonPart, err := part.JSON()
+	jsonPart, err := part.AsStructured()
 	if err != nil {
 		s.log.Debugf("Failed to parse part into json: %v", err)
 		return nil, err

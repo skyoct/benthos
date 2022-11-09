@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -8,28 +9,28 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	bmanager "github.com/benthosdev/benthos/v4/internal/manager"
-	"github.com/benthosdev/benthos/v4/internal/manager/mock"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 )
 
 func harmlessConf() stream.Config {
 	c := stream.NewConfig()
-	c.Input.Type = "http_server"
-	c.Output.Type = "http_server"
+	c.Input.Type = "generate"
+	c.Input.Generate.Mapping = "root = deleted()"
+	c.Output.Type = "drop"
 	return c
 }
 
 func TestTypeBasicOperations(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := New(res)
 
-	if err := mgr.Update("foo", harmlessConf(), time.Second); err == nil {
+	if err := mgr.Update(ctx, "foo", harmlessConf()); err == nil {
 		t.Error("Expected error on empty update")
 	}
 	if _, err := mgr.Read("foo"); err == nil {
@@ -54,7 +55,7 @@ func TestTypeBasicOperations(t *testing.T) {
 	newConf := harmlessConf()
 	newConf.Buffer.Type = "memory"
 
-	if err := mgr.Update("foo", newConf, time.Second); err != nil {
+	if err := mgr.Update(ctx, "foo", newConf); err != nil {
 		t.Error(err)
 	}
 
@@ -66,14 +67,14 @@ func TestTypeBasicOperations(t *testing.T) {
 		t.Errorf("Unexpected config: %v != %v", act, exp)
 	}
 
-	if err := mgr.Delete("foo", time.Second); err != nil {
+	if err := mgr.Delete(ctx, "foo"); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Delete("foo", time.Second); err == nil {
+	if err := mgr.Delete(ctx, "foo"); err == nil {
 		t.Error("Expected error on duplicate delete")
 	}
 
-	if err := mgr.Stop(time.Second * 5); err != nil {
+	if err := mgr.Stop(ctx); err != nil {
 		t.Error(err)
 	}
 
@@ -83,19 +84,20 @@ func TestTypeBasicOperations(t *testing.T) {
 }
 
 func TestTypeBasicClose(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := New(res)
 
 	conf := harmlessConf()
-	conf.Output.Type = output.TypeNanomsg
-
 	if err := mgr.Create("foo", conf); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := mgr.Stop(time.Second); err != nil {
+	if err := mgr.Stop(ctx); err != nil {
 		t.Error(err)
 	}
 

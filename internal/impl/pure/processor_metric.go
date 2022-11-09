@@ -1,26 +1,24 @@
 package pure
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		return newMetricProcessor(conf, mgr, mgr.Logger(), mgr.Metrics())
 	}, docs.ComponentSpec{
 		Name: "metric",
@@ -48,7 +46,7 @@ Custom metrics such as these are emitted along with Benthos internal metrics, wh
 				},
 			).IsInterpolated().Map(),
 			docs.FieldString("value", "For some metric types specifies a value to set, increment.").IsInterpolated(),
-		).ChildDefaultAndTypesFromStruct(oprocessor.NewMetricConfig()),
+		).ChildDefaultAndTypesFromStruct(processor.NewMetricConfig()),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title:   "Counter",
@@ -146,7 +144,7 @@ Equivalent to ` + "`gauge`" + ` where instead the metric is a timing. It is reco
 }
 
 type metricProcessor struct {
-	conf  oprocessor.Config
+	conf  processor.Config
 	log   log.Modular
 	stats metrics.Type
 
@@ -161,16 +159,18 @@ type metricProcessor struct {
 	mGaugeVec   metrics.StatGaugeVec
 	mTimerVec   metrics.StatTimerVec
 
-	handler func(string, int, *message.Batch) error
+	handler func(string, int, message.Batch) error
 }
 
-type labels []label
-type label struct {
-	name  string
-	value *field.Expression
-}
+type (
+	labels []label
+	label  struct {
+		name  string
+		value *field.Expression
+	}
+)
 
-func (l *label) val(index int, msg *message.Batch) string {
+func (l *label) val(index int, msg message.Batch) string {
 	return l.value.String(index, msg)
 }
 
@@ -182,7 +182,7 @@ func (l labels) names() []string {
 	return names
 }
 
-func (l labels) values(index int, msg *message.Batch) []string {
+func (l labels) values(index int, msg message.Batch) []string {
 	var values []string
 	for i := range l {
 		values = append(values, l[i].val(index, msg))
@@ -190,7 +190,7 @@ func (l labels) values(index int, msg *message.Batch) []string {
 	return values
 }
 
-func newMetricProcessor(conf oprocessor.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (processor.V1, error) {
+func newMetricProcessor(conf processor.Config, mgr bundle.NewManagement, log log.Modular, stats metrics.Type) (processor.V1, error) {
 	value, err := mgr.BloblEnvironment().NewField(conf.Metric.Value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse value expression: %v", err)
@@ -261,7 +261,7 @@ func newMetricProcessor(conf oprocessor.Config, mgr interop.Manager, log log.Mod
 	return m, nil
 }
 
-func (m *metricProcessor) handleCounter(val string, index int, msg *message.Batch) error {
+func (m *metricProcessor) handleCounter(val string, index int, msg message.Batch) error {
 	if len(m.labels) > 0 {
 		m.mCounterVec.With(m.labels.values(index, msg)...).Incr(1)
 	} else {
@@ -270,7 +270,7 @@ func (m *metricProcessor) handleCounter(val string, index int, msg *message.Batc
 	return nil
 }
 
-func (m *metricProcessor) handleCounterBy(val string, index int, msg *message.Batch) error {
+func (m *metricProcessor) handleCounterBy(val string, index int, msg message.Batch) error {
 	i, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
 		return err
@@ -286,7 +286,7 @@ func (m *metricProcessor) handleCounterBy(val string, index int, msg *message.Ba
 	return nil
 }
 
-func (m *metricProcessor) handleGauge(val string, index int, msg *message.Batch) error {
+func (m *metricProcessor) handleGauge(val string, index int, msg message.Batch) error {
 	i, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
 		return err
@@ -302,7 +302,7 @@ func (m *metricProcessor) handleGauge(val string, index int, msg *message.Batch)
 	return nil
 }
 
-func (m *metricProcessor) handleTimer(val string, index int, msg *message.Batch) error {
+func (m *metricProcessor) handleTimer(val string, index int, msg message.Batch) error {
 	i, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
 		return err
@@ -318,7 +318,7 @@ func (m *metricProcessor) handleTimer(val string, index int, msg *message.Batch)
 	return nil
 }
 
-func (m *metricProcessor) ProcessMessage(msg *message.Batch) ([]*message.Batch, error) {
+func (m *metricProcessor) ProcessBatch(ctx context.Context, msg message.Batch) ([]message.Batch, error) {
 	_ = msg.Iter(func(i int, p *message.Part) error {
 		value := m.value.String(i, msg)
 		if err := m.handler(value, i, msg); err != nil {
@@ -326,12 +326,9 @@ func (m *metricProcessor) ProcessMessage(msg *message.Batch) ([]*message.Batch, 
 		}
 		return nil
 	})
-	return []*message.Batch{msg}, nil
+	return []message.Batch{msg}, nil
 }
 
-func (m *metricProcessor) CloseAsync() {
-}
-
-func (m *metricProcessor) WaitForClose(timeout time.Duration) error {
+func (m *metricProcessor) Close(ctx context.Context) error {
 	return nil
 }

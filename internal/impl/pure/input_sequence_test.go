@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	bmock "github.com/benthosdev/benthos/v4/internal/manager/mock"
 )
 
 func writeFiles(t *testing.T, dir string, nameToContent map[string]string) {
@@ -25,7 +25,7 @@ func writeFiles(t *testing.T, dir string, nameToContent map[string]string) {
 }
 
 func TestSequenceHappy(t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Minute)
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
 	defer done()
 
 	t.Parallel()
@@ -40,11 +40,11 @@ func TestSequenceHappy(t *testing.T) {
 
 	writeFiles(t, tmpDir, files)
 
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "sequence"
 
 	for _, k := range []string{"f1", "f2", "f3"} {
-		inConf := oinput.NewConfig()
+		inConf := input.NewConfig()
 		inConf.Type = "file"
 		inConf.File.Paths = []string{filepath.Join(tmpDir, k)}
 		conf.Sequence.Inputs = append(conf.Sequence.Inputs, inConf)
@@ -65,8 +65,8 @@ consumeLoop:
 				break consumeLoop
 			}
 			assert.Equal(t, 1, tran.Payload.Len())
-			act = append(act, string(tran.Payload.Get(0).Get()))
-			require.NoError(t, tran.Ack(tCtx, nil))
+			act = append(act, string(tran.Payload.Get(0).AsBytes()))
+			require.NoError(t, tran.Ack(ctx, nil))
 		case <-time.After(time.Minute):
 			t.Fatalf("Failed to consume message after: %v", act)
 		}
@@ -74,12 +74,12 @@ consumeLoop:
 
 	assert.Equal(t, exp, act)
 
-	rdr.CloseAsync()
-	assert.NoError(t, rdr.WaitForClose(time.Second))
+	rdr.TriggerStopConsuming()
+	assert.NoError(t, rdr.WaitForClose(ctx))
 }
 
 func TestSequenceJoins(t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Minute)
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
 	defer done()
 
 	t.Parallel()
@@ -96,13 +96,13 @@ func TestSequenceJoins(t *testing.T) {
 
 	writeFiles(t, tmpDir, files)
 
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "sequence"
 	conf.Sequence.ShardedJoin.IDPath = "id"
 	conf.Sequence.ShardedJoin.Iterations = 1
-	conf.Sequence.ShardedJoin.Type = "full-outter"
+	conf.Sequence.ShardedJoin.Type = "full-outer"
 
-	csvConf := oinput.NewConfig()
+	csvConf := input.NewConfig()
 	csvConf.Type = "csv"
 	csvConf.CSVFile.Paths = []string{
 		filepath.Join(tmpDir, "csv1"),
@@ -110,7 +110,7 @@ func TestSequenceJoins(t *testing.T) {
 	}
 	conf.Sequence.Inputs = append(conf.Sequence.Inputs, csvConf)
 	for _, k := range []string{"ndjson1"} {
-		inConf := oinput.NewConfig()
+		inConf := input.NewConfig()
 		inConf.Type = "file"
 		inConf.File.Paths = []string{filepath.Join(tmpDir, k)}
 		conf.Sequence.Inputs = append(conf.Sequence.Inputs, inConf)
@@ -133,8 +133,8 @@ consumeLoop:
 				break consumeLoop
 			}
 			assert.Equal(t, 1, tran.Payload.Len())
-			act = append(act, string(tran.Payload.Get(0).Get()))
-			require.NoError(t, tran.Ack(tCtx, nil))
+			act = append(act, string(tran.Payload.Get(0).AsBytes()))
+			require.NoError(t, tran.Ack(ctx, nil))
 		case <-time.After(time.Minute):
 			t.Fatalf("Failed to consume message after: %v", act)
 		}
@@ -144,12 +144,12 @@ consumeLoop:
 	sort.Strings(act)
 	assert.Equal(t, exp, act)
 
-	rdr.CloseAsync()
-	assert.NoError(t, rdr.WaitForClose(time.Second))
+	rdr.TriggerStopConsuming()
+	assert.NoError(t, rdr.WaitForClose(ctx))
 }
 
 func TestSequenceJoinsMergeStrategies(t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Minute)
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
 	defer done()
 
 	t.Parallel()
@@ -219,25 +219,25 @@ func TestSequenceJoinsMergeStrategies(t *testing.T) {
 				"final.csv": test.finalFile,
 			})
 
-			conf := oinput.NewConfig()
+			conf := input.NewConfig()
 			conf.Type = "sequence"
 			conf.Sequence.ShardedJoin.IDPath = "id"
 			conf.Sequence.ShardedJoin.MergeStrategy = test.mergeStrat
 			if test.flushOnFinal {
-				conf.Sequence.ShardedJoin.Type = "outter"
+				conf.Sequence.ShardedJoin.Type = "outer"
 			} else {
-				conf.Sequence.ShardedJoin.Type = "full-outter"
+				conf.Sequence.ShardedJoin.Type = "full-outer"
 			}
 			conf.Sequence.ShardedJoin.Iterations = 1
 
-			csvConf := oinput.NewConfig()
+			csvConf := input.NewConfig()
 			csvConf.Type = "csv"
 			for k := range test.files {
 				csvConf.CSVFile.Paths = append(csvConf.CSVFile.Paths, filepath.Join(tmpDir, k))
 			}
 			conf.Sequence.Inputs = append(conf.Sequence.Inputs, csvConf)
 
-			finalConf := oinput.NewConfig()
+			finalConf := input.NewConfig()
 			finalConf.Type = "csv"
 			finalConf.CSVFile.Paths = []string{filepath.Join(tmpDir, "final.csv")}
 			conf.Sequence.Inputs = append(conf.Sequence.Inputs, finalConf)
@@ -255,8 +255,8 @@ func TestSequenceJoinsMergeStrategies(t *testing.T) {
 						break consumeLoop
 					}
 					assert.Equal(t, 1, tran.Payload.Len())
-					act = append(act, string(tran.Payload.Get(0).Get()))
-					require.NoError(t, tran.Ack(tCtx, nil))
+					act = append(act, string(tran.Payload.Get(0).AsBytes()))
+					require.NoError(t, tran.Ack(ctx, nil))
 				case <-time.After(time.Minute):
 					t.Fatalf("Failed to consume message after: %v", act)
 				}
@@ -266,8 +266,8 @@ func TestSequenceJoinsMergeStrategies(t *testing.T) {
 			sort.Strings(act)
 			assert.Equal(t, exp, act)
 
-			rdr.CloseAsync()
-			assert.NoError(t, rdr.WaitForClose(time.Second))
+			rdr.TriggerStopConsuming()
+			assert.NoError(t, rdr.WaitForClose(ctx))
 		})
 	}
 }
@@ -276,7 +276,7 @@ func TestSequenceJoinsBig(t *testing.T) {
 	t.Skip()
 	t.Parallel()
 
-	tCtx, done := context.WithTimeout(context.Background(), time.Minute)
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
 	defer done()
 
 	tmpDir := t.TempDir()
@@ -290,18 +290,18 @@ func TestSequenceJoinsBig(t *testing.T) {
 	csvFile, err := os.Create(csvPath)
 	require.NoError(t, err)
 
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "sequence"
 	conf.Sequence.ShardedJoin.IDPath = "id"
 	conf.Sequence.ShardedJoin.Iterations = 5
-	conf.Sequence.ShardedJoin.Type = "full-outter"
+	conf.Sequence.ShardedJoin.Type = "full-outer"
 
-	csvConf := oinput.NewConfig()
+	csvConf := input.NewConfig()
 	csvConf.Type = "csv"
 	csvConf.CSVFile.Paths = []string{csvPath}
 	conf.Sequence.Inputs = append(conf.Sequence.Inputs, csvConf)
 
-	jsonConf := oinput.NewConfig()
+	jsonConf := input.NewConfig()
 	jsonConf.Type = "file"
 	jsonConf.File.Paths = []string{jsonPath}
 	jsonConf.File.Codec = "lines"
@@ -340,8 +340,8 @@ consumeLoop:
 				break consumeLoop
 			}
 			assert.Equal(t, 1, tran.Payload.Len())
-			act = append(act, string(tran.Payload.Get(0).Get()))
-			require.NoError(t, tran.Ack(tCtx, nil))
+			act = append(act, string(tran.Payload.Get(0).AsBytes()))
+			require.NoError(t, tran.Ack(ctx, nil))
 		case <-time.After(time.Minute):
 			t.Fatalf("Failed to consume message after: %v", act)
 		}
@@ -351,12 +351,12 @@ consumeLoop:
 	sort.Strings(act)
 	assert.Equal(t, exp, act)
 
-	rdr.CloseAsync()
-	assert.NoError(t, rdr.WaitForClose(time.Second))
+	rdr.TriggerStopConsuming()
+	assert.NoError(t, rdr.WaitForClose(ctx))
 }
 
 func TestSequenceSad(t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Minute)
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
 	defer done()
 
 	t.Parallel()
@@ -370,11 +370,11 @@ func TestSequenceSad(t *testing.T) {
 
 	writeFiles(t, tmpDir, files)
 
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "sequence"
 
 	for _, k := range []string{"f1", "f2", "f3"} {
-		inConf := oinput.NewConfig()
+		inConf := input.NewConfig()
 		inConf.Type = "file"
 		inConf.File.Paths = []string{filepath.Join(tmpDir, k)}
 		conf.Sequence.Inputs = append(conf.Sequence.Inputs, inConf)
@@ -394,8 +394,8 @@ func TestSequenceSad(t *testing.T) {
 				t.Fatal("closed earlier than expected")
 			}
 			assert.Equal(t, 1, tran.Payload.Len())
-			assert.Equal(t, str, string(tran.Payload.Get(0).Get()))
-			require.NoError(t, tran.Ack(tCtx, nil))
+			assert.Equal(t, str, string(tran.Payload.Get(0).AsBytes()))
+			require.NoError(t, tran.Ack(ctx, nil))
 		case <-time.After(time.Minute):
 			t.Fatalf("Failed to consume message %v", i)
 		}
@@ -420,18 +420,21 @@ func TestSequenceSad(t *testing.T) {
 				t.Fatal("closed earlier than expected")
 			}
 			assert.Equal(t, 1, tran.Payload.Len())
-			assert.Equal(t, str, string(tran.Payload.Get(0).Get()))
-			require.NoError(t, tran.Ack(tCtx, nil))
+			assert.Equal(t, str, string(tran.Payload.Get(0).AsBytes()))
+			require.NoError(t, tran.Ack(ctx, nil))
 		case <-time.After(time.Minute):
 			t.Fatalf("Failed to consume message %v", i)
 		}
 	}
 
-	rdr.CloseAsync()
-	assert.NoError(t, rdr.WaitForClose(time.Second))
+	rdr.TriggerStopConsuming()
+	assert.NoError(t, rdr.WaitForClose(ctx))
 }
 
 func TestSequenceEarlyTermination(t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
+	defer done()
+
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -440,10 +443,10 @@ func TestSequenceEarlyTermination(t *testing.T) {
 		"f1": "foo\nbar\nbaz",
 	})
 
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "sequence"
 
-	inConf := oinput.NewConfig()
+	inConf := input.NewConfig()
 	inConf.Type = "file"
 	inConf.File.Paths = []string{filepath.Join(tmpDir, "f1")}
 	conf.Sequence.Inputs = append(conf.Sequence.Inputs, inConf)
@@ -457,11 +460,11 @@ func TestSequenceEarlyTermination(t *testing.T) {
 			t.Fatal("closed earlier than expected")
 		}
 		assert.Equal(t, 1, tran.Payload.Len())
-		assert.Equal(t, "foo", string(tran.Payload.Get(0).Get()))
+		assert.Equal(t, "foo", string(tran.Payload.Get(0).AsBytes()))
 	case <-time.After(time.Minute):
 		t.Fatal("timed out")
 	}
 
-	rdr.CloseAsync()
-	assert.NoError(t, rdr.WaitForClose(time.Second*5))
+	rdr.TriggerCloseNow()
+	assert.NoError(t, rdr.WaitForClose(ctx))
 }

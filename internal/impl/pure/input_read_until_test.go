@@ -10,18 +10,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	bmock "github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func TestReadUntilErrs(t *testing.T) {
-	conf := oinput.NewConfig()
+	conf := input.NewConfig()
 	conf.Type = "read_until"
 
-	inConf := oinput.NewConfig()
+	inConf := input.NewConfig()
 	conf.ReadUntil.Input = &inConf
 
 	_, err := bmock.NewManager().NewInput(conf)
@@ -47,23 +47,26 @@ baz`)
 		t.Fatal(err)
 	}
 
-	inconf := oinput.NewConfig()
+	inconf := input.NewConfig()
 	inconf.Type = "file"
 	inconf.File.Paths = []string{tmpfile.Name()}
 
 	t.Run("ReadUntilBasic", func(te *testing.T) {
 		testReadUntilBasic(inconf, te)
 	})
+	t.Run("ReadUntilRestart", func(te *testing.T) {
+		testReadUntilRestart(inconf, te)
+	})
 	t.Run("ReadUntilRetry", func(te *testing.T) {
 		testReadUntilRetry(inconf, te)
 	})
 }
 
-func testReadUntilBasic(inConf oinput.Config, t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Second*5)
+func testReadUntilBasic(inConf input.Config, t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
 	defer done()
 
-	rConf := oinput.NewConfig()
+	rConf := input.NewConfig()
 	rConf.Type = "read_until"
 	rConf.ReadUntil.Input = &inConf
 	rConf.ReadUntil.Check = `content() == "bar"`
@@ -90,17 +93,17 @@ func testReadUntilBasic(inConf oinput.Config, t *testing.T) {
 			t.Fatal("timed out")
 		}
 
-		if exp, act := expMsg, string(tran.Payload.Get(0).Get()); exp != act {
+		if exp, act := expMsg, string(tran.Payload.Get(0).AsBytes()); exp != act {
 			t.Errorf("Wrong message contents: %v != %v", act, exp)
 		}
 		if i == len(expMsgs)-1 {
-			if exp, act := "final", tran.Payload.Get(0).MetaGet("benthos_read_until"); exp != act {
+			if exp, act := "final", tran.Payload.Get(0).MetaGetStr("benthos_read_until"); exp != act {
 				t.Errorf("Metadata missing from final message: %v != %v", act, exp)
 			}
-		} else if exp, act := "", tran.Payload.Get(0).MetaGet("benthos_read_until"); exp != act {
+		} else if exp, act := "", tran.Payload.Get(0).MetaGetStr("benthos_read_until"); exp != act {
 			t.Errorf("Metadata final message metadata added to non-final message: %v", act)
 		}
-		require.NoError(t, tran.Ack(tCtx, nil))
+		require.NoError(t, tran.Ack(ctx, nil))
 	}
 
 	// Should close automatically now
@@ -113,16 +116,56 @@ func testReadUntilBasic(inConf oinput.Config, t *testing.T) {
 		t.Fatal("timed out")
 	}
 
-	if err = in.WaitForClose(time.Second); err != nil {
+	if err = in.WaitForClose(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func testReadUntilRetry(inConf oinput.Config, t *testing.T) {
-	tCtx, done := context.WithTimeout(context.Background(), time.Second*5)
+func testReadUntilRestart(inConf input.Config, t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
 	defer done()
 
-	rConf := oinput.NewConfig()
+	rConf := input.NewConfig()
+	rConf.Type = "read_until"
+	rConf.ReadUntil.Input = &inConf
+	rConf.ReadUntil.Check = `false`
+	rConf.ReadUntil.Restart = true
+
+	in, err := bmock.NewManager().NewInput(rConf)
+	require.NoError(t, err)
+
+	expMsgs := []string{
+		"foo",
+		"bar",
+		"baz",
+	}
+
+	for i := 0; i < 3; i++ {
+		for _, expMsg := range expMsgs {
+			var tran message.Transaction
+			var open bool
+			select {
+			case tran, open = <-in.TransactionChan():
+				require.True(t, open)
+			case <-time.After(time.Second):
+				t.Fatal("timed out")
+			}
+
+			require.Len(t, tran.Payload, 1)
+			assert.Equal(t, expMsg, string(tran.Payload[0].AsBytes()))
+			require.NoError(t, tran.Ack(ctx, nil))
+		}
+	}
+
+	in.TriggerStopConsuming()
+	require.NoError(t, in.WaitForClose(ctx))
+}
+
+func testReadUntilRetry(inConf input.Config, t *testing.T) {
+	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
+	defer done()
+
+	rConf := input.NewConfig()
 	rConf.Type = "read_until"
 	rConf.ReadUntil.Input = &inConf
 	rConf.ReadUntil.Check = `content() == "bar"`
@@ -154,7 +197,7 @@ func testReadUntilRetry(inConf oinput.Config, t *testing.T) {
 		}
 
 		i++
-		act := string(tran.Payload.Get(0).Get())
+		act := string(tran.Payload.Get(0).AsBytes())
 		if _, exists := expMsgs[act]; !exists {
 			t.Errorf("Unexpected message contents '%v': %v", i, act)
 		} else {
@@ -174,7 +217,7 @@ func testReadUntilRetry(inConf oinput.Config, t *testing.T) {
 	}
 
 	for _, rFn := range resFns {
-		require.NoError(t, rFn(tCtx, errors.New("failed")))
+		require.NoError(t, rFn(ctx, errors.New("failed")))
 	}
 
 	expMsgs = map[string]struct{}{
@@ -195,13 +238,13 @@ remainingLoop:
 			t.Fatal("timed out")
 		}
 
-		act := string(tran.Payload.Get(0).Get())
+		act := string(tran.Payload.Get(0).AsBytes())
 		if _, exists := expMsgs[act]; !exists {
 			t.Errorf("Unexpected message contents '%v': %v", i, act)
 		} else {
 			delete(expMsgs, act)
 		}
-		require.NoError(t, tran.Ack(tCtx, nil))
+		require.NoError(t, tran.Ack(ctx, nil))
 	}
 	if len(expMsgs) == 3 {
 		t.Error("Expected at least one extra message")
@@ -217,7 +260,7 @@ remainingLoop:
 		t.Fatal("timed out")
 	}
 
-	if err = in.WaitForClose(time.Second); err != nil {
+	if err = in.WaitForClose(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

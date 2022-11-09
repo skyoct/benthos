@@ -6,19 +6,17 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newSelectParts(conf.SelectParts, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("select_parts", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("select_parts", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "select_parts",
 		Categories: []string{
@@ -42,7 +40,7 @@ the last element with be selected, and so on.
 
 This processor is only applicable to [batched messages](/docs/configuration/batching).`,
 		Config: docs.FieldComponent().WithChildren(
-			docs.FieldInt("parts", `An array of message indexes of a batch. Indexes can be negative, and if so the part will be selected from the end counting backwards starting from -1.`).Array().HasDefault([]interface{}{}),
+			docs.FieldInt("parts", `An array of message indexes of a batch. Indexes can be negative, and if so the part will be selected from the end counting backwards starting from -1.`).Array().HasDefault([]any{}),
 		),
 	})
 	if err != nil {
@@ -54,13 +52,13 @@ type selectPartsProc struct {
 	parts []int
 }
 
-func newSelectParts(conf oprocessor.SelectPartsConfig, mgr interop.Manager) (*selectPartsProc, error) {
+func newSelectParts(conf processor.SelectPartsConfig, mgr bundle.NewManagement) (*selectPartsProc, error) {
 	return &selectPartsProc{
 		parts: conf.Parts,
 	}, nil
 }
 
-func (m *selectPartsProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (m *selectPartsProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	newMsg := message.QuickBatch(nil)
 
 	lParts := msg.Len()
@@ -73,13 +71,13 @@ func (m *selectPartsProc) ProcessBatch(ctx context.Context, spans []*tracing.Spa
 		if index < 0 || index >= lParts {
 			continue
 		}
-		newMsg.Append(msg.Get(index).Copy())
+		newMsg = append(newMsg, msg.Get(index).ShallowCopy())
 	}
 
 	if newMsg.Len() == 0 {
 		return nil, nil
 	}
-	return []*message.Batch{newMsg}, nil
+	return []message.Batch{newMsg}, nil
 }
 
 func (m *selectPartsProc) Close(ctx context.Context) error {

@@ -1,8 +1,8 @@
 package tracing
 
 import (
+	"context"
 	"sync/atomic"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/message"
@@ -39,7 +39,7 @@ func (t *tracedInput) loop() {
 		}
 		_ = tran.Payload.Iter(func(i int, part *message.Part) error {
 			_ = atomic.AddUint64(t.ctr, 1)
-			t.e.Add(EventProduce, string(part.Get()))
+			t.e.Add(EventProduce, string(part.AsBytes()))
 			return nil
 		})
 		select {
@@ -59,12 +59,17 @@ func (t *tracedInput) Connected() bool {
 	return t.wrapped.Connected()
 }
 
-func (t *tracedInput) CloseAsync() {
-	t.wrapped.CloseAsync()
+func (t *tracedInput) TriggerStopConsuming() {
+	t.wrapped.TriggerStopConsuming()
 }
 
-func (t *tracedInput) WaitForClose(timeout time.Duration) error {
-	err := t.wrapped.WaitForClose(timeout)
+func (t *tracedInput) TriggerCloseNow() {
+	t.wrapped.TriggerCloseNow()
+	t.shutSig.CloseNow()
+}
+
+func (t *tracedInput) WaitForClose(ctx context.Context) error {
+	err := t.wrapped.WaitForClose(ctx)
 	t.shutSig.CloseNow()
 	return err
 }

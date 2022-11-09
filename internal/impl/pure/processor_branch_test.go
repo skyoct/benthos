@@ -1,6 +1,7 @@
 package pure_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -8,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	_ "github.com/benthosdev/benthos/v4/internal/impl/pure"
 )
@@ -219,16 +220,16 @@ func TestBranchBasic(t *testing.T) {
 				part := message.NewPart([]byte(m.content))
 				if m.meta != nil {
 					for k, v := range m.meta {
-						part.MetaSet(k, v)
+						part.MetaSetMut(k, v)
 					}
 				}
 				if m.err != nil {
 					part.ErrorSet(m.err)
 				}
-				msg.Append(part)
+				msg = append(msg, part)
 			}
 
-			outMsgs, res := proc.ProcessMessage(msg)
+			outMsgs, res := proc.ProcessBatch(context.Background(), msg.ShallowCopy())
 
 			require.Nil(t, res)
 			require.Len(t, outMsgs, 1)
@@ -236,11 +237,11 @@ func TestBranchBasic(t *testing.T) {
 			assert.Equal(t, len(test.output), outMsgs[0].Len())
 			for i, out := range test.output {
 				comparePart := mockMsg{
-					content: string(outMsgs[0].Get(i).Get()),
+					content: string(outMsgs[0].Get(i).AsBytes()),
 					meta:    map[string]string{},
 				}
 
-				_ = outMsgs[0].Get(i).MetaIter(func(k, v string) error {
+				_ = outMsgs[0].Get(i).MetaIterStr(func(k, v string) error {
 					comparePart.meta[k] = v
 					return nil
 				})
@@ -258,15 +259,16 @@ func TestBranchBasic(t *testing.T) {
 
 			// Ensure nothing changed
 			for i, m := range test.input {
-				doc, err := msg.Get(i).JSON()
+				doc, err := msg.Get(i).AsStructuredMut()
 				if err == nil {
-					msg.Get(i).SetJSON(doc)
+					msg.Get(i).SetStructured(doc)
 				}
-				assert.Equal(t, m.content, string(msg.Get(i).Get()))
+				assert.Equal(t, m.content, string(msg.Get(i).AsBytes()))
 			}
 
-			proc.CloseAsync()
-			assert.NoError(t, proc.WaitForClose(time.Second))
+			ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+			defer done()
+			assert.NoError(t, proc.Close(ctx))
 		})
 	}
 }

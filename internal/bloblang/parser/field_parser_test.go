@@ -27,7 +27,6 @@ func TestFieldStaticExpressionOptimization(t *testing.T) {
 			e := field.NewExpression(rs...)
 			assert.Equal(t, v, e.String(0, message.QuickBatch(nil)))
 			assert.Equal(t, v, string(e.Bytes(0, message.QuickBatch(nil))))
-			assert.Equal(t, v, string(e.BytesEscaped(0, message.QuickBatch(nil))))
 		})
 	}
 }
@@ -81,7 +80,7 @@ func TestFieldExpressionParserErrors(t *testing.T) {
 func TestFieldExpressions(t *testing.T) {
 	type easyMsg struct {
 		content string
-		meta    map[string]string
+		meta    map[string]any
 	}
 
 	tests := map[string]struct {
@@ -89,7 +88,6 @@ func TestFieldExpressions(t *testing.T) {
 		output   string
 		messages []easyMsg
 		index    int
-		escaped  bool
 	}{
 		"static string": {
 			input:  `static string hello world`,
@@ -148,19 +146,17 @@ func TestFieldExpressions(t *testing.T) {
 			},
 		},
 		"json function 4": {
-			input:   `${!json("foo")}`,
-			output:  `{\"bar\":\"baz\"}`,
-			index:   0,
-			escaped: true,
+			input:  `${!json("foo")}`,
+			output: `{"bar":"baz"}`,
+			index:  0,
 			messages: []easyMsg{
 				{content: `{"foo":{"bar":"baz"}}`},
 			},
 		},
 		"json function 5": {
-			input:   `${!json("foo")   }`,
-			output:  `{\"bar\":\"baz\"}`,
-			index:   0,
-			escaped: true,
+			input:  `${!json("foo")   }`,
+			output: `{"bar":"baz"}`,
+			index:  0,
 			messages: []easyMsg{
 				{content: `{"foo":{"bar":"baz"}}`},
 			},
@@ -201,21 +197,16 @@ func TestFieldExpressions(t *testing.T) {
 				part := message.NewPart([]byte(m.content))
 				if m.meta != nil {
 					for k, v := range m.meta {
-						part.MetaSet(k, v)
+						part.MetaSetMut(k, v)
 					}
 				}
-				msg.Append(part)
+				msg = append(msg, part)
 			}
 
 			e, err := ParseField(GlobalContext(), test.input)
 			require.Nil(t, err)
 
-			var res string
-			if test.escaped {
-				res = string(e.BytesEscaped(test.index, msg))
-			} else {
-				res = e.String(test.index, msg)
-			}
+			res := e.String(test.index, msg)
 			assert.Equal(t, test.output, res)
 		})
 	}

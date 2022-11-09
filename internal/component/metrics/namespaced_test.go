@@ -12,8 +12,9 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/internal/impl/prometheus"
 )
 
 func getTestProm(t *testing.T) (metrics.Type, http.HandlerFunc) {
@@ -23,7 +24,7 @@ func getTestProm(t *testing.T) (metrics.Type, http.HandlerFunc) {
 	conf.Type = "prometheus"
 	conf.Prometheus.UseHistogramTiming = true
 
-	ns, err := bundle.AllMetrics.Init(conf, log.Noop())
+	ns, err := bundle.AllMetrics.Init(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	prom := ns.Child()

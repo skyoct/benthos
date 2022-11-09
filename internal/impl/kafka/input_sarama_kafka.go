@@ -17,20 +17,18 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/checkpoint"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/component/input/span"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/kafka/sasl"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		return newKafkaInput(c, nm, nm.Logger(), nm.Metrics())
 	}), docs.ComponentSpec{
 		Name:    "kafka",
@@ -104,12 +102,13 @@ Unfortunately this error message will appear for a wide range of connection prob
 				docs.FieldString("rebalance_timeout", "A period after which rebalancing is abandoned if unresolved.").Advanced(),
 			).Advanced(),
 			docs.FieldInt("fetch_buffer_cap", "The maximum number of unprocessed messages to fetch at a given time.").Advanced(),
+			docs.FieldBool("multi_header", "Decode headers into lists to allow handling of multiple values with the same key").Advanced(),
 			func() docs.FieldSpec {
 				b := policy.FieldSpec()
 				b.IsAdvanced = true
 				return b
 			}(),
-		).ChildDefaultAndTypesFromStruct(oinput.NewKafkaConfig()),
+		).ChildDefaultAndTypesFromStruct(input.NewKafkaConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -119,25 +118,25 @@ Unfortunately this error message will appear for a wide range of connection prob
 	}
 }
 
-func newKafkaInput(conf oinput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (input.Streamed, error) {
-	var rdr reader.Async
+func newKafkaInput(conf input.Config, mgr bundle.NewManagement, log log.Modular, stats metrics.Type) (input.Streamed, error) {
+	var rdr input.Async
 	var err error
 	if rdr, err = newKafkaReader(conf.Kafka, mgr, log); err != nil {
 		return nil, err
 	}
 	if conf.Kafka.ExtractTracingMap != "" {
-		if rdr, err = span.NewReader("kafka", conf.Kafka.ExtractTracingMap, rdr, mgr, log); err != nil {
+		if rdr, err = span.NewReader("kafka", conf.Kafka.ExtractTracingMap, rdr, mgr); err != nil {
 			return nil, err
 		}
 	}
-	return oinput.NewAsyncReader("kafka", false, reader.NewAsyncPreserver(rdr), log, stats)
+	return input.NewAsyncReader("kafka", false, input.NewAsyncPreserver(rdr), mgr)
 }
 
 //------------------------------------------------------------------------------
 
 type asyncMessage struct {
-	msg   *message.Batch
-	ackFn reader.AsyncAckFn
+	msg   message.Batch
+	ackFn input.AsyncAckFn
 }
 
 type offsetMarker interface {
@@ -165,9 +164,9 @@ type kafkaReader struct {
 	msgChan         chan asyncMessage
 	session         offsetMarker
 
-	conf oinput.KafkaConfig
+	conf input.KafkaConfig
 	log  log.Modular
-	mgr  interop.Manager
+	mgr  bundle.NewManagement
 
 	closeOnce  sync.Once
 	closedChan chan struct{}
@@ -205,7 +204,7 @@ func parsePartitions(expr string) ([]int32, error) {
 	return parts, nil
 }
 
-func newKafkaReader(conf oinput.KafkaConfig, mgr interop.Manager, log log.Modular) (*kafkaReader, error) {
+func newKafkaReader(conf input.KafkaConfig, mgr bundle.NewManagement, log log.Modular) (*kafkaReader, error) {
 	if conf.Batching.IsNoop() {
 		conf.Batching.Count = 1
 	}
@@ -219,7 +218,7 @@ func newKafkaReader(conf oinput.KafkaConfig, mgr interop.Manager, log log.Modula
 	}
 	if conf.TLS.Enabled {
 		var err error
-		if k.tlsConf, err = conf.TLS.Get(); err != nil {
+		if k.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -302,9 +301,9 @@ func newKafkaReader(conf oinput.KafkaConfig, mgr interop.Manager, log log.Modula
 
 //------------------------------------------------------------------------------
 
-func (k *kafkaReader) asyncCheckpointer(topic string, partition int32) func(context.Context, chan<- asyncMessage, *message.Batch, int64) bool {
+func (k *kafkaReader) asyncCheckpointer(topic string, partition int32) func(context.Context, chan<- asyncMessage, message.Batch, int64) bool {
 	cp := checkpoint.NewCapped(int64(k.conf.CheckpointLimit))
-	return func(ctx context.Context, c chan<- asyncMessage, msg *message.Batch, offset int64) bool {
+	return func(ctx context.Context, c chan<- asyncMessage, msg message.Batch, offset int64) bool {
 		if msg == nil {
 			return true
 		}
@@ -341,9 +340,9 @@ func (k *kafkaReader) asyncCheckpointer(topic string, partition int32) func(cont
 	}
 }
 
-func (k *kafkaReader) syncCheckpointer(topic string, partition int32) func(context.Context, chan<- asyncMessage, *message.Batch, int64) bool {
+func (k *kafkaReader) syncCheckpointer(topic string, partition int32) func(context.Context, chan<- asyncMessage, message.Batch, int64) bool {
 	ackedChan := make(chan error)
-	return func(ctx context.Context, c chan<- asyncMessage, msg *message.Batch, offset int64) bool {
+	return func(ctx context.Context, c chan<- asyncMessage, msg message.Batch, offset int64) bool {
 		if msg == nil {
 			return true
 		}
@@ -385,11 +384,25 @@ func (k *kafkaReader) syncCheckpointer(topic string, partition int32) func(conte
 	}
 }
 
-func dataToPart(highestOffset int64, data *sarama.ConsumerMessage) *message.Part {
+func dataToPart(highestOffset int64, data *sarama.ConsumerMessage, multiHeader bool) *message.Part {
 	part := message.NewPart(data.Value)
 
-	for _, hdr := range data.Headers {
-		part.MetaSet(string(hdr.Key), string(hdr.Value))
+	if multiHeader {
+		// in multi header mode we gather headers so we can encode them as lists
+		var headers = map[string][]any{}
+
+		for _, hdr := range data.Headers {
+			var key = string(hdr.Key)
+			headers[key] = append(headers[key], string(hdr.Value))
+		}
+
+		for key, values := range headers {
+			part.MetaSetMut(key, values)
+		}
+	} else {
+		for _, hdr := range data.Headers {
+			part.MetaSetMut(string(hdr.Key), string(hdr.Value))
+		}
 	}
 
 	lag := highestOffset - data.Offset - 1
@@ -397,12 +410,12 @@ func dataToPart(highestOffset int64, data *sarama.ConsumerMessage) *message.Part
 		lag = 0
 	}
 
-	part.MetaSet("kafka_key", string(data.Key))
-	part.MetaSet("kafka_partition", strconv.Itoa(int(data.Partition)))
-	part.MetaSet("kafka_topic", data.Topic)
-	part.MetaSet("kafka_offset", strconv.Itoa(int(data.Offset)))
-	part.MetaSet("kafka_lag", strconv.FormatInt(lag, 10))
-	part.MetaSet("kafka_timestamp_unix", strconv.FormatInt(data.Timestamp.Unix(), 10))
+	part.MetaSetMut("kafka_key", string(data.Key))
+	part.MetaSetMut("kafka_partition", int(data.Partition))
+	part.MetaSetMut("kafka_topic", data.Topic)
+	part.MetaSetMut("kafka_offset", int(data.Offset))
+	part.MetaSetMut("kafka_lag", lag)
+	part.MetaSetMut("kafka_timestamp_unix", data.Timestamp.Unix())
 
 	return part
 }
@@ -429,8 +442,8 @@ func (k *kafkaReader) closeGroupAndConsumers() {
 
 //------------------------------------------------------------------------------
 
-// ConnectWithContext establishes a kafkaReader connection.
-func (k *kafkaReader) ConnectWithContext(ctx context.Context) error {
+// Connect establishes a kafkaReader connection.
+func (k *kafkaReader) Connect(ctx context.Context) error {
 	k.cMut.Lock()
 	defer k.cMut.Unlock()
 	if k.msgChan != nil {
@@ -444,8 +457,16 @@ func (k *kafkaReader) ConnectWithContext(ctx context.Context) error {
 	config.Version = k.version
 	config.Consumer.Return.Errors = true
 	config.Consumer.MaxProcessingTime = k.maxProcPeriod
+
+	// NOTE: The following activates an async goroutine that periodically
+	// commits marked offsets, but that does NOT mean we automatically commit
+	// consumed message offsets.
+	//
+	// Offsets are manually marked ready for commit only once the associated
+	// message is successfully sent via outputs (look for k.session.MarkOffset).
 	config.Consumer.Offsets.AutoCommit.Enable = true
 	config.Consumer.Offsets.AutoCommit.Interval = k.commitPeriod
+
 	config.Consumer.Group.Session.Timeout = k.sessionTimeout
 	config.Consumer.Group.Heartbeat.Interval = k.heartbeatInterval
 	config.Consumer.Group.Rebalance.Timeout = k.rebalanceTimeout
@@ -476,8 +497,8 @@ func (k *kafkaReader) ConnectWithContext(ctx context.Context) error {
 	return k.connectBalancedTopics(ctx, config)
 }
 
-// ReadWithContext attempts to read a message from a kafkaReader topic.
-func (k *kafkaReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+// ReadBatch attempts to read a message from a kafkaReader topic.
+func (k *kafkaReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	k.cMut.Lock()
 	msgChan := k.msgChan
 	k.cMut.Unlock()
@@ -498,16 +519,12 @@ func (k *kafkaReader) ReadWithContext(ctx context.Context) (*message.Batch, read
 }
 
 // CloseAsync shuts down the kafkaReader input and stops processing requests.
-func (k *kafkaReader) CloseAsync() {
-	go k.closeGroupAndConsumers()
-}
-
-// WaitForClose blocks until the kafkaReader input has closed down.
-func (k *kafkaReader) WaitForClose(timeout time.Duration) error {
+func (k *kafkaReader) Close(ctx context.Context) (err error) {
+	k.closeGroupAndConsumers()
 	select {
 	case <-k.closedChan:
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-ctx.Done():
+		err = ctx.Err()
 	}
-	return nil
+	return
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/mapping"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
@@ -13,24 +12,23 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oprocessor "github.com/benthosdev/benthos/v4/internal/old/processor"
 	"github.com/benthosdev/benthos/v4/internal/tracing"
 )
 
 func init() {
-	err := bundle.AllProcessors.Add(func(conf oprocessor.Config, mgr bundle.NewManagement) (processor.V1, error) {
+	err := bundle.AllProcessors.Add(func(conf processor.Config, mgr bundle.NewManagement) (processor.V1, error) {
 		p, err := newGroupBy(conf.GroupBy, mgr)
 		if err != nil {
 			return nil, err
 		}
-		return processor.NewV2BatchedToV1Processor("group_by", p, mgr.Metrics()), nil
+		return processor.NewV2BatchedToV1Processor("group_by", p, mgr), nil
 	}, docs.ComponentSpec{
 		Name: "group_by",
 		Categories: []string{
 			"Composition",
 		},
 		Summary: `
-Splits a [batch of messages](/docs/configuration/batching/) into N batches, where each resulting batch contains a group of messages determined by a [Bloblang query](/docs/guides/bloblang/about/).`,
+Splits a [batch of messages](/docs/configuration/batching) into N batches, where each resulting batch contains a group of messages determined by a [Bloblang query](/docs/guides/bloblang/about).`,
 		Description: `
 Once the groups are established a list of processors are applied to their respective grouped batch, which can be used to label the batch as per their grouping. Messages that do not pass the check of any specified group are placed in their own group.
 
@@ -49,7 +47,7 @@ pipeline:
               format: tar
           - compress:
               algorithm: gzip
-          - bloblang: 'meta grouping = "foo"'
+          - mapping: 'meta grouping = "foo"'
 
 output:
   switch:
@@ -69,15 +67,15 @@ output:
 		Config: docs.FieldComponent().Array().WithChildren(
 			docs.FieldBloblang(
 				"check",
-				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message belongs to a given group.",
+				"A [Bloblang query](/docs/guides/bloblang/about) that should return a boolean value indicating whether a message belongs to a given group.",
 				`this.type == "foo"`,
 				`this.contents.urls.contains("https://benthos.dev/")`,
 				`true`,
 			).HasDefault(""),
 			docs.FieldProcessor(
 				"processors",
-				"A list of [processors](/docs/components/processors/about/) to execute on the newly formed group.",
-			).HasDefault([]interface{}{}).Array(),
+				"A list of [processors](/docs/components/processors/about) to execute on the newly formed group.",
+			).HasDefault([]any{}).Array(),
 		),
 	})
 	if err != nil {
@@ -95,7 +93,7 @@ type groupByProc struct {
 	groups []group
 }
 
-func newGroupBy(conf oprocessor.GroupByConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
+func newGroupBy(conf processor.GroupByConfig, mgr bundle.NewManagement) (processor.V2Batched, error) {
 	var err error
 	groups := make([]group, len(conf))
 
@@ -109,7 +107,7 @@ func newGroupBy(conf oprocessor.GroupByConfig, mgr bundle.NewManagement) (proces
 		}
 
 		for j, pConf := range gConf.Processors {
-			pMgr := mgr.IntoPath("group_by", strconv.Itoa(i), "processors", strconv.Itoa(j)).(bundle.NewManagement)
+			pMgr := mgr.IntoPath("group_by", strconv.Itoa(i), "processors", strconv.Itoa(j))
 			proc, err := pMgr.NewProcessor(pConf)
 			if err != nil {
 				return nil, err
@@ -124,12 +122,12 @@ func newGroupBy(conf oprocessor.GroupByConfig, mgr bundle.NewManagement) (proces
 	}, nil
 }
 
-func (g *groupByProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg *message.Batch) ([]*message.Batch, error) {
+func (g *groupByProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, msg message.Batch) ([]message.Batch, error) {
 	if msg.Len() == 0 {
 		return nil, nil
 	}
 
-	groups := make([]*message.Batch, len(g.groups))
+	groups := make([]message.Batch, len(g.groups))
 	for i := range groups {
 		groups[i] = message.QuickBatch(nil)
 	}
@@ -149,7 +147,7 @@ func (g *groupByProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, m
 					"type", groupStr,
 				)
 				spans[i].SetTag("group", groupStr)
-				groups[j].Append(p.Copy())
+				groups[j] = append(groups[j], p)
 				return nil
 			}
 		}
@@ -159,17 +157,17 @@ func (g *groupByProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, m
 			"type", "default",
 		)
 		spans[i].SetTag("group", "default")
-		groupless.Append(p.Copy())
+		groupless = append(groupless, p)
 		return nil
 	})
 
-	msgs := []*message.Batch{}
+	msgs := []message.Batch{}
 	for i, gmsg := range groups {
 		if gmsg.Len() == 0 {
 			continue
 		}
 
-		resultMsgs, res := oprocessor.ExecuteAll(g.groups[i].Processors, gmsg)
+		resultMsgs, res := processor.ExecuteAll(ctx, g.groups[i].Processors, gmsg)
 		if len(resultMsgs) > 0 {
 			msgs = append(msgs, resultMsgs...)
 		}
@@ -192,16 +190,7 @@ func (g *groupByProc) ProcessBatch(ctx context.Context, spans []*tracing.Span, m
 func (g *groupByProc) Close(ctx context.Context) error {
 	for _, group := range g.groups {
 		for _, p := range group.Processors {
-			p.CloseAsync()
-		}
-	}
-	deadline, exists := ctx.Deadline()
-	if !exists {
-		deadline = time.Now().Add(time.Second * 5)
-	}
-	for _, group := range g.groups {
-		for _, p := range group.Processors {
-			if err := p.WaitForClose(time.Until(deadline)); err != nil {
+			if err := p.Close(ctx); err != nil {
 				return err
 			}
 		}

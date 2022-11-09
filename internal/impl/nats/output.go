@@ -3,32 +3,27 @@ package nats
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/benthosdev/benthos/v4/internal/bloblang/field"
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/output/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/nats/auth"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/output/writer"
 	btls "github.com/benthosdev/benthos/v4/internal/tls"
 )
 
 func init() {
-	err := bundle.AllOutputs.Add(bundle.OutputConstructorFromSimple(func(c ooutput.Config, nm bundle.NewManagement) (output.Streamed, error) {
-		return newNATSOutput(c, nm, nm.Logger(), nm.Metrics())
-	}), docs.ComponentSpec{
+	err := bundle.AllOutputs.Add(processors.WrapConstructor(newNATSOutput), docs.ComponentSpec{
 		Name:    "nats",
 		Summary: `Publish to an NATS subject.`,
 		Description: output.Description(true, false, `
@@ -52,7 +47,7 @@ This output will interpolate functions within the subject field, you can find a 
 			docs.FieldInt("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
 			btls.FieldSpec(),
 			auth.FieldSpec(),
-		).ChildDefaultAndTypesFromStruct(ooutput.NewNATSConfig()),
+		).ChildDefaultAndTypesFromStruct(output.NewNATSConfig()),
 		Categories: []string{
 			"Services",
 		},
@@ -62,12 +57,12 @@ This output will interpolate functions within the subject field, you can find a 
 	}
 }
 
-func newNATSOutput(conf ooutput.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (output.Streamed, error) {
-	w, err := newNATSWriter(conf.NATS, mgr, log)
+func newNATSOutput(conf output.Config, mgr bundle.NewManagement) (output.Streamed, error) {
+	w, err := newNATSWriter(conf.NATS, mgr, mgr.Logger())
 	if err != nil {
 		return nil, err
 	}
-	return ooutput.NewAsyncWriter("nats", conf.NATS.MaxInFlight, w, log, stats)
+	return output.NewAsyncWriter("nats", conf.NATS.MaxInFlight, w, mgr)
 }
 
 type natsWriter struct {
@@ -77,13 +72,13 @@ type natsWriter struct {
 	connMut  sync.RWMutex
 
 	urls       string
-	conf       ooutput.NATSConfig
+	conf       output.NATSConfig
 	headers    map[string]*field.Expression
 	subjectStr *field.Expression
 	tlsConf    *tls.Config
 }
 
-func newNATSWriter(conf ooutput.NATSConfig, mgr interop.Manager, log log.Modular) (*natsWriter, error) {
+func newNATSWriter(conf output.NATSConfig, mgr bundle.NewManagement, log log.Modular) (*natsWriter, error) {
 	n := natsWriter{
 		log:     log,
 		conf:    conf,
@@ -101,7 +96,7 @@ func newNATSWriter(conf ooutput.NATSConfig, mgr interop.Manager, log log.Modular
 	n.urls = strings.Join(conf.URLs, ",")
 
 	if conf.TLS.Enabled {
-		if n.tlsConf, err = conf.TLS.Get(); err != nil {
+		if n.tlsConf, err = conf.TLS.Get(mgr.FS()); err != nil {
 			return nil, err
 		}
 	}
@@ -109,7 +104,7 @@ func newNATSWriter(conf ooutput.NATSConfig, mgr interop.Manager, log log.Modular
 	return &n, nil
 }
 
-func (n *natsWriter) ConnectWithContext(ctx context.Context) error {
+func (n *natsWriter) Connect(ctx context.Context) error {
 	n.connMut.Lock()
 	defer n.connMut.Unlock()
 
@@ -124,7 +119,7 @@ func (n *natsWriter) ConnectWithContext(ctx context.Context) error {
 		opts = append(opts, nats.Secure(n.tlsConf))
 	}
 
-	opts = append(opts, auth.GetOptions(n.conf.Auth)...)
+	opts = append(opts, authConfToOptions(n.conf.Auth)...)
 
 	if n.natsConn, err = nats.Connect(n.urls, opts...); err != nil {
 		return err
@@ -136,13 +131,13 @@ func (n *natsWriter) ConnectWithContext(ctx context.Context) error {
 	return err
 }
 
-// WriteWithContext attempts to write a message.
-func (n *natsWriter) WriteWithContext(ctx context.Context, msg *message.Batch) error {
+// WriteBatch attempts to write a message.
+func (n *natsWriter) WriteBatch(ctx context.Context, msg message.Batch) error {
 	return n.Write(msg)
 }
 
 // Write attempts to write a message.
-func (n *natsWriter) Write(msg *message.Batch) error {
+func (n *natsWriter) Write(msg message.Batch) error {
 	n.connMut.RLock()
 	conn := n.natsConn
 	n.connMut.RUnlock()
@@ -151,12 +146,12 @@ func (n *natsWriter) Write(msg *message.Batch) error {
 		return component.ErrNotConnected
 	}
 
-	return writer.IterateBatchedSend(msg, func(i int, p *message.Part) error {
+	return output.IterateBatchedSend(msg, func(i int, p *message.Part) error {
 		subject := n.subjectStr.String(i, msg)
 		n.log.Debugf("Writing NATS message to topic %s", subject)
 		// fill message data
 		nMsg := nats.NewMsg(subject)
-		nMsg.Data = p.Get()
+		nMsg.Data = p.AsBytes()
 		if conn.HeadersSupported() {
 			// fill bloblang headers
 			for k, v := range n.headers {
@@ -164,7 +159,7 @@ func (n *natsWriter) Write(msg *message.Batch) error {
 			}
 		}
 		err := conn.PublishMsg(nMsg)
-		if err == nats.ErrConnectionClosed {
+		if errors.Is(err, nats.ErrConnectionClosed) {
 			conn.Close()
 			n.connMut.Lock()
 			n.natsConn = nil
@@ -175,17 +170,13 @@ func (n *natsWriter) Write(msg *message.Batch) error {
 	})
 }
 
-func (n *natsWriter) CloseAsync() {
-	go func() {
-		n.connMut.Lock()
-		if n.natsConn != nil {
-			n.natsConn.Close()
-			n.natsConn = nil
-		}
-		n.connMut.Unlock()
-	}()
-}
+func (n *natsWriter) Close(context.Context) (err error) {
+	n.connMut.Lock()
+	defer n.connMut.Unlock()
 
-func (n *natsWriter) WaitForClose(timeout time.Duration) error {
-	return nil
+	if n.natsConn != nil {
+		n.natsConn.Close()
+		n.natsConn = nil
+	}
+	return
 }

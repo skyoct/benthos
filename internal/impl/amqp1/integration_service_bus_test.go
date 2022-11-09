@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/component"
-	"github.com/benthosdev/benthos/v4/internal/log"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 )
 
 func TestIntegrationAzureServiceBus(t *testing.T) {
@@ -46,21 +46,19 @@ func TestIntegrationAzureServiceBus(t *testing.T) {
 func testAMQP1Connected(url, sourceAddress string, t *testing.T) {
 	ctx := context.Background()
 
-	conf := oinput.NewAMQP1Config()
+	conf := input.NewAMQP1Config()
 	conf.URL = url
 	conf.SourceAddress = sourceAddress
 	conf.AzureRenewLock = true
 
-	m, err := newAMQP1Reader(conf, log.Noop())
+	m, err := newAMQP1Reader(conf, mock.NewManager())
 	require.NoError(t, err)
 
-	err = m.ConnectWithContext(ctx)
+	err = m.Connect(ctx)
 	require.NoError(t, err)
 
 	defer func() {
-		m.CloseAsync()
-		err := m.WaitForClose(time.Second)
-		assert.NoError(t, err)
+		_ = m.Close(context.Background())
 	}()
 
 	client, err := amqp.Dial(url)
@@ -105,16 +103,16 @@ func testAMQP1Connected(url, sourceAddress string, t *testing.T) {
 	}
 
 	for i := 0; i < N; i++ {
-		actM, ackFn, err := m.ReadWithContext(ctx)
+		actM, ackFn, err := m.ReadBatch(ctx)
 		assert.NoError(t, err)
 		wg.Add(1)
 
 		go func() {
 			defer wg.Done()
 
-			assert.True(t, testMsgs[string(actM.Get(0).Get())], "Unexpected message")
-			assert.Equal(t, "plain/text", actM.Get(0).MetaGet("amqp_content_type"))
-			assert.Equal(t, "utf-8", actM.Get(0).MetaGet("amqp_content_encoding"))
+			assert.True(t, testMsgs[string(actM.Get(0).AsBytes())], "Unexpected message")
+			assert.Equal(t, "plain/text", actM.Get(0).MetaGetStr("amqp_content_type"))
+			assert.Equal(t, "utf-8", actM.Get(0).MetaGetStr("amqp_content_encoding"))
 
 			time.Sleep(6 * time.Second) // Simulate long processing before ack so message lock expires and lock renewal is requires
 
@@ -125,35 +123,32 @@ func testAMQP1Connected(url, sourceAddress string, t *testing.T) {
 
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	_, _, err = m.ReadWithContext(readCtx)
+	_, _, err = m.ReadBatch(readCtx)
 	assert.Error(t, err, "got unexpected message (redelivery?)")
-
 }
 
 func testAMQP1Disconnected(url, sourceAddress string, t *testing.T) {
 	ctx := context.Background()
 
-	conf := oinput.NewAMQP1Config()
+	conf := input.NewAMQP1Config()
 	conf.URL = url
 	conf.SourceAddress = sourceAddress
 	conf.AzureRenewLock = true
 
-	m, err := newAMQP1Reader(conf, log.Noop())
+	m, err := newAMQP1Reader(conf, mock.NewManager())
 	require.NoError(t, err)
 
-	err = m.ConnectWithContext(ctx)
+	err = m.Connect(ctx)
 	require.NoError(t, err)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
-		m.CloseAsync()
-		err := m.WaitForClose(time.Second)
-		require.NoError(t, err)
+		_ = m.Close(context.Background())
 		wg.Done()
 	}()
 
-	if _, _, err = m.ReadWithContext(ctx); err != component.ErrTypeClosed && err != component.ErrNotConnected {
+	if _, _, err = m.ReadBatch(ctx); err != component.ErrTypeClosed && err != component.ErrNotConnected {
 		t.Errorf("Wrong error: %v != %v", err, component.ErrTypeClosed)
 	}
 

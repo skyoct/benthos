@@ -22,17 +22,16 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/codec"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	sess "github.com/benthosdev/benthos/v4/internal/impl/aws/session"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(conf oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
-		var rdr reader.Async
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(conf input.Config, nm bundle.NewManagement) (input.Streamed, error) {
+		var rdr input.Async
 		var err error
 		if rdr, err = newAmazonS3Reader(conf.AWSS3, nm); err != nil {
 			return nil, err
@@ -41,9 +40,9 @@ func init() {
 		// there's no concept of propagating nacks upstream, therefore wrap
 		// our reader within a preserver in order to retry indefinitely.
 		if conf.AWSS3.SQS.URL == "" {
-			rdr = reader.NewAsyncPreserver(rdr)
+			rdr = input.NewAsyncPreserver(rdr)
 		}
-		return oinput.NewAsyncReader("aws_s3", false, rdr, nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("aws_s3", false, rdr, nm)
 	}), docs.ComponentSpec{
 		Name:   "aws_s3",
 		Status: docs.StatusStable,
@@ -103,7 +102,7 @@ You can access these metadata fields using [function interpolation](/docs/config
 				).Advanced(),
 				docs.FieldInt("max_messages", "The maximum number of SQS messages to consume from each request.").Advanced(),
 			),
-		).ChildDefaultAndTypesFromStruct(oinput.NewAWSS3Config()),
+		).ChildDefaultAndTypesFromStruct(input.NewAWSS3Config()),
 		Categories: []string{
 			"Services",
 			"AWS",
@@ -132,7 +131,7 @@ func newS3ObjectTarget(key, bucket string, notificationAt time.Time, ackFn codec
 			return nil
 		}
 	}
-	return &s3ObjectTarget{key, bucket, notificationAt, ackFn}
+	return &s3ObjectTarget{key: key, bucket: bucket, notificationAt: notificationAt, ackFn: ackFn}
 }
 
 type s3ObjectTargetReader interface {
@@ -170,13 +169,13 @@ func deleteS3ObjectAckFn(
 type staticTargetReader struct {
 	pending    []*s3ObjectTarget
 	s3         *s3.S3
-	conf       oinput.AWSS3Config
+	conf       input.AWSS3Config
 	startAfter *string
 }
 
 func newStaticTargetReader(
 	ctx context.Context,
-	conf oinput.AWSS3Config,
+	conf input.AWSS3Config,
 	log log.Modular,
 	s3Client *s3.S3,
 ) (*staticTargetReader, error) {
@@ -243,7 +242,7 @@ func (s staticTargetReader) Close(context.Context) error {
 //------------------------------------------------------------------------------
 
 type sqsTargetReader struct {
-	conf oinput.AWSS3Config
+	conf input.AWSS3Config
 	log  log.Modular
 	sqs  *sqs.SQS
 	s3   *s3.S3
@@ -254,12 +253,12 @@ type sqsTargetReader struct {
 }
 
 func newSQSTargetReader(
-	conf oinput.AWSS3Config,
+	conf input.AWSS3Config,
 	log log.Modular,
 	s3 *s3.S3,
 	sqs *sqs.SQS,
 ) *sqsTargetReader {
-	return &sqsTargetReader{conf, log, sqs, s3, time.Time{}, nil}
+	return &sqsTargetReader{conf: conf, log: log, sqs: sqs, s3: s3, nextRequest: time.Time{}, pending: nil}
 }
 
 func (s *sqsTargetReader) Pop(ctx context.Context) (*s3ObjectTarget, error) {
@@ -303,11 +302,11 @@ func (s *sqsTargetReader) Close(ctx context.Context) error {
 	return err
 }
 
-func digStrsFromSlices(slice []interface{}) []string {
+func digStrsFromSlices(slice []any) []string {
 	var strs []string
 	for _, v := range slice {
 		switch t := v.(type) {
-		case []interface{}:
+		case []any:
 			strs = append(strs, digStrsFromSlices(t)...)
 		case string:
 			strs = append(strs, t)
@@ -339,14 +338,14 @@ func (s *sqsTargetReader) parseObjectPaths(sqsMsg *string) ([]s3ObjectTarget, er
 	switch t := gObj.Path(s.conf.SQS.KeyPath).Data().(type) {
 	case string:
 		keys = []string{t}
-	case []interface{}:
+	case []any:
 		keys = digStrsFromSlices(t)
 	}
 	if len(s.conf.SQS.BucketPath) > 0 {
 		switch t := gObj.Path(s.conf.SQS.BucketPath).Data().(type) {
 		case string:
 			buckets = []string{t}
-		case []interface{}:
+		case []any:
 			buckets = digStrsFromSlices(t)
 		}
 	}
@@ -501,7 +500,7 @@ func (s *sqsTargetReader) ackSQSMessage(ctx context.Context, msg *sqs.Message) e
 // AmazonS3 is a benthos reader.Type implementation that reads messages from an
 // Amazon S3 bucket.
 type awsS3Reader struct {
-	conf oinput.AWSS3Config
+	conf input.AWSS3Config
 
 	objectScannerCtor codec.ReaderConstructor
 	keyReader         s3ObjectTargetReader
@@ -526,7 +525,7 @@ type s3PendingObject struct {
 }
 
 // NewAmazonS3 creates a new Amazon S3 bucket reader.Type.
-func newAmazonS3Reader(conf oinput.AWSS3Config, nm bundle.NewManagement) (*awsS3Reader, error) {
+func newAmazonS3Reader(conf input.AWSS3Config, nm bundle.NewManagement) (*awsS3Reader, error) {
 	if conf.Bucket == "" && conf.SQS.URL == "" {
 		return nil, errors.New("either a bucket or an sqs.url must be specified")
 	}
@@ -556,9 +555,9 @@ func (a *awsS3Reader) getTargetReader(ctx context.Context) (s3ObjectTargetReader
 	return newStaticTargetReader(ctx, a.conf, a.log, a.s3)
 }
 
-// ConnectWithContext attempts to establish a connection to the target S3 bucket
+// Connect attempts to establish a connection to the target S3 bucket
 // and any relevant queues used to traverse the objects (SQS, etc).
-func (a *awsS3Reader) ConnectWithContext(ctx context.Context) error {
+func (a *awsS3Reader) Connect(ctx context.Context) error {
 	if a.session != nil {
 		return nil
 	}
@@ -595,25 +594,24 @@ func (a *awsS3Reader) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-func s3MsgFromParts(p *s3PendingObject, parts []*message.Part) *message.Batch {
-	msg := message.QuickBatch(nil)
-	msg.Append(parts...)
+func s3MsgFromParts(p *s3PendingObject, parts []*message.Part) message.Batch {
+	msg := message.Batch(parts)
 	_ = msg.Iter(func(_ int, part *message.Part) error {
-		part.MetaSet("s3_key", p.target.key)
-		part.MetaSet("s3_bucket", p.target.bucket)
+		part.MetaSetMut("s3_key", p.target.key)
+		part.MetaSetMut("s3_bucket", p.target.bucket)
 		if p.obj.LastModified != nil {
-			part.MetaSet("s3_last_modified", p.obj.LastModified.Format(time.RFC3339))
-			part.MetaSet("s3_last_modified_unix", strconv.FormatInt(p.obj.LastModified.Unix(), 10))
+			part.MetaSetMut("s3_last_modified", p.obj.LastModified.Format(time.RFC3339))
+			part.MetaSetMut("s3_last_modified_unix", p.obj.LastModified.Unix())
 		}
 		if p.obj.ContentType != nil {
-			part.MetaSet("s3_content_type", *p.obj.ContentType)
+			part.MetaSetMut("s3_content_type", *p.obj.ContentType)
 		}
 		if p.obj.ContentEncoding != nil {
-			part.MetaSet("s3_content_encoding", *p.obj.ContentEncoding)
+			part.MetaSetMut("s3_content_encoding", *p.obj.ContentEncoding)
 		}
 		for k, v := range p.obj.Metadata {
 			if v != nil {
-				part.MetaSet(k, *v)
+				part.MetaSetMut(k, *v)
 			}
 		}
 		return nil
@@ -656,6 +654,12 @@ func (a *awsS3Reader) getObjectTarget(ctx context.Context) (*s3PendingObject, er
 		obj:    obj,
 	}
 	if object.scanner, err = a.objectScannerCtor(target.key, obj.Body, target.ackFn); err != nil {
+		// Warning: NEVER return io.EOF from a scanner constructor, as this will
+		// falsely indicate that we've reached the end of our list of object
+		// targets when running an SQS feed.
+		if errors.Is(err, io.EOF) {
+			err = fmt.Errorf("encountered an empty file for key '%v'", target.key)
+		}
 		_ = target.ackFn(ctx, err)
 		return nil, err
 	}
@@ -664,8 +668,8 @@ func (a *awsS3Reader) getObjectTarget(ctx context.Context) (*s3PendingObject, er
 	return object, nil
 }
 
-// ReadWithContext attempts to read a new message from the target S3 bucket.
-func (a *awsS3Reader) ReadWithContext(ctx context.Context) (msg *message.Batch, ackFn reader.AsyncAckFn, err error) {
+// ReadBatch attempts to read a new message from the target S3 bucket.
+func (a *awsS3Reader) ReadBatch(ctx context.Context) (msg message.Batch, ackFn input.AsyncAckFn, err error) {
 	a.objectMut.Lock()
 	defer a.objectMut.Unlock()
 	if a.session == nil {
@@ -696,7 +700,7 @@ func (a *awsS3Reader) ReadWithContext(ctx context.Context) (msg *message.Batch, 
 			break
 		}
 		a.object = nil
-		if err != io.EOF {
+		if !errors.Is(err, io.EOF) {
 			return
 		}
 		if err = object.scanner.Close(ctx); err != nil {
@@ -716,19 +720,13 @@ func (a *awsS3Reader) ReadWithContext(ctx context.Context) (msg *message.Batch, 
 }
 
 // CloseAsync begins cleaning up resources used by this reader asynchronously.
-func (a *awsS3Reader) CloseAsync() {
-	go func() {
-		a.objectMut.Lock()
-		if a.object != nil {
-			a.object.scanner.Close(context.Background())
-			a.object = nil
-		}
-		a.objectMut.Unlock()
-	}()
-}
+func (a *awsS3Reader) Close(ctx context.Context) (err error) {
+	a.objectMut.Lock()
+	defer a.objectMut.Unlock()
 
-// WaitForClose will block until either the reader is closed or a specified
-// timeout occurs.
-func (a *awsS3Reader) WaitForClose(time.Duration) error {
-	return nil
+	if a.object != nil {
+		err = a.object.scanner.Close(ctx)
+		a.object = nil
+	}
+	return
 }

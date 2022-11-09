@@ -2,33 +2,47 @@ package pure
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/Jeffail/gabs/v2"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
-	bmock "github.com/benthosdev/benthos/v4/internal/bundle/mock"
 	"github.com/benthosdev/benthos/v4/internal/component"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 func TestRetryConfigErrs(t *testing.T) {
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "retry"
 
-	if _, err := bundle.AllOutputs.Init(conf, bmock.NewManager()); err == nil {
+	if _, err := bundle.AllOutputs.Init(conf, mock.NewManager()); err == nil {
 		t.Error("Expected error from bad retry output")
 	}
 
-	oConf := ooutput.NewConfig()
+	oConf := output.NewConfig()
 	conf.Retry.Output = &oConf
 	conf.Retry.Backoff.InitialInterval = "not a time period"
 
-	if _, err := bundle.AllOutputs.Init(conf, bmock.NewManager()); err == nil {
+	if _, err := bundle.AllOutputs.Init(conf, mock.NewManager()); err == nil {
 		t.Error("Expected error from bad initial period")
+	}
+}
+
+func assertEqualMsg(t testing.TB, left, right message.Batch) {
+	t.Helper()
+
+	require.Equal(t, left.Len(), right.Len())
+	for i := 0; i < left.Len(); i++ {
+		pLeft, pRight := left.Get(i), right.Get(i)
+
+		leftBytes, rightBytes := pLeft.AsBytes(), pRight.AsBytes()
+		assert.Equal(t, string(leftBytes), string(rightBytes))
 	}
 }
 
@@ -36,13 +50,13 @@ func TestRetryBasic(t *testing.T) {
 	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
 	defer done()
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "retry"
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	conf.Retry.Output = &childConf
 
-	output, err := bundle.AllOutputs.Init(conf, bmock.NewManager())
+	output, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,9 +92,7 @@ func TestRetryBasic(t *testing.T) {
 		t.Fatal("timed out")
 	}
 
-	if tran.Payload != testMsg {
-		t.Error("Wrong payload returned")
-	}
+	assertEqualMsg(t, tran.Payload, testMsg)
 	require.NoError(t, tran.Ack(ctx, nil))
 
 	select {
@@ -92,23 +104,23 @@ func TestRetryBasic(t *testing.T) {
 		t.Fatal("timed out")
 	}
 
-	output.CloseAsync()
-	require.NoError(t, output.WaitForClose(time.Second*30))
+	output.TriggerCloseNow()
+	require.NoError(t, output.WaitForClose(ctx))
 }
 
 func TestRetrySadPath(t *testing.T) {
 	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
 	defer done()
 
-	conf := ooutput.NewConfig()
+	conf := output.NewConfig()
 	conf.Type = "retry"
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	conf.Retry.Output = &childConf
 	conf.Retry.Backoff.InitialInterval = "10us"
 	conf.Retry.Backoff.MaxInterval = "10us"
 
-	output, err := bundle.AllOutputs.Init(conf, bmock.NewManager())
+	output, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,9 +160,7 @@ func TestRetrySadPath(t *testing.T) {
 			t.Fatal("timed out")
 		}
 
-		if tran.Payload != testMsg {
-			t.Error("Wrong payload returned")
-		}
+		assertEqualMsg(t, tran.Payload, testMsg)
 		require.NoError(t, tran.Ack(ctx, component.ErrFailedSend))
 	}
 
@@ -162,9 +172,7 @@ func TestRetrySadPath(t *testing.T) {
 		t.Fatal("timed out")
 	}
 
-	if tran.Payload != testMsg {
-		t.Error("Wrong payload returned")
-	}
+	assertEqualMsg(t, tran.Payload, testMsg)
 	require.NoError(t, tran.Ack(ctx, nil))
 
 	select {
@@ -176,15 +184,16 @@ func TestRetrySadPath(t *testing.T) {
 		t.Fatal("timed out")
 	}
 
-	output.CloseAsync()
-	require.NoError(t, output.WaitForClose(time.Second*30))
+	output.TriggerCloseNow()
+	require.NoError(t, output.WaitForClose(ctx))
 }
 
 func expectFromRetry(
 	resReturn error,
 	tChan <-chan message.Transaction,
 	t *testing.T,
-	responsesSlice ...string) {
+	responsesSlice ...string,
+) {
 	t.Helper()
 
 	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
@@ -200,7 +209,7 @@ func expectFromRetry(
 	for len(responses) > 0 {
 		select {
 		case tran := <-tChan:
-			act := string(tran.Payload.Get(0).Get())
+			act := string(tran.Payload.Get(0).AsBytes())
 			if _, exists := responses[act]; exists {
 				delete(responses, act)
 			} else {
@@ -252,15 +261,18 @@ func ackForRetry(
 }
 
 func TestRetryParallel(t *testing.T) {
-	conf := ooutput.NewConfig()
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	conf := output.NewConfig()
 	conf.Type = "retry"
 
-	childConf := ooutput.NewConfig()
+	childConf := output.NewConfig()
 	conf.Retry.Output = &childConf
 	conf.Retry.Backoff.InitialInterval = "10us"
 	conf.Retry.Backoff.MaxInterval = "10us"
 
-	output, err := bundle.AllOutputs.Init(conf, bmock.NewManager())
+	output, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +316,88 @@ func TestRetryParallel(t *testing.T) {
 	expectFromRetry(nil, mOut.TChan, t, "fourth")
 	ackForRetry(nil, resChan2, t)
 
-	output.CloseAsync()
-	require.NoError(t, output.WaitForClose(time.Second*30))
+	output.TriggerCloseNow()
+	require.NoError(t, output.WaitForClose(ctx))
+}
+
+func TestRetryMutations(t *testing.T) {
+	mockOutput := &mock.OutputChanneled{}
+
+	conf := output.NewConfig()
+	conf.Type = "retry"
+
+	childConf := output.NewConfig()
+	conf.Retry.Output = &childConf
+	conf.Retry.Backoff.InitialInterval = "10us"
+	conf.Retry.Backoff.MaxInterval = "10us"
+
+	output, err := bundle.AllOutputs.Init(conf, mock.NewManager())
+	require.NoError(t, err)
+
+	ret, ok := output.(*indefiniteRetry)
+	require.True(t, ok)
+
+	ret.wrapped = mockOutput
+
+	readChan := make(chan message.Transaction)
+	require.NoError(t, ret.Consume(readChan))
+
+	tCtx, done := context.WithTimeout(context.Background(), time.Second*10)
+	defer done()
+
+	inMsg := message.NewPart(nil)
+	inMsg.SetStructuredMut(map[string]any{
+		"hello": "world",
+	})
+
+	inBatch := message.Batch{inMsg}
+	select {
+	case readChan <- message.NewTransactionFunc(inBatch, func(ctx context.Context, _ error) error {
+		inStruct, err := inMsg.AsStructuredMut()
+		require.NoError(t, err)
+
+		assert.Equal(t, map[string]any{
+			"hello": "world",
+		}, inStruct)
+
+		_, err = gabs.Wrap(inStruct).Set("quack", "moo")
+		require.NoError(t, err)
+		return nil
+	}):
+	case <-time.After(time.Second):
+		t.Errorf("Timed out waiting for broker send")
+		return
+	}
+
+	testMockOutput := func(mockOutput *mock.OutputChanneled, ackErr error) {
+		var ts message.Transaction
+		select {
+		case ts = <-mockOutput.TChan:
+		case <-time.After(time.Second):
+			t.Fatal("Timed out waiting for broker propagate")
+		}
+
+		outStruct, err := ts.Payload.Get(0).AsStructuredMut()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"hello": "world",
+		}, outStruct)
+
+		_, err = gabs.Wrap(outStruct).Set("woof", "meow")
+		require.NoError(t, err)
+		require.NoError(t, ts.Ack(tCtx, ackErr))
+	}
+
+	testMockOutput(mockOutput, errors.New("test err"))
+	testMockOutput(mockOutput, nil)
+
+	output.TriggerCloseNow()
+	require.NoError(t, output.WaitForClose(tCtx))
+
+	inStruct, err := inMsg.AsStructured()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"hello": "world",
+		"moo":   "quack",
+	}, inStruct)
 }

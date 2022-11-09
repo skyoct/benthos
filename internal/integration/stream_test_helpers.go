@@ -14,17 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benthosdev/benthos/v4/internal/bundle"
 	iinput "github.com/benthosdev/benthos/v4/internal/component/input"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	ioutput "github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/config"
-	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/manager"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
@@ -112,7 +109,7 @@ type streamTestEnvironment struct {
 	ctx     context.Context
 	log     log.Modular
 	stats   *metrics.Namespaced
-	mgr     interop.Manager
+	mgr     bundle.NewManagement
 
 	allowDuplicateMessages bool
 
@@ -449,16 +446,16 @@ func initInput(t testing.TB, env *streamTestEnvironment) iinput.Streamed {
 	dec.KnownFields(true)
 	require.NoError(t, dec.Decode(&s))
 
-	lints, err := config.LintBytes(docs.NewLintContext(), confBytes)
+	lints, err := config.LintBytes(config.LintOptions{}, confBytes)
 	require.NoError(t, err)
 	assert.Empty(t, lints)
 
 	if env.mgr == nil {
-		env.mgr, err = manager.NewV2(s.ResourceConfig, nil, env.log, env.stats)
+		env.mgr, err = manager.New(s.ResourceConfig, manager.OptSetLogger(env.log), manager.OptSetMetrics(env.stats))
 		require.NoError(t, err)
 	}
 
-	input, err := input.New(s.Input, env.mgr, env.log, env.stats)
+	input, err := env.mgr.NewInput(s.Input)
 	require.NoError(t, err)
 
 	if env.sleepAfterInput > 0 {
@@ -478,21 +475,20 @@ func initOutput(t testing.TB, trans <-chan message.Transaction, env *streamTestE
 	dec.KnownFields(true)
 	require.NoError(t, dec.Decode(&s))
 
-	lints, err := config.LintBytes(docs.NewLintContext(), confBytes)
+	lints, err := config.LintBytes(config.LintOptions{}, confBytes)
 	require.NoError(t, err)
 	assert.Empty(t, lints)
 
 	if env.mgr == nil {
-		env.mgr, err = manager.NewV2(s.ResourceConfig, nil, env.log, env.stats)
+		env.mgr, err = manager.New(s.ResourceConfig, manager.OptSetLogger(env.log), manager.OptSetMetrics(env.stats))
 		require.NoError(t, err)
 	}
 
-	output, err := output.New(s.Output, env.mgr, env.log, env.stats)
+	output, err := env.mgr.NewOutput(s.Output)
 	require.NoError(t, err)
 
 	require.NoError(t, output.Consume(trans))
 
-	require.Error(t, output.WaitForClose(time.Millisecond*100))
 	if env.sleepAfterOutput > 0 {
 		time.Sleep(env.sleepAfterOutput)
 	}
@@ -500,14 +496,14 @@ func initOutput(t testing.TB, trans <-chan message.Transaction, env *streamTestE
 	return output
 }
 
-func closeConnectors(t testing.TB, input iinput.Streamed, output ioutput.Streamed) {
+func closeConnectors(t testing.TB, env *streamTestEnvironment, input iinput.Streamed, output ioutput.Streamed) {
 	if output != nil {
-		output.CloseAsync()
-		require.NoError(t, output.WaitForClose(time.Second*10))
+		output.TriggerCloseNow()
+		require.NoError(t, output.WaitForClose(env.ctx))
 	}
 	if input != nil {
-		input.CloseAsync()
-		require.NoError(t, input.WaitForClose(time.Second*10))
+		input.TriggerStopConsuming()
+		require.NoError(t, input.WaitForClose(env.ctx))
 	}
 }
 
@@ -522,11 +518,9 @@ func sendMessage(
 
 	p := message.NewPart([]byte(content))
 	for i := 0; i < len(metadata); i += 2 {
-		p.MetaSet(metadata[i], metadata[i+1])
+		p.MetaSetMut(metadata[i], metadata[i+1])
 	}
-	msg := message.QuickBatch(nil)
-	msg.Append(p)
-
+	msg := message.Batch{p}
 	resChan := make(chan error)
 
 	select {
@@ -554,7 +548,7 @@ func sendBatch(
 
 	msg := message.QuickBatch(nil)
 	for _, payload := range content {
-		msg.Append(message.NewPart([]byte(payload)))
+		msg = append(msg, message.NewPart([]byte(payload)))
 	}
 
 	resChan := make(chan error)
@@ -583,13 +577,27 @@ func receiveMessage(
 ) *message.Part {
 	t.Helper()
 
-	b, ackFn := receiveMessageNoRes(ctx, t, tranChan)
+	b, ackFn := receiveBatchNoRes(ctx, t, tranChan)
+	require.NoError(t, ackFn(ctx, err))
+	require.Len(t, b, 1)
+
+	return b.Get(0)
+}
+
+func receiveBatch(
+	ctx context.Context,
+	t testing.TB,
+	tranChan <-chan message.Transaction,
+	err error,
+) message.Batch {
+	t.Helper()
+
+	b, ackFn := receiveBatchNoRes(ctx, t, tranChan)
 	require.NoError(t, ackFn(ctx, err))
 	return b
 }
 
-// nolint:gocritic // Ignore unnamedResult false positive
-func receiveMessageNoRes(ctx context.Context, t testing.TB, tranChan <-chan message.Transaction) (*message.Part, func(context.Context, error) error) {
+func receiveBatchNoRes(ctx context.Context, t testing.TB, tranChan <-chan message.Transaction) (message.Batch, func(context.Context, error) error) { //nolint: gocritic // Ignore unnamedResult false positive
 	t.Helper()
 
 	var tran message.Transaction
@@ -601,41 +609,50 @@ func receiveMessageNoRes(ctx context.Context, t testing.TB, tranChan <-chan mess
 	}
 
 	require.True(t, open)
-	require.Equal(t, tran.Payload.Len(), 1)
+	return tran.Payload, tran.Ack
+}
 
-	return tran.Payload.Get(0), tran.Ack
+func receiveMessageNoRes(ctx context.Context, t testing.TB, tranChan <-chan message.Transaction) (*message.Part, func(context.Context, error) error) { //nolint: gocritic // Ignore unnamedResult false positive
+	t.Helper()
+
+	b, fn := receiveBatchNoRes(ctx, t, tranChan)
+	require.Len(t, b, 1)
+
+	return b.Get(0), fn
 }
 
 func messageMatch(t testing.TB, p *message.Part, content string, metadata ...string) {
 	t.Helper()
 
-	assert.Equal(t, content, string(p.Get()))
+	assert.Equal(t, content, string(p.AsBytes()))
 
 	allMetadata := map[string]string{}
-	_ = p.MetaIter(func(k, v string) error {
+	_ = p.MetaIterStr(func(k, v string) error {
 		allMetadata[k] = v
 		return nil
 	})
 
 	for i := 0; i < len(metadata); i += 2 {
-		assert.Equal(t, metadata[i+1], p.MetaGet(metadata[i]), fmt.Sprintf("metadata: %v", allMetadata))
+		assert.Equal(t, metadata[i+1], p.MetaGetStr(metadata[i]), fmt.Sprintf("metadata: %v", allMetadata))
 	}
 }
 
-func messageInSet(t testing.TB, pop, allowDupes bool, p *message.Part, set map[string][]string) {
+func messagesInSet(t testing.TB, pop, allowDupes bool, b message.Batch, set map[string][]string) {
 	t.Helper()
 
-	metadata, exists := set[string(p.Get())]
-	if allowDupes && !exists {
-		return
-	}
-	require.True(t, exists, "in set: %v, set: %v", string(p.Get()), set)
+	for _, p := range b {
+		metadata, exists := set[string(p.AsBytes())]
+		if allowDupes && !exists {
+			return
+		}
+		require.True(t, exists, "in set: %v, set: %v", string(p.AsBytes()), set)
 
-	for i := 0; i < len(metadata); i += 2 {
-		assert.Equal(t, metadata[i+1], p.MetaGet(metadata[i]))
-	}
+		for i := 0; i < len(metadata); i += 2 {
+			assert.Equal(t, metadata[i+1], p.MetaGetStr(metadata[i]))
+		}
 
-	if pop {
-		delete(set, string(p.Get()))
+		if pop {
+			delete(set, string(p.AsBytes()))
+		}
 	}
 }

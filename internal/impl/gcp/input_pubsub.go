@@ -2,26 +2,22 @@ package gcp
 
 import (
 	"context"
-	"strconv"
 	"sync"
-	"time"
 
 	"cloud.google.com/go/pubsub"
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
-	iinput "github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/component/metrics"
 	"github.com/benthosdev/benthos/v4/internal/docs"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c input.Config, nm bundle.NewManagement) (iinput.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		return newGCPPubSubInput(c, nm, nm.Logger(), nm.Metrics())
 	}), docs.ComponentSpec{
 		Name:    "gcp_pubsub",
@@ -58,13 +54,13 @@ You can access these metadata fields using
 	}
 }
 
-func newGCPPubSubInput(conf input.Config, mgr interop.Manager, log log.Modular, stats metrics.Type) (iinput.Streamed, error) {
-	var c reader.Async
+func newGCPPubSubInput(conf input.Config, mgr bundle.NewManagement, log log.Modular, stats metrics.Type) (input.Streamed, error) {
+	var c input.Async
 	var err error
 	if c, err = newGCPPubSubReader(conf.GCPPubSub, log, stats); err != nil {
 		return nil, err
 	}
-	return input.NewAsyncReader("gcp_pubsub", true, c, log, stats)
+	return input.NewAsyncReader("gcp_pubsub", true, c, mgr)
 }
 
 type gcpPubSubReader struct {
@@ -92,7 +88,7 @@ func newGCPPubSubReader(conf input.GCPPubSubConfig, log log.Modular, stats metri
 	}, nil
 }
 
-func (c *gcpPubSubReader) ConnectWithContext(ignored context.Context) error {
+func (c *gcpPubSubReader) Connect(ignored context.Context) error {
 	c.subMut.Lock()
 	defer c.subMut.Unlock()
 	if c.subscription != nil {
@@ -136,15 +132,13 @@ func (c *gcpPubSubReader) ConnectWithContext(ignored context.Context) error {
 	return nil
 }
 
-func (c *gcpPubSubReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+func (c *gcpPubSubReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	c.subMut.Lock()
 	msgsChan := c.msgsChan
 	c.subMut.Unlock()
 	if msgsChan == nil {
 		return nil, nil, component.ErrNotConnected
 	}
-
-	msg := message.QuickBatch(nil)
 
 	var gmsg *pubsub.Message
 	var open bool
@@ -159,11 +153,11 @@ func (c *gcpPubSubReader) ReadWithContext(ctx context.Context) (*message.Batch, 
 
 	part := message.NewPart(gmsg.Data)
 	for k, v := range gmsg.Attributes {
-		part.MetaSet(k, v)
+		part.MetaSetMut(k, v)
 	}
-	part.MetaSet("gcp_pubsub_publish_time_unix", strconv.FormatInt(gmsg.PublishTime.Unix(), 10))
-	msg.Append(part)
+	part.MetaSetMut("gcp_pubsub_publish_time_unix", gmsg.PublishTime.Unix())
 
+	msg := message.Batch{part}
 	return msg, func(ctx context.Context, res error) error {
 		if res != nil {
 			gmsg.Nack()
@@ -174,15 +168,13 @@ func (c *gcpPubSubReader) ReadWithContext(ctx context.Context) (*message.Batch, 
 	}, nil
 }
 
-func (c *gcpPubSubReader) CloseAsync() {
+func (c *gcpPubSubReader) Close(ctx context.Context) error {
 	c.subMut.Lock()
+	defer c.subMut.Unlock()
+
 	if c.closeFunc != nil {
 		c.closeFunc()
 		c.closeFunc = nil
 	}
-	c.subMut.Unlock()
-}
-
-func (c *gcpPubSubReader) WaitForClose(time.Duration) error {
 	return nil
 }

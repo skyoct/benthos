@@ -12,10 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/benthosdev/benthos/v4/internal/batch"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
 	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	ooutput "github.com/benthosdev/benthos/v4/internal/old/output"
 )
 
 type mockDynamoDB struct {
@@ -33,14 +32,14 @@ func (m *mockDynamoDB) BatchWriteItem(input *dynamodb.BatchWriteItemInput) (*dyn
 }
 
 func TestDynamoDBHappy(t *testing.T) {
-	conf := ooutput.NewDynamoDBConfig()
+	conf := output.NewDynamoDBConfig()
 	conf.StringColumns = map[string]string{
 		"id":      `${!json("id")}`,
 		"content": `${!json("content")}`,
 	}
 	conf.Table = "FooTable"
 
-	db, err := newDynamoDBWriter(conf, mock.NewManager(), log.Noop())
+	db, err := newDynamoDBWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	var request map[string][]*dynamodb.WriteRequest
@@ -56,7 +55,7 @@ func TestDynamoDBHappy(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, db.WriteWithContext(context.Background(), message.QuickBatch([][]byte{
+	require.NoError(t, db.WriteBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte(`{"id":"foo","content":"foo stuff"}`),
 		[]byte(`{"id":"bar","content":"bar stuff"}`),
 	})))
@@ -96,7 +95,7 @@ func TestDynamoDBHappy(t *testing.T) {
 func TestDynamoDBSadToGood(t *testing.T) {
 	t.Parallel()
 
-	conf := ooutput.NewDynamoDBConfig()
+	conf := output.NewDynamoDBConfig()
 	conf.StringColumns = map[string]string{
 		"id":      `${!json("id")}`,
 		"content": `${!json("content")}`,
@@ -104,7 +103,7 @@ func TestDynamoDBSadToGood(t *testing.T) {
 	conf.Backoff.MaxElapsedTime = "100ms"
 	conf.Table = "FooTable"
 
-	db, err := newDynamoDBWriter(conf, mock.NewManager(), log.Noop())
+	db, err := newDynamoDBWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	var batchRequest []*dynamodb.WriteRequest
@@ -131,7 +130,7 @@ func TestDynamoDBSadToGood(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, db.WriteWithContext(context.Background(), message.QuickBatch([][]byte{
+	require.NoError(t, db.WriteBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte(`{"id":"foo","content":"foo stuff"}`),
 		[]byte(`{"id":"bar","content":"bar stuff"}`),
 		[]byte(`{"id":"baz","content":"baz stuff"}`),
@@ -196,14 +195,14 @@ func TestDynamoDBSadToGood(t *testing.T) {
 func TestDynamoDBSadToGoodBatch(t *testing.T) {
 	t.Parallel()
 
-	conf := ooutput.NewDynamoDBConfig()
+	conf := output.NewDynamoDBConfig()
 	conf.StringColumns = map[string]string{
 		"id":      `${!json("id")}`,
 		"content": `${!json("content")}`,
 	}
 	conf.Table = "FooTable"
 
-	db, err := newDynamoDBWriter(conf, mock.NewManager(), log.Noop())
+	db, err := newDynamoDBWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	var requests [][]*dynamodb.WriteRequest
@@ -243,7 +242,7 @@ func TestDynamoDBSadToGoodBatch(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, db.WriteWithContext(context.Background(), message.QuickBatch([][]byte{
+	require.NoError(t, db.WriteBatch(context.Background(), message.QuickBatch([][]byte{
 		[]byte(`{"id":"foo","content":"foo stuff"}`),
 		[]byte(`{"id":"bar","content":"bar stuff"}`),
 		[]byte(`{"id":"baz","content":"baz stuff"}`),
@@ -294,14 +293,14 @@ func TestDynamoDBSadToGoodBatch(t *testing.T) {
 func TestDynamoDBSad(t *testing.T) {
 	t.Parallel()
 
-	conf := ooutput.NewDynamoDBConfig()
+	conf := output.NewDynamoDBConfig()
 	conf.StringColumns = map[string]string{
 		"id":      `${!json("id")}`,
 		"content": `${!json("content")}`,
 	}
 	conf.Table = "FooTable"
 
-	db, err := newDynamoDBWriter(conf, mock.NewManager(), log.Noop())
+	db, err := newDynamoDBWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	var batchRequest []*dynamodb.WriteRequest
@@ -343,7 +342,7 @@ func TestDynamoDBSad(t *testing.T) {
 
 	expErr := batch.NewError(msg, errors.New("woop"))
 	expErr.Failed(1, barErr)
-	require.Equal(t, expErr, db.WriteWithContext(context.Background(), msg))
+	require.Equal(t, expErr, db.WriteBatch(context.Background(), msg))
 
 	batchExpected := []*dynamodb.WriteRequest{
 		{
@@ -404,14 +403,14 @@ func TestDynamoDBSad(t *testing.T) {
 func TestDynamoDBSadBatch(t *testing.T) {
 	t.Parallel()
 
-	conf := ooutput.NewDynamoDBConfig()
+	conf := output.NewDynamoDBConfig()
 	conf.StringColumns = map[string]string{
 		"id":      `${!json("id")}`,
 		"content": `${!json("content")}`,
 	}
 	conf.Table = "FooTable"
 
-	db, err := newDynamoDBWriter(conf, mock.NewManager(), log.Noop())
+	db, err := newDynamoDBWriter(conf, mock.NewManager())
 	require.NoError(t, err)
 
 	var requests [][]*dynamodb.WriteRequest
@@ -457,7 +456,7 @@ func TestDynamoDBSadBatch(t *testing.T) {
 
 	expErr := batch.NewError(msg, errors.New("failed to set 1 items"))
 	expErr.Failed(1, errors.New("failed to set item"))
-	require.Equal(t, expErr, db.WriteWithContext(context.Background(), msg))
+	require.Equal(t, expErr, db.WriteBatch(context.Background(), msg))
 
 	expected := [][]*dynamodb.WriteRequest{
 		{

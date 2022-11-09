@@ -1,15 +1,16 @@
 package pure_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	yaml "gopkg.in/yaml.v3"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	_ "github.com/benthosdev/benthos/v4/internal/impl/pure"
 )
@@ -77,7 +78,7 @@ archive:
 		[]byte(` hello foo bar world 2 `),
 		[]byte(` hello bar world 2 `),
 	})
-	msgs, res := proc.ProcessMessage(input)
+	msgs, res := proc.ProcessBatch(context.Background(), input)
 	require.Nil(t, res)
 
 	for _, msg := range msgs {

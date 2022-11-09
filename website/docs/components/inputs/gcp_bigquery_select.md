@@ -32,6 +32,7 @@ input:
     columns: []
     where: ""
     job_labels: {}
+    priority: ""
     args_mapping: ""
     prefix: ""
     suffix: ""
@@ -122,6 +123,14 @@ A list of labels to add to the query job.
 Type: `object`  
 Default: `{}`  
 
+### `priority`
+
+The priority with which to schedule the query.
+
+
+Type: `string`  
+Default: `""`  
+
 ### `args_mapping`
 
 An optional [Bloblang mapping](/docs/guides/bloblang/about) which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `where`.
@@ -132,7 +141,7 @@ Type: `string`
 ```yml
 # Examples
 
-args_mapping: root = [ "article", now().format_timestamp("2006-01-02") ]
+args_mapping: root = [ "article", now().ts_format("2006-01-02") ]
 ```
 
 ### `prefix`

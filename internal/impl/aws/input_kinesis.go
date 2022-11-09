@@ -20,23 +20,21 @@ import (
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/component"
 	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/input/processors"
 	"github.com/benthosdev/benthos/v4/internal/docs"
 	"github.com/benthosdev/benthos/v4/internal/impl/aws/session"
-	"github.com/benthosdev/benthos/v4/internal/interop"
 	"github.com/benthosdev/benthos/v4/internal/log"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	oinput "github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/input/reader"
 	"github.com/benthosdev/benthos/v4/internal/old/util/retries"
 )
 
 func init() {
-	err := bundle.AllInputs.Add(bundle.InputConstructorFromSimple(func(c oinput.Config, nm bundle.NewManagement) (input.Streamed, error) {
+	err := bundle.AllInputs.Add(processors.WrapConstructor(func(c input.Config, nm bundle.NewManagement) (input.Streamed, error) {
 		rdr, err := newKinesisReader(c.AWSKinesis, nm)
 		if err != nil {
 			return nil, err
 		}
-		return oinput.NewAsyncReader("aws_kinesis", false, reader.NewAsyncPreserver(rdr), nm.Logger(), nm.Metrics())
+		return input.NewAsyncReader("aws_kinesis", false, input.NewAsyncPreserver(rdr), nm)
 	}), docs.ComponentSpec{
 		Name:    "aws_kinesis",
 		Status:  docs.StatusStable,
@@ -80,7 +78,7 @@ Use the ` + "`batching`" + ` fields to configure an optional [batching policy](/
 			docs.FieldBool("start_from_oldest", "Whether to consume from the oldest message when a sequence does not yet exist for the stream."),
 		).WithChildren(session.FieldSpecs()...).
 			WithChildren(policy.FieldSpec()).
-			ChildDefaultAndTypesFromStruct(oinput.NewAWSKinesisConfig()),
+			ChildDefaultAndTypesFromStruct(input.NewAWSKinesisConfig()),
 		Categories: []string{
 			"Services",
 			"AWS",
@@ -93,21 +91,19 @@ Use the ` + "`batching`" + ` fields to configure an optional [batching policy](/
 
 //------------------------------------------------------------------------------
 
-var (
-	awsKinesisDefaultLimit = int64(10e3)
-)
+var awsKinesisDefaultLimit = int64(10e3)
 
 type asyncMessage struct {
-	msg   *message.Batch
-	ackFn reader.AsyncAckFn
+	msg   message.Batch
+	ackFn input.AsyncAckFn
 }
 
 type kinesisReader struct {
-	conf     oinput.AWSKinesisConfig
+	conf     input.AWSKinesisConfig
 	clientID string
 
 	log log.Modular
-	mgr interop.Manager
+	mgr bundle.NewManagement
 
 	backoffCtor func() backoff.BackOff
 	boffPool    sync.Pool
@@ -134,7 +130,7 @@ type kinesisReader struct {
 
 var errCannotMixBalancedShards = errors.New("it is not currently possible to include balanced and explicit shard streams in the same kinesis input")
 
-func newKinesisReader(conf oinput.AWSKinesisConfig, mgr interop.Manager) (*kinesisReader, error) {
+func newKinesisReader(conf input.AWSKinesisConfig, mgr bundle.NewManagement) (*kinesisReader, error) {
 	if conf.Batching.IsNoop() {
 		conf.Batching.Count = 1
 	}
@@ -161,7 +157,7 @@ func newKinesisReader(conf oinput.AWSKinesisConfig, mgr interop.Manager) (*kines
 		return nil, err
 	}
 	k.boffPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return k.backoffCtor()
 		},
 	}
@@ -345,7 +341,7 @@ func (k *kinesisReader) runConsumer(wg *sync.WaitGroup, streamID, shardID, start
 	go func() {
 		defer func() {
 			commitCtxClose()
-			recordBatcher.Close(state == awsKinesisConsumerFinished)
+			recordBatcher.Close(context.Background(), state == awsKinesisConsumerFinished)
 			boff.Reset()
 			k.boffPool.Put(boff)
 
@@ -677,8 +673,8 @@ func (k *kinesisReader) runExplicitShards() {
 
 //------------------------------------------------------------------------------
 
-// ConnectWithContext establishes a kafkaReader connection.
-func (k *kinesisReader) ConnectWithContext(ctx context.Context) error {
+// Connect establishes a kafkaReader connection.
+func (k *kinesisReader) Connect(ctx context.Context) error {
 	k.cMut.Lock()
 	defer k.cMut.Unlock()
 	if k.msgChan != nil {
@@ -708,8 +704,8 @@ func (k *kinesisReader) ConnectWithContext(ctx context.Context) error {
 	return nil
 }
 
-// ReadWithContext attempts to read a message from Kinesis.
-func (k *kinesisReader) ReadWithContext(ctx context.Context) (*message.Batch, reader.AsyncAckFn, error) {
+// ReadBatch attempts to read a message from Kinesis.
+func (k *kinesisReader) ReadBatch(ctx context.Context) (message.Batch, input.AsyncAckFn, error) {
 	k.cMut.Lock()
 	msgChan := k.msgChan
 	k.cMut.Unlock()
@@ -730,16 +726,12 @@ func (k *kinesisReader) ReadWithContext(ctx context.Context) (*message.Batch, re
 }
 
 // CloseAsync shuts down the Kinesis input and stops processing requests.
-func (k *kinesisReader) CloseAsync() {
+func (k *kinesisReader) Close(ctx context.Context) error {
 	k.done()
-}
-
-// WaitForClose blocks until the Kinesis input has closed down.
-func (k *kinesisReader) WaitForClose(timeout time.Duration) error {
 	select {
 	case <-k.closedChan:
-	case <-time.After(timeout):
-		return component.ErrTimeout
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }

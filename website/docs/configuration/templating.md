@@ -67,10 +67,10 @@ input:
 
 pipeline:
   processors:
-    - bloblang: |
+    - mapping: |
         root.id = uuid_v4()
         root.foo = this.inner.foo
-        root.body = this.outter
+        root.body = this.outer
 ```
 
 </TabItem>
@@ -89,10 +89,10 @@ input:
 
 pipeline:
   processors:
-    - bloblang: |
+    - mapping: |
         root.id = uuid_v4()
         root.foo = this.inner.foo
-        root.body = this.outter
+        root.body = this.outer
 ```
 
 </TabItem>
@@ -231,6 +231,8 @@ Type: `string`
 ### `metrics_mapping`
 
 An optional [Bloblang mapping](/docs/guides/bloblang/about) that allows you to rename or prevent certain metrics paths from being exported. For more information check out the [metrics documentation](/docs/components/metrics/about#metric-mapping). When metric paths are created, renamed and dropped a trace log is written, enabling TRACE level logging is therefore a good way to diagnose path mappings.
+
+Invocations of this mapping are able to reference a variable $label in order to obtain the value of the label provided to the template config. This allows you to match labels with the root of the config.
 
 
 Type: `string`  

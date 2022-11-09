@@ -9,19 +9,16 @@ import (
 
 	"github.com/benthosdev/benthos/v4/internal/bundle"
 	"github.com/benthosdev/benthos/v4/internal/bundle/tracing"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
+	"github.com/benthosdev/benthos/v4/internal/component/input"
+	"github.com/benthosdev/benthos/v4/internal/component/output"
+	"github.com/benthosdev/benthos/v4/internal/component/processor"
 	"github.com/benthosdev/benthos/v4/internal/manager"
-	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
-	"github.com/benthosdev/benthos/v4/internal/old/processor"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func TestBundleInputTracing(t *testing.T) {
@@ -29,16 +26,13 @@ func TestBundleInputTracing(t *testing.T) {
 
 	inConfig := input.NewConfig()
 	inConfig.Label = "foo"
-	inConfig.Type = input.TypeGenerate
+	inConfig.Type = "generate"
 	inConfig.Generate.Count = 10
 	inConfig.Generate.Interval = "1us"
 	inConfig.Generate.Mapping = `root.count = count("counting the number of input tracing messages")`
 
-	mgr, err := manager.NewV2(
+	mgr, err := manager.New(
 		manager.NewResourceConfig(),
-		mock.NewManager(),
-		log.Noop(),
-		metrics.Noop(),
 		manager.OptSetEnvironment(tenv),
 	)
 	require.NoError(t, err)
@@ -57,8 +51,8 @@ func TestBundleInputTracing(t *testing.T) {
 		}
 	}
 
-	in.CloseAsync()
-	require.NoError(t, in.WaitForClose(time.Second))
+	in.TriggerStopConsuming()
+	require.NoError(t, in.WaitForClose(ctx))
 
 	assert.Equal(t, uint64(10), summary.Input)
 	assert.Equal(t, uint64(0), summary.ProcessorErrors)
@@ -81,13 +75,10 @@ func TestBundleOutputTracing(t *testing.T) {
 
 	outConfig := output.NewConfig()
 	outConfig.Label = "foo"
-	outConfig.Type = output.TypeDrop
+	outConfig.Type = "drop"
 
-	mgr, err := manager.NewV2(
+	mgr, err := manager.New(
 		manager.NewResourceConfig(),
-		mock.NewManager(),
-		log.Noop(),
-		metrics.Noop(),
 		manager.OptSetEnvironment(tenv),
 	)
 	require.NoError(t, err)
@@ -113,8 +104,11 @@ func TestBundleOutputTracing(t *testing.T) {
 		}
 	}
 
-	out.CloseAsync()
-	require.NoError(t, out.WaitForClose(time.Second))
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	out.TriggerCloseNow()
+	require.NoError(t, out.WaitForClose(ctx))
 
 	assert.Equal(t, uint64(0), summary.Input)
 	assert.Equal(t, uint64(0), summary.ProcessorErrors)
@@ -137,18 +131,15 @@ func TestBundleOutputWithProcessorsTracing(t *testing.T) {
 
 	outConfig := output.NewConfig()
 	outConfig.Label = "foo"
-	outConfig.Type = output.TypeDrop
+	outConfig.Type = "drop"
 
 	blobConf := processor.NewConfig()
 	blobConf.Type = "bloblang"
 	blobConf.Bloblang = "root = content().uppercase()"
 	outConfig.Processors = append(outConfig.Processors, blobConf)
 
-	mgr, err := manager.NewV2(
+	mgr, err := manager.New(
 		manager.NewResourceConfig(),
-		mock.NewManager(),
-		log.Noop(),
-		metrics.Noop(),
 		manager.OptSetEnvironment(tenv),
 	)
 	require.NoError(t, err)
@@ -174,8 +165,12 @@ func TestBundleOutputWithProcessorsTracing(t *testing.T) {
 		}
 	}
 
-	out.CloseAsync()
-	require.NoError(t, out.WaitForClose(time.Second))
+	close(tranChan)
+
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	require.NoError(t, out.WaitForClose(ctx))
 
 	assert.Equal(t, uint64(0), summary.Input)
 	assert.Equal(t, uint64(0), summary.ProcessorErrors)
@@ -210,7 +205,102 @@ func TestBundleOutputWithProcessorsTracing(t *testing.T) {
 	}
 }
 
+func TestBundleOutputWithBatchProcessorsTracing(t *testing.T) {
+	tenv, summary := tracing.TracedBundle(bundle.GlobalEnvironment)
+
+	dropConfig := output.NewConfig()
+	dropConfig.Label = "foo"
+	dropConfig.Type = "drop"
+
+	outConfig := output.NewConfig()
+	outConfig.Type = "broker"
+	outConfig.Broker.Outputs = append(outConfig.Broker.Outputs, dropConfig)
+	outConfig.Broker.Batching.Count = 2
+
+	blobConf := processor.NewConfig()
+	blobConf.Type = "bloblang"
+	blobConf.Bloblang = "root = content().uppercase()"
+	outConfig.Broker.Batching.Processors = append(outConfig.Broker.Batching.Processors, blobConf)
+
+	mgr, err := manager.New(
+		manager.NewResourceConfig(),
+		manager.OptSetEnvironment(tenv),
+	)
+	require.NoError(t, err)
+
+	out, err := mgr.NewOutput(outConfig)
+	require.NoError(t, err)
+
+	tranChan := make(chan message.Transaction)
+	require.NoError(t, out.Consume(tranChan))
+
+	for i := 0; i < 5; i++ {
+		resChan := make(chan error)
+		tran := message.NewTransaction(message.QuickBatch([][]byte{
+			[]byte("hello world " + strconv.Itoa(i*2)),
+			[]byte("hello world " + strconv.Itoa(i*2+1)),
+		}), resChan)
+		select {
+		case tranChan <- tran:
+			select {
+			case <-resChan:
+			case <-time.After(time.Second):
+				t.Fatal("timed out", i)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		}
+	}
+
+	ctx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
+	out.TriggerCloseNow()
+	require.NoError(t, out.WaitForClose(ctx))
+
+	assert.Equal(t, 0, int(summary.Input))
+	assert.Equal(t, 0, int(summary.ProcessorErrors))
+	assert.Equal(t, 20, int(summary.Output))
+
+	outEvents := summary.OutputEvents()
+	require.Contains(t, outEvents, "foo")
+
+	outputEvents := outEvents["foo"]
+	require.Len(t, outputEvents, 10)
+
+	for i, e := range outputEvents {
+		assert.Equal(t, tracing.EventConsume, e.Type)
+		assert.Equal(t, "HELLO WORLD "+strconv.Itoa(i), e.Content)
+	}
+
+	procEvents := summary.ProcessorEvents()
+	require.Contains(t, procEvents, "root.batching.processors.0")
+
+	processorEvents := procEvents["root.batching.processors.0"]
+	require.Len(t, processorEvents, 20)
+
+	for i := 0; i < len(processorEvents); i += 4 {
+		consumeEventA := processorEvents[i]
+		consumeEventB := processorEvents[i+1]
+		produceEventA := processorEvents[i+2]
+		produceEventB := processorEvents[i+3]
+
+		assert.Equal(t, tracing.EventConsume, consumeEventA.Type)
+		assert.Equal(t, tracing.EventConsume, consumeEventB.Type)
+		assert.Equal(t, tracing.EventProduce, produceEventA.Type)
+		assert.Equal(t, tracing.EventProduce, produceEventB.Type)
+
+		assert.Equal(t, "hello world "+strconv.Itoa(i/2), consumeEventA.Content, i)
+		assert.Equal(t, "hello world "+strconv.Itoa(i/2+1), consumeEventB.Content, i)
+		assert.Equal(t, "HELLO WORLD "+strconv.Itoa(i/2), produceEventA.Content, i)
+		assert.Equal(t, "HELLO WORLD "+strconv.Itoa(i/2+1), produceEventB.Content, i)
+	}
+}
+
 func TestBundleProcessorTracing(t *testing.T) {
+	tCtx, done := context.WithTimeout(context.Background(), time.Second*30)
+	defer done()
+
 	tenv, summary := tracing.TracedBundle(bundle.GlobalEnvironment)
 
 	procConfig := processor.NewConfig()
@@ -221,11 +311,8 @@ let ctr = content().number()
 root.count = if $ctr % 2 == 0 { throw("nah %v".format($ctr)) } else { $ctr }
 `
 
-	mgr, err := manager.NewV2(
+	mgr, err := manager.New(
 		manager.NewResourceConfig(),
-		mock.NewManager(),
-		log.Noop(),
-		metrics.Noop(),
 		manager.OptSetEnvironment(tenv),
 	)
 	require.NoError(t, err)
@@ -234,14 +321,13 @@ root.count = if $ctr % 2 == 0 { throw("nah %v".format($ctr)) } else { $ctr }
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		batch, res := proc.ProcessMessage(message.QuickBatch([][]byte{[]byte(strconv.Itoa(i))}))
+		batch, res := proc.ProcessBatch(tCtx, message.QuickBatch([][]byte{[]byte(strconv.Itoa(i))}))
 		require.Nil(t, res)
 		require.Len(t, batch, 1)
 		assert.Equal(t, 1, batch[0].Len())
 	}
 
-	proc.CloseAsync()
-	require.NoError(t, proc.WaitForClose(time.Second))
+	require.NoError(t, proc.Close(tCtx))
 
 	assert.Equal(t, uint64(0), summary.Input)
 	assert.Equal(t, uint64(5), summary.ProcessorErrors)

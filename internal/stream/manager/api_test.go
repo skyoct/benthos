@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,21 +20,19 @@ import (
 	"github.com/stretchr/testify/require"
 	yaml "gopkg.in/yaml.v3"
 
-	"github.com/benthosdev/benthos/v4/internal/bundle/mock"
-	"github.com/benthosdev/benthos/v4/internal/component/metrics"
-	"github.com/benthosdev/benthos/v4/internal/log"
 	bmanager "github.com/benthosdev/benthos/v4/internal/manager"
+	"github.com/benthosdev/benthos/v4/internal/manager/mock"
 	"github.com/benthosdev/benthos/v4/internal/message"
-	"github.com/benthosdev/benthos/v4/internal/old/input"
-	"github.com/benthosdev/benthos/v4/internal/old/output"
 	"github.com/benthosdev/benthos/v4/internal/stream"
 	"github.com/benthosdev/benthos/v4/internal/stream/manager"
 
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	_ "github.com/benthosdev/benthos/v4/public/components/io"
+	_ "github.com/benthosdev/benthos/v4/public/components/pure"
 )
 
 func router(m *manager.Type) *mux.Router {
 	router := mux.NewRouter()
+	router.HandleFunc("/ready", m.HandleStreamReady)
 	router.HandleFunc("/streams", m.HandleStreamsCRUD)
 	router.HandleFunc("/streams/{id}", m.HandleStreamCRUD)
 	router.HandleFunc("/streams/{id}/stats", m.HandleStreamStats)
@@ -41,15 +40,19 @@ func router(m *manager.Type) *mux.Router {
 	return router
 }
 
-func genRequest(verb, url string, payload interface{}) *http.Request {
+func genRequest(verb, url string, payload any) *http.Request {
 	var body io.Reader
 
 	if payload != nil {
-		bodyBytes, err := json.Marshal(payload)
-		if err != nil {
-			panic(err)
+		if s, ok := payload.(string); ok {
+			body = strings.NewReader(s)
+		} else {
+			bodyBytes, err := json.Marshal(payload)
+			if err != nil {
+				panic(err)
+			}
+			body = bytes.NewReader(bodyBytes)
 		}
-		body = bytes.NewReader(bodyBytes)
 	}
 
 	req, err := http.NewRequest(verb, url, body)
@@ -60,7 +63,7 @@ func genRequest(verb, url string, payload interface{}) *http.Request {
 	return req
 }
 
-func genYAMLRequest(verb, url string, payload interface{}) *http.Request {
+func genYAMLRequest(verb, url string, payload any) *http.Request {
 	var body io.Reader
 
 	if payload != nil {
@@ -100,10 +103,10 @@ func parseListBody(data *bytes.Buffer) listBody {
 }
 
 type getBody struct {
-	Active    bool        `json:"active"`
-	Uptime    float64     `json:"uptime"`
-	UptimeStr string      `json:"uptime_str"`
-	Config    interface{} `json:"config"`
+	Active    bool    `json:"active"`
+	Uptime    float64 `json:"uptime"`
+	UptimeStr string  `json:"uptime_str"`
+	Config    any     `json:"config"`
 }
 
 func parseGetBody(t *testing.T, data *bytes.Buffer) getBody {
@@ -125,7 +128,7 @@ func (f *endpointReg) RegisterEndpoint(path, desc string, h http.HandlerFunc) {
 
 func TestTypeAPIDisabled(t *testing.T) {
 	r := &endpointReg{endpoints: map[string]http.HandlerFunc{}}
-	rMgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), r, log.Noop(), metrics.Noop())
+	rMgr, err := bmanager.New(bmanager.NewResourceConfig(), bmanager.OptSetAPIReg(r))
 	require.NoError(t, err)
 
 	_ = manager.New(rMgr,
@@ -134,7 +137,7 @@ func TestTypeAPIDisabled(t *testing.T) {
 	assert.Greater(t, len(r.endpoints), 1)
 
 	r = &endpointReg{endpoints: map[string]http.HandlerFunc{}}
-	rMgr, err = bmanager.NewV2(bmanager.NewResourceConfig(), r, log.Noop(), metrics.Noop())
+	rMgr, err = bmanager.New(bmanager.NewResourceConfig(), bmanager.OptSetAPIReg(r))
 	require.NoError(t, err)
 
 	_ = manager.New(rMgr,
@@ -164,22 +167,27 @@ func TestTypeAPIBadMethods(t *testing.T) {
 	}
 }
 
-func harmlessConf() stream.Config {
-	c := stream.NewConfig()
-	c.Input.Type = "http_server"
-	c.Output.Type = "http_server"
-	return c
+func harmlessConf() any {
+	return map[string]any{
+		"input": map[string]any{
+			"generate": map[string]any{
+				"mapping": "root = deleted()",
+			},
+		},
+		"output": map[string]any{
+			"drop": map[string]any{},
+		},
+	}
 }
 
 func TestTypeAPIBasicOperations(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
 
 	r := router(mgr)
-	conf, err := harmlessConf().Sanitised()
-	require.NoError(t, err)
+	conf := harmlessConf()
 
 	request := genRequest("PUT", "/streams/foo", conf)
 	response := httptest.NewRecorder()
@@ -201,6 +209,13 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusBadRequest, response.Code)
 
+	assert.Eventually(t, func() bool {
+		request = genRequest("GET", "/ready", nil)
+		response = httptest.NewRecorder()
+		r.ServeHTTP(response, request)
+		return response.Code == http.StatusOK
+	}, time.Second*10, time.Millisecond*50)
+
 	request = genRequest("GET", "/streams/bar", nil)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
@@ -214,14 +229,12 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 	info := parseGetBody(t, response.Body)
 	assert.True(t, info.Active)
 
-	assert.Equal(t, conf, info.Config)
+	assert.Equal(t, "root = deleted()", gabs.Wrap(info.Config).S("input", "generate", "mapping").Data())
 
 	newConf := harmlessConf()
-	newConf.Buffer.Type = "memory"
-	newConfSanit, err := newConf.Sanitised()
-	require.NoError(t, err)
+	_, _ = gabs.Wrap(newConf).Set("memory", "buffer", "type")
 
-	request = genRequest("PUT", "/streams/foo", newConfSanit)
+	request = genRequest("PUT", "/streams/foo", newConf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
@@ -234,7 +247,7 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 	info = parseGetBody(t, response.Body)
 	assert.True(t, info.Active)
 
-	assert.Equal(t, newConfSanit, info.Config)
+	assert.Equal(t, map[string]any{}, gabs.Wrap(info.Config).S("buffer", "memory").Data())
 
 	request = genRequest("DELETE", "/streams/foo", conf)
 	response = httptest.NewRecorder()
@@ -246,7 +259,7 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
 
-	testVar := "__TEST_INPUT_TYPE"
+	testVar := "__TEST_INPUT_MAPPING"
 	originalEnv, orignalSet := os.LookupEnv(testVar)
 	defer func() {
 		_ = os.Unsetenv(testVar)
@@ -254,11 +267,18 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 			_ = os.Setenv(testVar, originalEnv)
 		}
 	}()
-	_ = os.Setenv(testVar, "http_server")
-	newConf = harmlessConf()
-	newConf.Input.Type = "${__TEST_INPUT_TYPE}"
+	_ = os.Setenv(testVar, `root.meow = 5`)
 
-	request = genRequest("POST", "/streams/fooEnv?chilled=true", newConf)
+	request = genRequest("POST", "/streams/fooEnv?chilled=true", map[string]any{
+		"input": map[string]any{
+			"generate": map[string]any{
+				"mapping": "${__TEST_INPUT_MAPPING}",
+			},
+		},
+		"output": map[string]any{
+			"type": "drop",
+		},
+	})
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
@@ -269,14 +289,9 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
 
 	info = parseGetBody(t, response.Body)
-	// replace the env var with the expected value in the struct
-	// because we will be comparing it to the rendered version.
-	newConf.Input.Type = "http_server"
-	sanitNewConf, err := newConf.Sanitised()
-	require.NoError(t, err)
 
 	assert.True(t, info.Active)
-	assert.Equal(t, sanitNewConf, info.Config)
+	assert.Equal(t, `root.meow = 5`, gabs.Wrap(info.Config).S("input", "generate", "mapping").Data())
 
 	request = genRequest("DELETE", "/streams/fooEnv", conf)
 	response = httptest.NewRecorder()
@@ -285,7 +300,7 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 }
 
 func TestTypeAPIPatch(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -303,14 +318,12 @@ func TestTypeAPIPatch(t *testing.T) {
 	request = genRequest("POST", "/streams/foo?chilled=true", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 
-	patchConf := map[string]interface{}{
-		"input": map[string]interface{}{
-			"http_server": map[string]interface{}{
-				"path": "/foobarbaz",
+	patchConf := map[string]any{
+		"input": map[string]any{
+			"generate": map[string]any{
+				"interval": "2s",
 			},
 		},
 	}
@@ -321,8 +334,7 @@ func TestTypeAPIPatch(t *testing.T) {
 		t.Errorf("Unexpected result: %v != %v", act, exp)
 	}
 
-	conf.Input.HTTPServer.Path = "/foobarbaz"
-	request = genRequest("GET", "/streams/foo", conf)
+	request = genRequest("GET", "/streams/foo", nil)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
 	if exp, act := http.StatusOK, response.Code; exp != act {
@@ -333,11 +345,11 @@ func TestTypeAPIPatch(t *testing.T) {
 		t.Fatal("Stream not active")
 	}
 
-	assert.Equal(t, conf.Input.HTTPServer.Path, gabs.Wrap(info.Config).S("input", "http_server", "path").Data())
+	assert.Equal(t, "2s", gabs.Wrap(info.Config).S("input", "generate", "interval").Data())
 }
 
 func TestTypeAPIBasicOperationsYAML(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -375,15 +387,12 @@ func TestTypeAPIBasicOperationsYAML(t *testing.T) {
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code)
 
-	sanitConf, err := conf.Sanitised()
-	require.NoError(t, err)
-
 	info := parseGetBody(t, response.Body)
 	require.True(t, info.Active)
-	assert.Equal(t, sanitConf, info.Config)
+	assert.Equal(t, "root = deleted()", gabs.Wrap(info.Config).S("input", "generate", "mapping").Data())
 
 	newConf := harmlessConf()
-	newConf.Buffer.Type = "memory"
+	_, _ = gabs.Wrap(newConf).Set("memory", "buffer", "type")
 
 	request = genYAMLRequest("PUT", "/streams/foo?chilled=true", newConf)
 	response = httptest.NewRecorder()
@@ -395,12 +404,9 @@ func TestTypeAPIBasicOperationsYAML(t *testing.T) {
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code)
 
-	sanitNewConf, err := newConf.Sanitised()
-	require.NoError(t, err)
-
 	info = parseGetBody(t, response.Body)
 	require.True(t, info.Active)
-	assert.Equal(t, sanitNewConf, info.Config)
+	assert.Equal(t, map[string]any{}, gabs.Wrap(info.Config).S("buffer", "memory").Data())
 
 	request = genYAMLRequest("DELETE", "/streams/foo", conf)
 	response = httptest.NewRecorder()
@@ -414,7 +420,7 @@ func TestTypeAPIBasicOperationsYAML(t *testing.T) {
 }
 
 func TestTypeAPIList(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -432,7 +438,12 @@ func TestTypeAPIList(t *testing.T) {
 		t.Errorf("Wrong list response: %v != %v", act, exp)
 	}
 
-	if err := mgr.Create("foo", harmlessConf()); err != nil {
+	conf := stream.NewConfig()
+	conf.Input.Type = "generate"
+	conf.Input.Generate.Mapping = "root = deleted()"
+	conf.Output.Type = "drop"
+
+	if err := mgr.Create("foo", conf); err != nil {
 		t.Fatal(err)
 	}
 
@@ -449,15 +460,20 @@ func TestTypeAPIList(t *testing.T) {
 }
 
 func TestTypeAPISetStreams(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
 
 	r := router(mgr)
 
-	require.NoError(t, mgr.Create("foo", harmlessConf()))
-	require.NoError(t, mgr.Create("bar", harmlessConf()))
+	origConf := stream.NewConfig()
+	origConf.Input.Type = "generate"
+	origConf.Input.Generate.Mapping = "root = deleted()"
+	origConf.Output.Type = "drop"
+
+	require.NoError(t, mgr.Create("foo", origConf))
+	require.NoError(t, mgr.Create("bar", origConf))
 
 	request := genRequest("GET", "/streams", nil)
 	response := httptest.NewRecorder()
@@ -469,16 +485,16 @@ func TestTypeAPISetStreams(t *testing.T) {
 	assert.True(t, info["bar"].Active)
 
 	barConf := harmlessConf()
-	barConf.Input.HTTPServer.Path = "BAR_ONE"
+	_, _ = gabs.Wrap(barConf).Set("root = this.BAR_ONE", "input", "generate", "mapping")
 	bar2Conf := harmlessConf()
-	bar2Conf.Input.HTTPServer.Path = "BAR_TWO"
+	_, _ = gabs.Wrap(bar2Conf).Set("root = this.BAR_TWO", "input", "generate", "mapping")
 	bazConf := harmlessConf()
-	bazConf.Input.HTTPServer.Path = "BAZ_ONE"
+	_, _ = gabs.Wrap(bazConf).Set("root = this.BAZ_ONE", "input", "generate", "mapping")
 
-	streamsBody := map[string]interface{}{}
-	streamsBody["bar"], _ = barConf.Sanitised()
-	streamsBody["bar2"], _ = bar2Conf.Sanitised()
-	streamsBody["baz"], _ = bazConf.Sanitised()
+	streamsBody := map[string]any{}
+	streamsBody["bar"] = barConf
+	streamsBody["bar2"] = bar2Conf
+	streamsBody["baz"] = bazConf
 
 	request = genRequest("POST", "/streams", streamsBody)
 	response = httptest.NewRecorder()
@@ -501,7 +517,7 @@ func TestTypeAPISetStreams(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
 
 	conf := parseGetBody(t, response.Body)
-	assert.Equal(t, "BAR_ONE", gabs.Wrap(conf.Config).S("input", "http_server", "path").Data())
+	assert.Equal(t, "root = this.BAR_ONE", gabs.Wrap(conf.Config).S("input", "generate", "mapping").Data())
 
 	request = genRequest("GET", "/streams/bar2", nil)
 	response = httptest.NewRecorder()
@@ -509,7 +525,7 @@ func TestTypeAPISetStreams(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
 
 	conf = parseGetBody(t, response.Body)
-	assert.Equal(t, "BAR_TWO", gabs.Wrap(conf.Config).S("input", "http_server", "path").Data())
+	assert.Equal(t, "root = this.BAR_TWO", gabs.Wrap(conf.Config).S("input", "generate", "mapping").Data())
 
 	request = genRequest("GET", "/streams/baz", nil)
 	response = httptest.NewRecorder()
@@ -517,11 +533,11 @@ func TestTypeAPISetStreams(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
 
 	conf = parseGetBody(t, response.Body)
-	assert.Equal(t, "BAZ_ONE", gabs.Wrap(conf.Config).S("input", "http_server", "path").Data())
+	assert.Equal(t, "root = this.BAZ_ONE", gabs.Wrap(conf.Config).S("input", "generate", "mapping").Data())
 }
 
 func TestTypeAPIStreamsDefaultConf(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -531,10 +547,12 @@ func TestTypeAPIStreamsDefaultConf(t *testing.T) {
 	body := []byte(`{
 	"foo": {
 		"input": {
-			"nanomsg": {}
+			"generate": {
+				"mapping": "root = deleted()"
+			}
 		},
 		"output": {
-			"nanomsg": {}
+			"drop": {}
 		}
 	}
 }`)
@@ -549,11 +567,11 @@ func TestTypeAPIStreamsDefaultConf(t *testing.T) {
 	status, err := mgr.Read("foo")
 	require.NoError(t, err)
 
-	assert.Equal(t, status.Config().Input.Nanomsg.PollTimeout, "5s")
+	assert.Equal(t, status.Config().Input.Generate.Interval, "1s")
 }
 
 func TestTypeAPIStreamsLinting(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -563,20 +581,24 @@ func TestTypeAPIStreamsLinting(t *testing.T) {
 	body := []byte(`{
 	"foo": {
 		"input": {
-			"nanomsg": {}
+			"generate": {
+				"mapping": "root = deleted()"
+			}
 		},
 		"output": {
-			"type":"nanomsg",
-			"file": {}
+			"type":"drop",
+			"inproc": "meow"
 		}
 	},
 	"bar": {
 		"input": {
-			"type":"nanomsg",
-			"file": {}
+			"generate": {
+				"mapping": "root = deleted()"
+			},
+			"type": "inproc"
 		},
 		"output": {
-			"nanomsg": {}
+			"drop": {}
 		}
 	}
 }`)
@@ -588,7 +610,7 @@ func TestTypeAPIStreamsLinting(t *testing.T) {
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusBadRequest, response.Code)
 
-	expLints := `{"lint_errors":["stream 'bar': line 14: field file is invalid when the component type is nanomsg (input)","stream 'foo': line 8: field file is invalid when the component type is nanomsg (output)"]}`
+	expLints := `{"lint_errors":["stream 'bar': (15,1) field generate is invalid when the component type is inproc (input)","stream 'foo': (10,1) field inproc is invalid when the component type is drop (output)"]}`
 	assert.Equal(t, expLints, response.Body.String())
 
 	request, err = http.NewRequest("POST", "/streams?chilled=true", bytes.NewReader(body))
@@ -600,7 +622,7 @@ func TestTypeAPIStreamsLinting(t *testing.T) {
 }
 
 func TestTypeAPIDefaultConf(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -609,10 +631,12 @@ func TestTypeAPIDefaultConf(t *testing.T) {
 
 	body := []byte(`{
 	"input": {
-		"nanomsg": {}
+		"generate": {
+			"mapping": "root = deleted()"
+		}
 	},
 	"output": {
-		"nanomsg": {}
+		"drop": {}
 	}
 }`)
 
@@ -626,11 +650,11 @@ func TestTypeAPIDefaultConf(t *testing.T) {
 	status, err := mgr.Read("foo")
 	require.NoError(t, err)
 
-	assert.Equal(t, status.Config().Input.Nanomsg.PollTimeout, "5s")
+	assert.Equal(t, status.Config().Input.Generate.Interval, "1s")
 }
 
 func TestTypeAPILinting(t *testing.T) {
-	res, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	res, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	mgr := manager.New(res)
@@ -639,11 +663,13 @@ func TestTypeAPILinting(t *testing.T) {
 
 	body := []byte(`{
 	"input": {
-		"type":"nanomsg",
-		"file": {}
+		"generate": {
+			"mapping": "root = deleted()"
+		}
 	},
 	"output": {
-		"nanomsg": {}
+		"type":"drop",
+		"inproc": "meow"
 	},
 	"cache_resources": [
 		{"label":"not_interested","memory":{}}
@@ -657,7 +683,7 @@ func TestTypeAPILinting(t *testing.T) {
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusBadRequest, response.Code)
 
-	expLints := `{"lint_errors":["line 4: field file is invalid when the component type is nanomsg (input)","line 9: field cache_resources not recognised"]}`
+	expLints := `{"lint_errors":["(9,1) field inproc is invalid when the component type is drop (output)","(11,1) field cache_resources not recognised"]}`
 	assert.Equal(t, expLints, response.Body.String())
 
 	request, err = http.NewRequest("POST", "/streams/foo?chilled=true", bytes.NewReader(body))
@@ -683,27 +709,28 @@ func TestResourceAPILinting(t *testing.T) {
   nope: nah
   compaction_interval: 1s`,
 			lints: []string{
-				"line 3: field nope not recognised",
+				"(3,1) field nope not recognised",
 			},
 		},
 		{
 			name:  "input bad",
 			ctype: "input",
-			config: `http_server:
-  path: /foo/bar
+			config: `generate:
+  mapping: root = deleted()
   nope: nah`,
 			lints: []string{
-				"line 3: field nope not recognised",
+				"(3,1) field nope not recognised",
 			},
 		},
 		{
 			name:  "output bad",
 			ctype: "output",
-			config: `http_server:
-  path: /foo/bar
+			config: `retry:
+  output:
+    drop: {}
   nope: nah`,
 			lints: []string{
-				"line 3: field nope not recognised",
+				"(4,1) field nope not recognised",
 			},
 		},
 		{
@@ -713,7 +740,7 @@ func TestResourceAPILinting(t *testing.T) {
   size: 10
   nope: nah`,
 			lints: []string{
-				"line 3: field nope not recognised",
+				"(3,1) field nope not recognised",
 			},
 		},
 		{
@@ -723,14 +750,14 @@ func TestResourceAPILinting(t *testing.T) {
   count: 10
   nope: nah`,
 			lints: []string{
-				"line 3: field nope not recognised",
+				"(3,1) field nope not recognised",
 			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			bmgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+			bmgr, err := bmanager.New(bmanager.NewResourceConfig())
 			require.NoError(t, err)
 
 			mgr := manager.New(bmgr)
@@ -767,14 +794,19 @@ func TestResourceAPILinting(t *testing.T) {
 }
 
 func TestTypeAPIGetStats(t *testing.T) {
-	mgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	mgr, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	smgr := manager.New(mgr)
 
 	r := router(smgr)
 
-	err = smgr.Create("foo", harmlessConf())
+	origConf := stream.NewConfig()
+	origConf.Input.Type = "generate"
+	origConf.Input.Generate.Mapping = "root = deleted()"
+	origConf.Output.Type = "drop"
+
+	err = smgr.Create("foo", origConf)
 	require.NoError(t, err)
 
 	<-time.After(time.Millisecond * 100)
@@ -801,7 +833,7 @@ func TestTypeAPIGetStats(t *testing.T) {
 }
 
 func TestTypeAPISetResources(t *testing.T) {
-	bmgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), mock.NewManager(), log.Noop(), metrics.Noop())
+	bmgr, err := bmanager.New(bmanager.NewResourceConfig())
 	require.NoError(t, err)
 
 	tChan := make(chan message.Transaction)
@@ -828,9 +860,9 @@ file:
 	assert.Equal(t, http.StatusOK, hResponse.Code, hResponse.Body.String())
 
 	streamConf := stream.NewConfig()
-	streamConf.Input.Type = input.TypeInproc
+	streamConf.Input.Type = "inproc"
 	streamConf.Input.Inproc = "feed_in"
-	streamConf.Output.Type = output.TypeCache
+	streamConf.Output.Type = "cache"
 	streamConf.Output.Cache.Key = `${! json("id") }`
 	streamConf.Output.Cache.Target = "foocache"
 
@@ -885,4 +917,56 @@ file:
 	file2Bytes, err := os.ReadFile(filepath.Join(dir2, "second"))
 	require.NoError(t, err)
 	assert.Equal(t, `{"id":"second","content":"hello world 2"}`, string(file2Bytes))
+}
+
+func TestAPIReady(t *testing.T) {
+	res, err := bmanager.New(bmanager.NewResourceConfig())
+	require.NoError(t, err)
+
+	mgr := manager.New(res)
+
+	r := router(mgr)
+
+	request := genRequest("POST", "/streams/foo", `
+input:
+  generate:
+    count: 1
+    mapping: 'root = {}'
+    interval: ""
+
+output:
+  drop: {}
+`)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+
+	assert.Eventually(t, func() bool {
+		request = genRequest("GET", "/ready", nil)
+		response = httptest.NewRecorder()
+		r.ServeHTTP(response, request)
+		return response.Code == http.StatusOK
+	}, time.Second*10, time.Millisecond*50)
+
+	request = genRequest("POST", "/streams/bar", `
+input:
+  generate:
+    count: 1
+    mapping: 'root = {}'
+    interval: ""
+
+output:
+  websocket:
+    url: not**a**valid**url
+`)
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+
+	assert.Eventually(t, func() bool {
+		request = genRequest("GET", "/ready", nil)
+		response = httptest.NewRecorder()
+		r.ServeHTTP(response, request)
+		return response.Code == http.StatusServiceUnavailable
+	}, time.Second*10, time.Millisecond*50)
 }

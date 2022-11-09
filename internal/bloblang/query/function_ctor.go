@@ -4,7 +4,7 @@ package query
 // query.
 type Function interface {
 	// Execute this function for a message of a batch.
-	Exec(ctx FunctionContext) (interface{}, error)
+	Exec(ctx FunctionContext) (any, error)
 
 	// Annotation returns a string token to identify the function within error
 	// messages. The returned token is not valid Bloblang and cannot be used to
@@ -37,18 +37,18 @@ type FunctionCtor func(args *ParsedParams) (Function, error)
 // state.
 func ClosureFunction(
 	annotation string,
-	exec func(ctx FunctionContext) (interface{}, error),
+	exec func(ctx FunctionContext) (any, error),
 	queryTargets func(ctx TargetsContext) (TargetsContext, []TargetPath),
 ) Function {
 	if queryTargets == nil {
 		queryTargets = func(ctx TargetsContext) (TargetsContext, []TargetPath) { return ctx, nil }
 	}
-	return closureFunction{annotation, exec, queryTargets}
+	return closureFunction{annotation: annotation, exec: exec, queryTargets: queryTargets}
 }
 
 type closureFunction struct {
 	annotation   string
-	exec         func(ctx FunctionContext) (interface{}, error)
+	exec         func(ctx FunctionContext) (any, error)
 	queryTargets func(ctx TargetsContext) (TargetsContext, []TargetPath)
 }
 
@@ -57,7 +57,7 @@ func (f closureFunction) Annotation() string {
 }
 
 // Exec the underlying closure.
-func (f closureFunction) Exec(ctx FunctionContext) (interface{}, error) {
+func (f closureFunction) Exec(ctx FunctionContext) (any, error) {
 	return f.exec(ctx)
 }
 
