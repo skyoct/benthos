@@ -1,0 +1,11 @@
+build_job:
+  stage: build
+  only:
+    #    - branches
+    - tags
+  script:
+    - MTAG=${CI_COMMIT_TAG}; if [[ ! $MTAG ]]; then MTAG=${CI_COMMIT_BRANCH}; fi
+    - docker build -t metaapp-registry-vpc.cn-beijing.cr.aliyuncs.com/metaops/bigdata-${CI_PROJECT_NAME}:${MTAG} .
+    - docker push metaapp-registry-vpc.cn-beijing.cr.aliyuncs.com/metaops/bigdata-${CI_PROJECT_NAME}:${MTAG}
+    - docker tag metaapp-registry-vpc.cn-beijing.cr.aliyuncs.com/metaops/bigdata-${CI_PROJECT_NAME}:${MTAG} uswccr.ccs.tencentyun.com/bigdata/bigdata-${CI_PROJECT_NAME}:${MTAG}
+    - docker push uswccr.ccs.tencentyun.com/bigdata/bigdata-${CI_PROJECT_NAME}:${MTAG}
